@@ -15,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.4-734-LAYOUT-FIX"
+APP_VERSION = "0.6.5-734-MARKET-DETECT"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -132,8 +132,16 @@ def parse_734_lines(text, away, home):
     # one 734 screenshot is usually MONEY LINE + TOTAL,
     # another is SPREAD + TOTAL.
     # Do not let the spread screenshot overwrite ML with +109/-139.
-    is_moneyline_screen = "MONEY LINE" in upper_text or "MONEYLINE" in upper_text
-    is_spread_screen = "SPREAD" in upper_text or "RUN LINE" in upper_text
+    header_moneyline = "MONEY LINE" in upper_text or "MONEYLINE" in upper_text
+    header_spread = "SPREAD" in upper_text or "RUN LINE" in upper_text
+
+    # Do not rely on the header alone. On iPhone screenshots Tesseract may miss
+    # the MONEY LINE / SPREAD label even when the prices themselves are clear.
+    # Presence of a full-game +/-1.5 token is a strong spread-screen signal.
+    pre_f5_probe = re.split(r"(?i)1st\s*5\s*innings|first\s*5\s*innings", t)[0]
+    has_fullgame_spread = bool(re.search(r"(?<!\d)[+-]\s*1\.5(?!\d)", pre_f5_probe))
+    is_spread_screen = header_spread or has_fullgame_spread
+    is_moneyline_screen = header_moneyline or not is_spread_screen
 
     # Build nearby OCR windows because 734 sometimes breaks team / price / total
     # into separate lines.
@@ -170,37 +178,72 @@ def parse_734_lines(text, away, home):
         for side, row in [("away", away_row), ("home", home_row)]:
             if not row:
                 continue
-            odds = american_numbers(row)
-            # On 734 ML screenshot the ML is the first American price in that row.
+
+            # Strip the O/U portion first. That prevents total juice (-111/-119)
+            # from ever being mistaken for the moneyline.
+            price_zone = re.split(r"(?i)\b(?:over|under|o|u)\s*[6-9]", row, maxsplit=1)[0]
+            odds = american_numbers(price_zone)
             if odds:
-                result[f"{side}_ml"] = odds[0]
+                result[f"{side}_ml"] = odds[-1]
+
+        # If OCR split team name and ML price onto different lines, search a
+        # short window after the team name, still above the F5 section.
+        pre_f5_rows = re.split(r"(?i)1st\s*5\s*innings|first\s*5\s*innings", t)[0]
+        for side, keys in [("away", away_keys), ("home", home_keys)]:
+            if result[f"{side}_ml"] is not None:
+                continue
+            for key in keys:
+                m = re.search(re.escape(key) + r".{0,90}", pre_f5_rows, re.I | re.S)
+                if m:
+                    zone = re.split(r"(?i)\b(?:over|under|o|u)\s*[6-9]", m.group(0), maxsplit=1)[0]
+                    odds = american_numbers(zone)
+                    if odds:
+                        result[f"{side}_ml"] = odds[0]
+                        break
 
     # -------------------------
     # RUN LINE / SPREAD
     # -------------------------
     if is_spread_screen:
-        spread_pat = re.compile(r"([+-]1\.5)\D{0,30}?([+-]\s?\d{3,4})(?!\d)", re.I)
+        spread_pat = re.compile(r"([+-]1\.5)\D{0,35}?\(?\s*([+-]\d{3,4})\s*\)?", re.I)
 
+        # First choice: parse each full-game team row.
         for side, row in [("away", away_row), ("home", home_row)]:
             if not row:
                 continue
             m = spread_pat.search(row)
             if m:
-                result[f"{side}_rl_side"] = m.group(1).replace(" ", "")
-                result[f"{side}_rl_odds"] = int(m.group(2).replace(" ", ""))
+                result[f"{side}_rl_side"] = m.group(1)
+                result[f"{side}_rl_odds"] = int(m.group(2))
 
-        # Fallback: look at pre-F5 windows only.
+        # Second choice: parse all spread/price pairs above 1st 5. 734 displays
+        # the away team first and home team second, so row order is deterministic.
         if result["away_rl_odds"] is None or result["home_rl_odds"] is None:
-            pre_f5_text = t.split("1st 5")[0].split("1ST 5")[0]
-            candidates = [
-                (m.group(1).replace(" ", ""), int(m.group(2).replace(" ", "")))
-                for m in spread_pat.finditer(pre_f5_text)
-            ]
-            if len(candidates) >= 2:
+            pairs = []
+            for m in spread_pat.finditer(pre_f5_probe):
+                pair = (m.group(1), int(m.group(2)))
+                if pair not in pairs:
+                    pairs.append(pair)
+
+            if len(pairs) >= 2:
                 if result["away_rl_odds"] is None:
-                    result["away_rl_side"], result["away_rl_odds"] = candidates[0]
+                    result["away_rl_side"], result["away_rl_odds"] = pairs[0]
                 if result["home_rl_odds"] is None:
-                    result["home_rl_side"], result["home_rl_odds"] = candidates[1]
+                    result["home_rl_side"], result["home_rl_odds"] = pairs[1]
+
+        # Third choice: locate +/-1.5 and take the nearest American price.
+        if result["away_rl_odds"] is None or result["home_rl_odds"] is None:
+            loose = []
+            for m in re.finditer(r"(?<!\d)([+-]1\.5)(?!\d)", pre_f5_probe):
+                chunk = pre_f5_probe[m.start():m.start()+70]
+                odds = american_numbers(chunk)
+                if odds:
+                    loose.append((m.group(1), odds[0]))
+            if len(loose) >= 2:
+                if result["away_rl_odds"] is None:
+                    result["away_rl_side"], result["away_rl_odds"] = loose[0]
+                if result["home_rl_odds"] is None:
+                    result["home_rl_side"], result["home_rl_odds"] = loose[1]
 
     # -------------------------
     # FULL-GAME TOTAL
@@ -451,9 +494,9 @@ if "last_results" in st.session_state:
                         merged = {
                             "away_ml": None,
                             "home_ml": None,
-                            "away_rl_side": "+1.5",
+                            "away_rl_side": None,
                             "away_rl_odds": None,
-                            "home_rl_side": "-1.5",
+                            "home_rl_side": None,
                             "home_rl_odds": None,
                             "total_line": None,
                             "over_odds": None,
@@ -480,8 +523,8 @@ if "last_results" in st.session_state:
                             "**Detected:** "
                             f"{away} ML {merged.get('away_ml')} | "
                             f"{home} ML {merged.get('home_ml')} | "
-                            f"{away} {merged.get('away_rl_side')} {merged.get('away_rl_odds')} | "
-                            f"{home} {merged.get('home_rl_side')} {merged.get('home_rl_odds')} | "
+                            f"{away} RL {merged.get('away_rl_side')} {merged.get('away_rl_odds')} | "
+                            f"{home} RL {merged.get('home_rl_side')} {merged.get('home_rl_odds')} | "
                             f"Total {merged.get('total_line')} | "
                             f"Over {merged.get('over_odds')} | Under {merged.get('under_odds')}"
                         )
