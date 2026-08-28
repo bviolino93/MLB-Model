@@ -15,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.3-SMARTER-OCR"
+APP_VERSION = "0.6.4-734-LAYOUT-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -83,13 +83,25 @@ def normalize_734_text(text):
         .replace("1/2", ".5")
     )
 
-    # Common OCR variations for baseball run lines.
-    t = re.sub(r'([+-])\s*1\s*[.,|:/]\s*5\b', r'\g<1>1.5', t)
-    t = re.sub(r'([+-])\s*1\s+5\b', r'\g<1>1.5', t)
+    # 734's small ½ glyph is commonly read by Tesseract as %, y%, '%, '4, etc.
+    # Examples seen in actual screenshots:
+    #   o8½  -> 08% / o8% / o8y%
+    #   u8½  -> u8% / u8y%
+    #   -1½  -> -1'% / -1'4
+    #   +1½  -> +1%
+    #
+    # Normalize those OCR shapes before market parsing.
+    t = re.sub(r"(?i)\b[o0]\s*([6-9]|1[0-4])\s*y?\s*%", r"o\1.5", t)
+    t = re.sub(r"(?i)\bu\s*([6-9]|1[0-4])\s*y?\s*%", r"u\1.5", t)
 
-    # "+15" / "-15" is a common OCR miss for "+1.5" / "-1.5".
-    # It is safe here because American odds are filtered to 3+ digits elsewhere.
-    t = re.sub(r'(?<!\d)([+-])15(?!\d)', r'\g<1>1.5', t)
+    # Full-game run line 1½.
+    t = re.sub(r"(?<!\d)([+-])\s*1\s*['’`´]?\s*[%4](?!\d)", r"\g<1>1.5", t)
+    t = re.sub(r"(?<!\d)([+-])\s*1\s*[.,|:/]\s*5\b", r"\g<1>1.5", t)
+    t = re.sub(r"(?<!\d)([+-])\s*1\s+5\b", r"\g<1>1.5", t)
+    t = re.sub(r"(?<!\d)([+-])15(?!\d)", r"\g<1>1.5", t)
+
+    # Occasionally "o" is recognized as zero.
+    t = re.sub(r"(?i)(?<!\w)0(?=\s*(?:[6-9]|1[0-4])(?:\.5)?)", "o", t)
 
     return t
 
@@ -107,16 +119,24 @@ def valid_total(x):
 def parse_734_lines(text, away, home):
     result = {
         "away_ml": None, "home_ml": None,
-        "away_rl_side": "+1.5", "away_rl_odds": None,
-        "home_rl_side": "-1.5", "home_rl_odds": None,
+        "away_rl_side": None, "away_rl_odds": None,
+        "home_rl_side": None, "home_rl_odds": None,
         "total_line": None, "over_odds": None, "under_odds": None,
     }
 
     t = normalize_734_text(text)
-    raw_lines = [re.sub(r"\\s+", " ", x).strip() for x in t.splitlines() if x.strip()]
+    raw_lines = [re.sub(r"\s+", " ", x).strip() for x in t.splitlines() if x.strip()]
+    upper_text = t.upper()
 
-    # Also inspect 2- and 3-line windows because OCR often puts the team/market
-    # name on one line and the price on the next line.
+    # Important for multi-screenshot uploads:
+    # one 734 screenshot is usually MONEY LINE + TOTAL,
+    # another is SPREAD + TOTAL.
+    # Do not let the spread screenshot overwrite ML with +109/-139.
+    is_moneyline_screen = "MONEY LINE" in upper_text or "MONEYLINE" in upper_text
+    is_spread_screen = "SPREAD" in upper_text or "RUN LINE" in upper_text
+
+    # Build nearby OCR windows because 734 sometimes breaks team / price / total
+    # into separate lines.
     windows = list(raw_lines)
     for i in range(len(raw_lines) - 1):
         windows.append(raw_lines[i] + " " + raw_lines[i + 1])
@@ -126,147 +146,121 @@ def parse_734_lines(text, away, home):
     away_keys = [away.lower(), nickname(away).lower()]
     home_keys = [home.lower(), nickname(home).lower()]
 
+    def team_line(team_keys):
+        # Prefer the full-game team rows before "1st 5 Innings".
+        pre_f5 = []
+        for line in raw_lines:
+            if "1st 5" in line.lower() or "first 5" in line.lower():
+                break
+            pre_f5.append(line)
+
+        for line in pre_f5:
+            ll = line.lower()
+            if any(k in ll for k in team_keys):
+                return line
+        return None
+
+    away_row = team_line(away_keys)
+    home_row = team_line(home_keys)
+
     # -------------------------
     # MONEYLINE
     # -------------------------
-    team_hits = {"away": [], "home": []}
-    for line in windows:
-        ll = line.lower()
-        odds = american_numbers(line)
-        if not odds:
-            continue
-        if any(k in ll for k in away_keys):
-            team_hits["away"].extend(odds)
-        if any(k in ll for k in home_keys):
-            team_hits["home"].extend(odds)
-
-    if team_hits["away"]:
-        result["away_ml"] = team_hits["away"][0]
-    if team_hits["home"]:
-        result["home_ml"] = team_hits["home"][0]
+    if is_moneyline_screen:
+        for side, row in [("away", away_row), ("home", home_row)]:
+            if not row:
+                continue
+            odds = american_numbers(row)
+            # On 734 ML screenshot the ML is the first American price in that row.
+            if odds:
+                result[f"{side}_ml"] = odds[0]
 
     # -------------------------
     # RUN LINE / SPREAD
     # -------------------------
-    spread_pat = re.compile(r'([+-]1\\.5)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)', re.I)
-    spread_candidates = []
+    if is_spread_screen:
+        spread_pat = re.compile(r"([+-]1\.5)\D{0,30}?([+-]\s?\d{3,4})(?!\d)", re.I)
 
-    for line in windows:
-        ll = line.lower()
-        for m in spread_pat.finditer(line):
-            side = m.group(1).replace(" ", "")
-            odds = int(m.group(2).replace(" ", ""))
-            if not (100 <= abs(odds) <= 1000):
+        for side, row in [("away", away_row), ("home", home_row)]:
+            if not row:
                 continue
+            m = spread_pat.search(row)
+            if m:
+                result[f"{side}_rl_side"] = m.group(1).replace(" ", "")
+                result[f"{side}_rl_odds"] = int(m.group(2).replace(" ", ""))
 
-            spread_candidates.append((side, odds, line))
-
-            if any(k in ll for k in away_keys):
-                result["away_rl_side"] = side
-                result["away_rl_odds"] = odds
-            if any(k in ll for k in home_keys):
-                result["home_rl_side"] = side
-                result["home_rl_odds"] = odds
-
-    # Fallback for table-style 734 screenshots where team names are detached
-    # from the spread prices. Prefer one +1.5 and one -1.5 candidate.
-    plus = [(s, o, l) for s, o, l in spread_candidates if s == "+1.5"]
-    minus = [(s, o, l) for s, o, l in spread_candidates if s == "-1.5"]
-
-    if result["away_rl_odds"] is None and result["home_rl_odds"] is None:
-        if plus and minus:
-            # Away underdog convention is common, but do not assume blindly.
-            # Use ML direction when available to determine favorite.
-            if result["away_ml"] is not None and result["home_ml"] is not None:
-                away_is_dog = result["away_ml"] > 0 and result["home_ml"] < 0
-                home_is_dog = result["home_ml"] > 0 and result["away_ml"] < 0
-
-                if away_is_dog:
-                    result["away_rl_side"], result["away_rl_odds"] = plus[0][0], plus[0][1]
-                    result["home_rl_side"], result["home_rl_odds"] = minus[0][0], minus[0][1]
-                elif home_is_dog:
-                    result["away_rl_side"], result["away_rl_odds"] = minus[0][0], minus[0][1]
-                    result["home_rl_side"], result["home_rl_odds"] = plus[0][0], plus[0][1]
-
-    # "Spread +1.5 -130 -1.5 +100" style row.
-    if result["away_rl_odds"] is None or result["home_rl_odds"] is None:
-        for line in windows:
-            if "spread" not in line.lower() and "run line" not in line.lower():
-                continue
-            pairs = [(m.group(1), int(m.group(2).replace(" ", ""))) for m in spread_pat.finditer(line)]
-            if len(pairs) >= 2 and result["away_ml"] is not None and result["home_ml"] is not None:
-                plus_pair = next((p for p in pairs if p[0] == "+1.5"), None)
-                minus_pair = next((p for p in pairs if p[0] == "-1.5"), None)
-                if plus_pair and minus_pair:
-                    if result["away_ml"] > result["home_ml"]:
-                        result["away_rl_side"], result["away_rl_odds"] = plus_pair
-                        result["home_rl_side"], result["home_rl_odds"] = minus_pair
-                    else:
-                        result["away_rl_side"], result["away_rl_odds"] = minus_pair
-                        result["home_rl_side"], result["home_rl_odds"] = plus_pair
-                    break
+        # Fallback: look at pre-F5 windows only.
+        if result["away_rl_odds"] is None or result["home_rl_odds"] is None:
+            pre_f5_text = t.split("1st 5")[0].split("1ST 5")[0]
+            candidates = [
+                (m.group(1).replace(" ", ""), int(m.group(2).replace(" ", "")))
+                for m in spread_pat.finditer(pre_f5_text)
+            ]
+            if len(candidates) >= 2:
+                if result["away_rl_odds"] is None:
+                    result["away_rl_side"], result["away_rl_odds"] = candidates[0]
+                if result["home_rl_odds"] is None:
+                    result["home_rl_side"], result["home_rl_odds"] = candidates[1]
 
     # -------------------------
-    # TOTAL
+    # FULL-GAME TOTAL
     # -------------------------
-    # Accept Over 9 -104, O 9 -104, O9 -104, etc.
+    # Only inspect text above the 1st-5 section so 4½ cannot be mistaken for
+    # the game total.
+    pre_f5_text = re.split(r"(?i)1st\s*5\s*innings|first\s*5\s*innings", t)[0]
+
+    # Handles: o8.5 (-111), O 8.5 -111, u8.5 (-119)
     over_pat = re.compile(
-        r'\\b(?:over|ovr|o)\\s*[:\\-]?\\s*([0-9]{1,2}(?:\\.5)?)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)',
-        re.I,
+        r"(?i)\b(?:over|ovr|o)\s*([6-9]|1[0-4])(?:\.5)?"
+        r"(?P<half>\.5)?\D{0,30}?\(\s*([+-]\d{3,4})\s*\)"
     )
     under_pat = re.compile(
-        r'\\b(?:under|undr|u)\\s*[:\\-]?\\s*([0-9]{1,2}(?:\\.5)?)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)',
-        re.I,
+        r"(?i)\b(?:under|undr|u)\s*([6-9]|1[0-4])(?:\.5)?"
+        r"(?P<half>\.5)?\D{0,30}?\(\s*([+-]\d{3,4})\s*\)"
     )
 
-    for line in windows:
-        mo = over_pat.search(line)
-        if mo and valid_total(mo.group(1)):
-            result["total_line"] = float(mo.group(1))
-            result["over_odds"] = int(mo.group(2).replace(" ", ""))
+    # Simpler patterns are more reliable after our 734 normalization.
+    simple_over = re.compile(r"(?i)\b(?:over|o)\s*([6-9]|1[0-4])(\.5)?\s*\(\s*([+-]\d{3,4})\s*\)")
+    simple_under = re.compile(r"(?i)\b(?:under|u)\s*([6-9]|1[0-4])(\.5)?\s*\(\s*([+-]\d{3,4})\s*\)")
 
-        mu = under_pat.search(line)
-        if mu and valid_total(mu.group(1)):
+    mo = simple_over.search(pre_f5_text)
+    mu = simple_under.search(pre_f5_text)
+
+    if mo:
+        total = float(mo.group(1)) + (0.5 if mo.group(2) else 0.0)
+        if valid_total(total):
+            result["total_line"] = total
+            result["over_odds"] = int(mo.group(3))
+
+    if mu:
+        total = float(mu.group(1)) + (0.5 if mu.group(2) else 0.0)
+        if valid_total(total):
             if result["total_line"] is None:
-                result["total_line"] = float(mu.group(1))
-            result["under_odds"] = int(mu.group(2).replace(" ", ""))
+                result["total_line"] = total
+            result["under_odds"] = int(mu.group(3))
 
-    # Table-style fallback:
-    # "Total 9 -104 -126" or "9 O -104 U -126".
-    if result["over_odds"] is None or result["under_odds"] is None:
-        for line in windows:
-            ll = line.lower()
-            if "total" not in ll and not re.search(r'\\b[ou]\\b', ll):
-                continue
+    # Row-aware fallback from actual 734 layout.
+    # OCR examples:
+    # "Marlins -137 o8.5 (-111)"
+    # "Nationals +118 u8.5 (-119)"
+    # "Marlins -1.5 (+109) o8.5 (-111)"
+    # "Nationals +1.5 (-139) u8.5 (-119)"
+    if result["over_odds"] is None and away_row:
+        m = simple_over.search(away_row)
+        if m:
+            total = float(m.group(1)) + (0.5 if m.group(2) else 0.0)
+            result["total_line"] = total
+            result["over_odds"] = int(m.group(3))
 
-            total_nums = re.findall(r'(?<!\\d)([6-9](?:\\.5)?|1[0-4](?:\\.5)?)(?!\\d)', line)
-            total_nums = [float(x) for x in total_nums if valid_total(x)]
-            odds = american_numbers(line)
-
-            if total_nums and len(odds) >= 2:
-                if result["total_line"] is None:
-                    result["total_line"] = total_nums[0]
-
-                # If explicit O/U positions exist, use them. Otherwise 734's
-                # full-game total display is conventionally Over first, Under second.
-                if result["over_odds"] is None:
-                    result["over_odds"] = odds[0]
-                if result["under_odds"] is None:
-                    result["under_odds"] = odds[1]
-                break
-
-    # Last-resort nearby-label fallback with a wider OCR window.
-    if result["over_odds"] is None:
-        vals = nearby_odds(t, "over", window=320)
-        if vals:
-            result["over_odds"] = vals[0]
-    if result["under_odds"] is None:
-        vals = nearby_odds(t, "under", window=320)
-        if vals:
-            result["under_odds"] = vals[0]
+    if result["under_odds"] is None and home_row:
+        m = simple_under.search(home_row)
+        if m:
+            total = float(m.group(1)) + (0.5 if m.group(2) else 0.0)
+            if result["total_line"] is None:
+                result["total_line"] = total
+            result["under_odds"] = int(m.group(3))
 
     return result
-
 
 
 def sync_parsed_to_widgets(parsed, game_pk):
@@ -445,7 +439,7 @@ if "last_results" in st.session_state:
         )
 
         if uploads:
-            st.caption(f"{len(uploads)} screenshot(s) selected")
+            st.caption(f"{len(uploads)} screenshot(s) selected — you can upload the MONEY LINE screen and the SPREAD screen together.")
             for i, uploaded in enumerate(uploads, start=1):
                 uploaded.seek(0)
                 image = Image.open(uploaded)
