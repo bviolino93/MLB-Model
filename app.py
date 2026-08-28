@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps, ImageFilter
 import pytesseract
+from scipy.stats import poisson
 
 from model import (
     MODEL_VERSION,
@@ -14,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.1-SCREENSHOT-BET"
+APP_VERSION = "0.6.2-MULTI-SCREENSHOT-TOTAL"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -162,6 +163,58 @@ def add_market(rows, name, prob, odds, conf):
     })
 
 
+
+def total_market_probs(model_total, line, side):
+    """Experimental Poisson total distribution centered on the model total."""
+    lam = max(0.10, float(model_total))
+    line = float(line)
+    is_integer = abs(line - round(line)) < 1e-9
+
+    if is_integer:
+        n = int(round(line))
+        p_push = float(poisson.pmf(n, lam))
+        if side == "Over":
+            p_win = float(1.0 - poisson.cdf(n, lam))
+            p_loss = float(poisson.cdf(n - 1, lam))
+        else:
+            p_win = float(poisson.cdf(n - 1, lam))
+            p_loss = float(1.0 - poisson.cdf(n, lam))
+    else:
+        n = int(line // 1)
+        p_push = 0.0
+        if side == "Over":
+            p_win = float(1.0 - poisson.cdf(n, lam))
+            p_loss = float(poisson.cdf(n, lam))
+        else:
+            p_win = float(poisson.cdf(n, lam))
+            p_loss = float(1.0 - poisson.cdf(n, lam))
+
+    return {"win": p_win, "push": p_push, "loss": p_loss}
+
+def total_expected_value(probs, odds):
+    odds = float(odds)
+    profit = odds / 100.0 if odds > 0 else 100.0 / abs(odds)
+    return probs["win"] * profit - probs["loss"]
+
+def total_bet_grade(model_total, line, side, odds, confidence):
+    probs = total_market_probs(model_total, line, side)
+    decisive = probs["win"] + probs["loss"]
+    conditional_win = probs["win"] / decisive if decisive > 0 else 0.5
+    imp = implied_prob(odds)
+    edge = conditional_win - imp
+    ev = total_expected_value(probs, odds)
+
+    if confidence >= 80 and edge >= 0.04 and ev >= 0.08:
+        verdict = "STRONG BET"
+    elif confidence >= 70 and edge >= 0.025 and ev >= 0.05:
+        verdict = "BET"
+    elif edge > 0 and ev > 0:
+        verdict = "LEAN"
+    else:
+        verdict = "PASS"
+
+    return verdict, edge, ev, imp, conditional_win, probs
+
 st.title("⚾ MLB Model")
 st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")
 
@@ -229,21 +282,52 @@ if "last_results" in st.session_state:
         st.caption(f"Confidence: {conf}/100 ({row['Confidence_Grade']}) • {row['Data_Status']}")
 
         st.divider()
-        st.subheader("📸 Upload 734 Lines Screenshot")
-        uploaded = st.file_uploader("Upload a screenshot from 734 Games", type=["png", "jpg", "jpeg", "webp"])
+        st.subheader("📸 Upload 734 Lines Screenshots")
+        uploads = st.file_uploader(
+            "Upload one or more screenshots from 734 Games",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+        )
 
-        if uploaded is not None:
-            image = Image.open(uploaded)
-            st.image(image, caption="Uploaded sportsbook screenshot", use_container_width=True)
-            if st.button("🔎 Read Lines From Screenshot"):
-                with st.spinner("Reading sportsbook lines..."):
+        if uploads:
+            st.caption(f"{len(uploads)} screenshot(s) selected")
+            for i, uploaded in enumerate(uploads, start=1):
+                uploaded.seek(0)
+                image = Image.open(uploaded)
+                st.image(image, caption=f"Sportsbook screenshot {i}", use_container_width=True)
+
+            if st.button("🔎 Read Lines From Screenshots"):
+                with st.spinner("Reading sportsbook lines from all screenshots..."):
                     try:
-                        text = ocr_text(image)
-                        st.session_state.parsed_lines = parse_734_lines(text, away, home)
-                        st.session_state.ocr_raw = text
-                        st.success("Screenshot read. Check the numbers below before using the verdict.")
+                        merged = {
+                            "away_ml": None,
+                            "home_ml": None,
+                            "away_rl_side": "+1.5",
+                            "away_rl_odds": None,
+                            "home_rl_side": "-1.5",
+                            "home_rl_odds": None,
+                            "total_line": None,
+                            "over_odds": None,
+                            "under_odds": None,
+                        }
+                        all_text = []
+
+                        for uploaded in uploads:
+                            uploaded.seek(0)
+                            image = Image.open(uploaded)
+                            shot_text = ocr_text(image)
+                            all_text.append(shot_text)
+                            shot_parsed = parse_734_lines(shot_text, away, home)
+
+                            for key, value in shot_parsed.items():
+                                if value is not None:
+                                    merged[key] = value
+
+                        st.session_state.parsed_lines = merged
+                        st.session_state.ocr_raw = "\n\n===== NEXT SCREENSHOT =====\n\n".join(all_text)
+                        st.success("Screenshots read. Check the numbers below before using the verdict.")
                     except Exception as e:
-                        st.error(f"Could not read screenshot: {e}")
+                        st.error(f"Could not read screenshots: {e}")
 
         if "ocr_raw" in st.session_state:
             with st.expander("OCR text / troubleshooting"):
@@ -302,9 +386,78 @@ if "last_results" in st.session_state:
 
             gap = row["Model_Total"] - total_line
             st.markdown("#### Total")
-            st.write(f"Model total **{row['Model_Total']:.2f}** vs market **{total_line:.1f}** → gap **{gap:+.2f} runs**.")
-            st.info("⚪ **TOTAL: NO BET from the current engine.** v0.5.2 does not yet have a calibrated Over/Under probability distribution, so the app will not label an Over or Under as a bet based only on the mean projection.")
-            st.caption("BET = confidence ≥70, edge ≥2.5 percentage points, EV ≥5%. STRONG BET = confidence ≥80, edge ≥4 points, EV ≥8%. Positive value below those levels = LEAN.")
+
+            over_verdict, over_edge, over_ev, over_imp, over_model_prob, over_probs = total_bet_grade(
+                row["Model_Total"], total_line, "Over", over_odds, conf
+            )
+            under_verdict, under_edge, under_ev, under_imp, under_model_prob, under_probs = total_bet_grade(
+                row["Model_Total"], total_line, "Under", under_odds, conf
+            )
+
+            total_markets = [
+                {
+                    "Bet": f"Over {total_line:g}",
+                    "Verdict": over_verdict,
+                    "Odds": int(over_odds),
+                    "Model Prob": over_model_prob,
+                    "Push Prob": over_probs["push"],
+                    "Implied Prob": over_imp,
+                    "Edge": over_edge,
+                    "EV": over_ev,
+                },
+                {
+                    "Bet": f"Under {total_line:g}",
+                    "Verdict": under_verdict,
+                    "Odds": int(under_odds),
+                    "Model Prob": under_model_prob,
+                    "Push Prob": under_probs["push"],
+                    "Implied Prob": under_imp,
+                    "Edge": under_edge,
+                    "EV": under_ev,
+                },
+            ]
+
+            total_rank = {"STRONG BET": 3, "BET": 2, "LEAN": 1, "PASS": 0}
+            total_markets = sorted(
+                total_markets,
+                key=lambda x: (total_rank[x["Verdict"]], x["EV"]),
+                reverse=True,
+            )
+            best_total = total_markets[0]
+
+            if best_total["Verdict"] in ["STRONG BET", "BET"]:
+                st.success(
+                    f"{icon(best_total['Verdict'])} **TOTAL {best_total['Verdict']}: "
+                    f"{best_total['Bet']} {best_total['Odds']:+d}**\n\n"
+                    f"Model edge: **{best_total['Edge']*100:+.1f}%** • EV: **{best_total['EV']*100:+.1f}%**"
+                )
+            elif best_total["Verdict"] == "LEAN":
+                st.warning(
+                    f"🟡 **TOTAL LEAN: {best_total['Bet']} {best_total['Odds']:+d}**\n\n"
+                    "Positive model value, but it does **not** clear the bet threshold."
+                )
+            else:
+                st.info("⚪ **TOTAL: PASS** — neither side clears the model's bet threshold.")
+
+            st.write(
+                f"Model total **{row['Model_Total']:.2f}** vs market **{total_line:.1f}** "
+                f"→ projection gap **{gap:+.2f} runs**."
+            )
+
+            for m in total_markets:
+                push_text = f" • Push {m['Push Prob']*100:.1f}%" if m["Push Prob"] > 0 else ""
+                st.markdown(
+                    f"""<div class="bet-card"><div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {m['Odds']:+d}</div>
+                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}%{push_text}</div>""",
+                    unsafe_allow_html=True,
+                )
+
+            st.caption(
+                "BET = confidence ≥70, edge ≥2.5 percentage points, EV ≥5%. "
+                "STRONG BET = confidence ≥80, edge ≥4 points, EV ≥8%. "
+                "Positive value below those levels = LEAN. "
+                "Total probabilities are EXPERIMENTAL and use a Poisson distribution centered on the model total."
+            )
 
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download Result CSV", data=csv, file_name=f"mlb_model_{away.replace(' ', '_')}_at_{home.replace(' ', '_')}.csv", mime="text/csv")
@@ -319,4 +472,4 @@ if "last_results" in st.session_state:
         st.download_button("⬇️ Download Full Slate CSV", data=df.to_csv(index=False).encode("utf-8"), file_name="mlb_model_full_slate.csv", mime="text/csv")
 
 st.divider()
-st.caption("Screenshot OCR is best-effort; always verify parsed sportsbook prices. Run-line probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
+st.caption("Screenshot OCR is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
