@@ -15,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.5-734-MARKET-DETECT"
+APP_VERSION = "0.6.7-734-FIXED-CELLS"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -116,7 +116,329 @@ def valid_total(x):
         return False
 
 
-def parse_734_lines(text, away, home):
+
+def _ocr_tokens(image):
+    """
+    OCR with coordinates. 734 is a fixed table layout, so row position is more
+    reliable than trying to understand every glyph in the screenshot.
+    """
+    img = clean_ocr_image(image)
+    data = pytesseract.image_to_data(
+        img,
+        config="--psm 11",
+        output_type=pytesseract.Output.DICT,
+    )
+
+    tokens = []
+    n = len(data["text"])
+    for i in range(n):
+        raw = str(data["text"][i]).strip()
+        if not raw:
+            continue
+        tokens.append({
+            "text": raw,
+            "left": int(data["left"][i]),
+            "top": int(data["top"][i]),
+            "width": int(data["width"][i]),
+            "height": int(data["height"][i]),
+            "cx": int(data["left"][i]) + int(data["width"][i]) / 2,
+            "cy": int(data["top"][i]) + int(data["height"][i]) / 2,
+        })
+    return tokens
+
+
+def _token_american_odds(s):
+    s = (
+        str(s)
+        .replace("−", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("＋", "+")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("[", "")
+        .replace("]", "")
+        .replace("{", "")
+        .replace("}", "")
+        .replace(",", "")
+        .strip()
+    )
+    m = re.search(r"([+-])\s*(\d{3,4})", s)
+    if not m:
+        return None
+    val = int(m.group(1) + m.group(2))
+    return val if 100 <= abs(val) <= 1000 else None
+
+
+def _find_team_market_row(tokens, team):
+    """
+    Find the first 734 full-game row for a team. We specifically require at
+    least two American prices on the same horizontal band; that skips the
+    schedule header and selects the full-game row before the 1H row.
+    """
+    keys = {team.lower(), nickname(team).lower()}
+    candidates = []
+
+    for tok in tokens:
+        tt = re.sub(r"[^a-z]", "", tok["text"].lower())
+        if not tt:
+            continue
+
+        matched = False
+        for key in keys:
+            kk = re.sub(r"[^a-z]", "", key)
+            if kk and (kk in tt or tt in kk):
+                matched = True
+                break
+        if not matched:
+            continue
+
+        y = tok["cy"]
+        band = [
+            x for x in tokens
+            if abs(x["cy"] - y) <= max(24, tok["height"] * 0.9)
+        ]
+
+        odds = []
+        for x in band:
+            val = _token_american_odds(x["text"])
+            if val is not None:
+                odds.append((x["left"], val, x["text"]))
+
+        # Sometimes sign and digits get split into adjacent OCR tokens.
+        ordered = sorted(band, key=lambda z: z["left"])
+        for j in range(len(ordered) - 1):
+            combo = ordered[j]["text"] + ordered[j + 1]["text"]
+            val = _token_american_odds(combo)
+            if val is not None:
+                odds.append((ordered[j]["left"], val, combo))
+
+        # Deduplicate by x/price.
+        unique = []
+        seen = set()
+        for item in sorted(odds, key=lambda z: z[0]):
+            sig = (round(item[0] / 10), item[1])
+            if sig not in seen:
+                seen.add(sig)
+                unique.append(item)
+
+        if len(unique) >= 2:
+            candidates.append((tok["top"], unique, band))
+
+    if not candidates:
+        return None
+
+    # First qualifying occurrence is the full-game row; later one is 1H.
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0]
+
+
+def _crop_text(image, box, psm=7):
+    crop = image.crop(box)
+    # Enlarging just the target cell dramatically improves Tesseract on 734.
+    crop = crop.resize((crop.width * 2, crop.height * 2))
+    crop = ImageOps.grayscale(crop)
+    crop = ImageOps.autocontrast(crop)
+    crop = crop.filter(ImageFilter.SHARPEN)
+    return pytesseract.image_to_string(crop, config=f"--psm {psm}").strip()
+
+
+def _find_f5_header_y(image):
+    """
+    Find the top of the '1st 5 Innings' header. This lets the screenshot be
+    slightly scrolled and still keeps the cell crops aligned.
+    """
+    img = clean_ocr_image(image)
+    data = pytesseract.image_to_data(
+        img,
+        config="--psm 11",
+        output_type=pytesseract.Output.DICT,
+    )
+
+    hits = []
+    for i, raw in enumerate(data["text"]):
+        s = re.sub(r"[^a-z0-9]", "", str(raw).lower())
+        if s in {"1st", "ist", "1s", "innings"} or "inning" in s:
+            hits.append(int(data["top"][i]))
+
+    if hits:
+        # The first innings-related heading below the full-game rows is F5.
+        # Ignore any very-high-page noise.
+        usable = [y for y in hits if y > image.height * 0.35]
+        if usable:
+            return min(usable)
+
+    # Fallback tuned to the supplied 734 iPhone screenshots.
+    return int(image.height * 0.518)
+
+
+def _parse_single_american(text):
+    vals = american_numbers(text)
+    return vals[0] if vals else None
+
+
+def _parse_parenthesized_american(text):
+    s = (
+        text.replace("−", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("＋", "+")
+    )
+    m = re.search(r"\(\s*([+-]\s*\d{3,4})\s*\)", s)
+    if m:
+        return int(m.group(1).replace(" ", ""))
+    vals = american_numbers(s)
+    # Spread cell usually contains a spread token plus one American price.
+    return vals[-1] if vals else None
+
+
+def _looks_like_spread_cell(text):
+    """
+    ML cells are just -137 / +118.
+    Spread cells on 734 contain the spread plus juice in parentheses, e.g.
+    -1½ (+109). We can classify the market without correctly reading ½.
+    """
+    s = text.replace("−", "-").replace("–", "-").replace("—", "-")
+    if re.search(r"\(\s*[+-]\s*\d{3,4}\s*\)", s):
+        return True
+    # Fallback for OCR dropping parentheses but retaining multiple sign tokens.
+    signs = re.findall(r"[+-]", s)
+    return len(signs) >= 2
+
+
+def _parse_total_cell(text):
+    """
+    Parse one 734 total cell. The ½ glyph is often OCR'd as %, Z, 7, etc.,
+    so use the leading O/U + base run number and treat those known suffixes
+    as .5.
+    """
+    raw = (
+        text.replace("−", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("＋", "+")
+        .replace("½", ".5")
+    )
+    low = raw.lower().replace(" ", "")
+
+    side = None
+    if low.startswith("o") or low.startswith("0"):
+        side = "over"
+    elif low.startswith("u"):
+        side = "under"
+
+    # Juice is usually in parentheses and is much easier to read than ½.
+    odds = _parse_parenthesized_american(raw)
+
+    # Find the first plausible baseball full-game total number.
+    m = re.search(r"[ou0]?\s*(\d{1,2})", low)
+    line = None
+    if m:
+        base = int(m.group(1))
+        if 6 <= base <= 14:
+            # Explicit .5 or common OCR substitutions for the small ½ glyph.
+            half = bool(re.search(r"\.5|%|z|y%|7(?=\s*\()", low))
+            line = float(base) + (0.5 if half else 0.0)
+
+    return side, line, odds
+
+
+def parse_734_image(image, away, home, text_hint=""):
+    """
+    734 fixed-cell reader.
+
+    The supplied 734 screenshots have a stable three-column table:
+      left   = team
+      middle = ML or spread
+      right  = total
+
+    Instead of asking OCR to understand the whole page, this function finds
+    the 1st-5 header, crops the two full-game middle cells and two total cells,
+    and OCRs each cell independently.
+
+    Row 1 is away; row 2 is home.
+    """
+    result = {
+        "away_ml": None, "home_ml": None,
+        "away_rl_side": None, "away_rl_odds": None,
+        "home_rl_side": None, "home_rl_odds": None,
+        "total_line": None, "over_odds": None, "under_odds": None,
+    }
+
+    w, h = image.size
+    f5_y = _find_f5_header_y(image)
+
+    # In the supplied 1206px-wide screenshots, each full-game row is ~155px.
+    # Scale by image width so this also works on different iPhone resolutions.
+    row_h = max(90, int(w * 0.129))
+
+    row2_top = max(0, f5_y - row_h)
+    row1_top = max(0, row2_top - row_h)
+
+    # 734 table columns in normalized x coordinates.
+    # Keep a little padding away from the vertical borders.
+    mid_x1 = int(w * 0.335)
+    mid_x2 = int(w * 0.665)
+    tot_x1 = int(w * 0.665)
+    tot_x2 = int(w * 0.995)
+
+    pad_y = max(4, int(row_h * 0.08))
+    row1 = (row1_top + pad_y, row1_top + row_h - pad_y)
+    row2 = (row2_top + pad_y, row2_top + row_h - pad_y)
+
+    away_mid = _crop_text(image, (mid_x1, row1[0], mid_x2, row1[1]), psm=7)
+    home_mid = _crop_text(image, (mid_x1, row2[0], mid_x2, row2[1]), psm=7)
+    away_tot = _crop_text(image, (tot_x1, row1[0], tot_x2, row1[1]), psm=7)
+    home_tot = _crop_text(image, (tot_x1, row2[0], tot_x2, row2[1]), psm=7)
+
+    spread_screen = _looks_like_spread_cell(away_mid) or _looks_like_spread_cell(home_mid)
+
+    if spread_screen:
+        result["away_rl_odds"] = _parse_parenthesized_american(away_mid)
+        result["home_rl_odds"] = _parse_parenthesized_american(home_mid)
+        # Do not trust OCR for ½. Sides get assigned after ML + spread screenshots
+        # are merged, using which team is the moneyline favorite.
+    else:
+        result["away_ml"] = _parse_single_american(away_mid)
+        result["home_ml"] = _parse_single_american(home_mid)
+
+    a_side, a_line, a_odds = _parse_total_cell(away_tot)
+    h_side, h_line, h_odds = _parse_total_cell(home_tot)
+
+    if a_line is not None:
+        result["total_line"] = a_line
+    elif h_line is not None:
+        result["total_line"] = h_line
+
+    if a_side == "over" and a_odds is not None:
+        result["over_odds"] = a_odds
+    elif a_side == "under" and a_odds is not None:
+        result["under_odds"] = a_odds
+
+    if h_side == "under" and h_odds is not None:
+        result["under_odds"] = h_odds
+    elif h_side == "over" and h_odds is not None:
+        result["over_odds"] = h_odds
+
+    # Whole-image text parser is now only a fallback for totals, not ML/RL.
+    fallback = parse_734_lines_text_only(text_hint, away, home)
+    for k in ["total_line", "over_odds", "under_odds"]:
+        if result.get(k) is None and fallback.get(k) is not None:
+            result[k] = fallback[k]
+
+    # Save cell OCR for the troubleshooting expander.
+    result["_debug"] = {
+        "away_middle": away_mid,
+        "home_middle": home_mid,
+        "away_total": away_tot,
+        "home_total": home_tot,
+        "f5_y": f5_y,
+    }
+
+    return result
+
+
+def parse_734_lines_text_only(text, away, home):
     result = {
         "away_ml": None, "home_ml": None,
         "away_rl_side": None, "away_rl_odds": None,
@@ -306,6 +628,12 @@ def parse_734_lines(text, away, home):
     return result
 
 
+def parse_734_lines(text, away, home):
+    # Backward-compatible text parser used for OCR troubleshooting/fallback.
+    return parse_734_lines_text_only(text, away, home)
+
+
+
 def sync_parsed_to_widgets(parsed, game_pk):
     mapping = {
         "away_ml": f"away_ml_{game_pk}",
@@ -476,13 +804,13 @@ if "last_results" in st.session_state:
         st.divider()
         st.subheader("📸 Upload 734 Lines Screenshots")
         uploads = st.file_uploader(
-            "Upload one or more screenshots from 734 Games",
+            "Upload 734 screenshots (Money Line and/or Spread)",
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
         )
 
         if uploads:
-            st.caption(f"{len(uploads)} screenshot(s) selected — you can upload the MONEY LINE screen and the SPREAD screen together.")
+            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; each screenshot is read by table-cell position.")
             for i, uploaded in enumerate(uploads, start=1):
                 uploaded.seek(0)
                 image = Image.open(uploaded)
@@ -509,11 +837,44 @@ if "last_results" in st.session_state:
                             image = Image.open(uploaded)
                             shot_text = ocr_text(image)
                             all_text.append(shot_text)
-                            shot_parsed = parse_734_lines(shot_text, away, home)
+                            shot_parsed = parse_734_image(image, away, home, shot_text)
 
                             for key, value in shot_parsed.items():
+                                if key.startswith("_"):
+                                    continue
                                 if value is not None:
                                     merged[key] = value
+
+                            if shot_parsed.get("_debug"):
+                                all_text.append(
+                                    "\n===== FIXED CELL OCR =====\n"
+                                    + str(shot_parsed["_debug"])
+                                )
+
+                        # If we have both RL prices but the ½ glyph was unreadable,
+                        # assign standard MLB +/-1.5 sides using the ML favorite.
+                        if (
+                            merged.get("away_rl_odds") is not None
+                            and merged.get("home_rl_odds") is not None
+                            and (
+                                merged.get("away_rl_side") is None
+                                or merged.get("home_rl_side") is None
+                            )
+                            and merged.get("away_ml") is not None
+                            and merged.get("home_ml") is not None
+                        ):
+                            if merged["away_ml"] < 0 and merged["home_ml"] > 0:
+                                merged["away_rl_side"] = "-1.5"
+                                merged["home_rl_side"] = "+1.5"
+                            elif merged["home_ml"] < 0 and merged["away_ml"] > 0:
+                                merged["away_rl_side"] = "+1.5"
+                                merged["home_rl_side"] = "-1.5"
+                            elif merged["away_ml"] < merged["home_ml"]:
+                                merged["away_rl_side"] = "-1.5"
+                                merged["home_rl_side"] = "+1.5"
+                            else:
+                                merged["away_rl_side"] = "+1.5"
+                                merged["home_rl_side"] = "-1.5"
 
                         st.session_state.parsed_lines = merged
                         st.session_state.ocr_raw = "\n\n===== NEXT SCREENSHOT =====\n\n".join(all_text)
