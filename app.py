@@ -1,9 +1,11 @@
 import re
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 from PIL import Image, ImageOps, ImageFilter
 import pytesseract
+from paddleocr import TextRecognition
 from scipy.stats import poisson
 
 from model import (
@@ -15,7 +17,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.7-734-FIXED-CELLS"
+APP_VERSION = "0.6.8-PADDLEOCR"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -28,6 +30,50 @@ div[data-testid="stMetricValue"] {font-size: 1.65rem;}
 .bet-big {font-size: 1.15rem; font-weight: 800;}
 </style>
 """, unsafe_allow_html=True)
+
+
+
+@st.cache_resource(show_spinner="Loading PaddleOCR model...")
+def get_paddle_recognizer():
+    # Recognition-only model: faster/lighter than running full-page OCR.
+    # The app crops the exact 734 cells first, then sends each crop here.
+    return TextRecognition(engine="paddle")
+
+
+def paddle_read_line(image):
+    """
+    Read a single cropped sportsbook cell with PaddleOCR.
+    Returns (text, confidence).
+    """
+    model = get_paddle_recognizer()
+
+    arr = np.array(ImageOps.exif_transpose(image).convert("RGB"))
+    output = model.predict(input=arr)
+
+    best_text = ""
+    best_score = 0.0
+
+    for res in output:
+        try:
+            payload = res.json
+            if callable(payload):
+                payload = payload()
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            body = payload.get("res", payload)
+            rec_text = str(body.get("rec_text", "") or "").strip()
+            try:
+                rec_score = float(body.get("rec_score", 0.0) or 0.0)
+            except Exception:
+                rec_score = 0.0
+
+            if rec_text and rec_score >= best_score:
+                best_text = rec_text
+                best_score = rec_score
+
+    return best_text, best_score
 
 
 def nickname(team):
@@ -234,41 +280,40 @@ def _find_team_market_row(tokens, team):
 
 
 def _crop_text(image, box, psm=7):
-    crop = image.crop(box)
-    # Enlarging just the target cell dramatically improves Tesseract on 734.
-    crop = crop.resize((crop.width * 2, crop.height * 2))
-    crop = ImageOps.grayscale(crop)
-    crop = ImageOps.autocontrast(crop)
-    crop = crop.filter(ImageFilter.SHARPEN)
-    return pytesseract.image_to_string(crop, config=f"--psm {psm}").strip()
+    """
+    Crop one known 734 cell and read it with PaddleOCR.
+    Tesseract is no longer the primary reader for sportsbook cells.
+    """
+    crop = ImageOps.exif_transpose(image).crop(box)
+
+    # Give the recognizer a larger, high-contrast line.
+    scale = 3
+    crop = crop.resize((crop.width * scale, crop.height * scale))
+    gray = ImageOps.grayscale(crop)
+    gray = ImageOps.autocontrast(gray)
+    gray = gray.filter(ImageFilter.SHARPEN)
+
+    # PaddleOCR usually performs better with RGB input.
+    paddle_input = gray.convert("RGB")
+
+    try:
+        text, score = paddle_read_line(paddle_input)
+        if text:
+            return text
+    except Exception:
+        # Keep a free local fallback so a transient Paddle failure does not
+        # make the app unusable.
+        pass
+
+    return pytesseract.image_to_string(gray, config=f"--psm {psm}").strip()
 
 
 def _find_f5_header_y(image):
     """
-    Find the top of the '1st 5 Innings' header. This lets the screenshot be
-    slightly scrolled and still keeps the cell crops aligned.
+    734 mobile screenshots use a stable vertical table layout.
+    The 1st-5 header begins at ~51.8% of image height in the supplied iPhone
+    screenshots. Using geometry here is more reliable than OCR'ing the header.
     """
-    img = clean_ocr_image(image)
-    data = pytesseract.image_to_data(
-        img,
-        config="--psm 11",
-        output_type=pytesseract.Output.DICT,
-    )
-
-    hits = []
-    for i, raw in enumerate(data["text"]):
-        s = re.sub(r"[^a-z0-9]", "", str(raw).lower())
-        if s in {"1st", "ist", "1s", "innings"} or "inning" in s:
-            hits.append(int(data["top"][i]))
-
-    if hits:
-        # The first innings-related heading below the full-game rows is F5.
-        # Ignore any very-high-page noise.
-        usable = [y for y in hits if y > image.height * 0.35]
-        if usable:
-            return min(usable)
-
-    # Fallback tuned to the supplied 734 iPhone screenshots.
     return int(image.height * 0.518)
 
 
@@ -810,7 +855,7 @@ if "last_results" in st.session_state:
         )
 
         if uploads:
-            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; each screenshot is read by table-cell position.")
+            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; PaddleOCR reads each 734 table cell separately.")
             for i, uploaded in enumerate(uploads, start=1):
                 uploaded.seek(0)
                 image = Image.open(uploaded)
@@ -1051,4 +1096,4 @@ if "last_results" in st.session_state:
         st.download_button("⬇️ Download Full Slate CSV", data=df.to_csv(index=False).encode("utf-8"), file_name="mlb_model_full_slate.csv", mime="text/csv")
 
 st.divider()
-st.caption("Screenshot OCR is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
+st.caption("PaddleOCR screenshot reading is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
