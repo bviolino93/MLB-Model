@@ -1,11 +1,9 @@
 import re
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 from PIL import Image, ImageOps, ImageFilter
 import pytesseract
-from paddleocr import TextRecognition
 from scipy.stats import poisson
 
 from model import (
@@ -17,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.8-PADDLEOCR"
+APP_VERSION = "0.6.9-LITE-FIXED-OCR"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -32,48 +30,6 @@ div[data-testid="stMetricValue"] {font-size: 1.65rem;}
 """, unsafe_allow_html=True)
 
 
-
-@st.cache_resource(show_spinner="Loading PaddleOCR model...")
-def get_paddle_recognizer():
-    # Recognition-only model: faster/lighter than running full-page OCR.
-    # The app crops the exact 734 cells first, then sends each crop here.
-    return TextRecognition(engine="paddle")
-
-
-def paddle_read_line(image):
-    """
-    Read a single cropped sportsbook cell with PaddleOCR.
-    Returns (text, confidence).
-    """
-    model = get_paddle_recognizer()
-
-    arr = np.array(ImageOps.exif_transpose(image).convert("RGB"))
-    output = model.predict(input=arr)
-
-    best_text = ""
-    best_score = 0.0
-
-    for res in output:
-        try:
-            payload = res.json
-            if callable(payload):
-                payload = payload()
-        except Exception:
-            payload = None
-
-        if isinstance(payload, dict):
-            body = payload.get("res", payload)
-            rec_text = str(body.get("rec_text", "") or "").strip()
-            try:
-                rec_score = float(body.get("rec_score", 0.0) or 0.0)
-            except Exception:
-                rec_score = 0.0
-
-            if rec_text and rec_score >= best_score:
-                best_text = rec_text
-                best_score = rec_score
-
-    return best_text, best_score
 
 
 def nickname(team):
@@ -279,33 +235,63 @@ def _find_team_market_row(tokens, team):
     return candidates[0]
 
 
-def _crop_text(image, box, psm=7):
+def _tess_read_variants(image, whitelist=None):
     """
-    Crop one known 734 cell and read it with PaddleOCR.
-    Tesseract is no longer the primary reader for sportsbook cells.
+    Lightweight multi-pass Tesseract reader.
+    Tries several threshold/segmentation variants and returns all non-empty reads.
+    """
+    gray = ImageOps.grayscale(image)
+    gray = ImageOps.autocontrast(gray)
+
+    variants = [
+        gray,
+        gray.point(lambda p: 255 if p > 145 else 0),
+        gray.point(lambda p: 255 if p > 175 else 0),
+    ]
+
+    configs = ["--psm 7", "--psm 6", "--psm 11"]
+    if whitelist:
+        configs = [c + f" -c tessedit_char_whitelist={whitelist}" for c in configs]
+
+    reads = []
+    for variant in variants:
+        for cfg in configs:
+            try:
+                s = pytesseract.image_to_string(variant, config=cfg).strip()
+                if s:
+                    reads.append(s)
+            except Exception:
+                pass
+
+    # Preserve order while removing duplicates.
+    out = []
+    seen = set()
+    for s in reads:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _crop_text(image, box, psm=7, mode="generic"):
+    """
+    Crop one fixed 734 cell and OCR only that cell.
+    No heavy ML packages: safe for Streamlit Community Cloud.
     """
     crop = ImageOps.exif_transpose(image).crop(box)
 
-    # Give the recognizer a larger, high-contrast line.
-    scale = 3
-    crop = crop.resize((crop.width * scale, crop.height * scale))
-    gray = ImageOps.grayscale(crop)
-    gray = ImageOps.autocontrast(gray)
-    gray = gray.filter(ImageFilter.SHARPEN)
+    # Upscale hard because the sportsbook glyphs are small.
+    crop = crop.resize((crop.width * 4, crop.height * 4))
 
-    # PaddleOCR usually performs better with RGB input.
-    paddle_input = gray.convert("RGB")
+    if mode == "middle":
+        whitelist = "+-().0123456789½"
+    elif mode == "total":
+        whitelist = "oOuU()+-%.0123456789½"
+    else:
+        whitelist = None
 
-    try:
-        text, score = paddle_read_line(paddle_input)
-        if text:
-            return text
-    except Exception:
-        # Keep a free local fallback so a transient Paddle failure does not
-        # make the app unusable.
-        pass
-
-    return pytesseract.image_to_string(gray, config=f"--psm {psm}").strip()
+    reads = _tess_read_variants(crop, whitelist=whitelist)
+    return " || ".join(reads)
 
 
 def _find_f5_header_y(image):
@@ -319,7 +305,17 @@ def _find_f5_header_y(image):
 
 def _parse_single_american(text):
     vals = american_numbers(text)
-    return vals[0] if vals else None
+    if not vals:
+        return None
+
+    # ML cell should contain exactly one market price. Use the value that
+    # appears most often across OCR passes.
+    counts = {}
+    for v in vals:
+        counts[v] = counts.get(v, 0) + 1
+    return max(counts, key=lambda v: counts[v])
+
+
 
 
 def _parse_parenthesized_american(text):
@@ -329,12 +325,23 @@ def _parse_parenthesized_american(text):
         .replace("—", "-")
         .replace("＋", "+")
     )
-    m = re.search(r"\(\s*([+-]\s*\d{3,4})\s*\)", s)
-    if m:
-        return int(m.group(1).replace(" ", ""))
+
+    hits = [int(x.replace(" ", "")) for x in re.findall(r"\(\s*([+-]\s*\d{3,4})\s*\)", s)]
+    hits = [x for x in hits if 100 <= abs(x) <= 1000]
+    if hits:
+        counts = {}
+        for v in hits:
+            counts[v] = counts.get(v, 0) + 1
+        return max(counts, key=lambda v: counts[v])
+
     vals = american_numbers(s)
-    # Spread cell usually contains a spread token plus one American price.
-    return vals[-1] if vals else None
+    if vals:
+        counts = {}
+        for v in vals:
+            counts[v] = counts.get(v, 0) + 1
+        return max(counts, key=lambda v: counts[v])
+
+    return None
 
 
 def _looks_like_spread_cell(text):
@@ -353,39 +360,55 @@ def _looks_like_spread_cell(text):
 
 def _parse_total_cell(text):
     """
-    Parse one 734 total cell. The ½ glyph is often OCR'd as %, Z, 7, etc.,
-    so use the leading O/U + base run number and treat those known suffixes
-    as .5.
+    Parse a 734 total cell from several Tesseract passes joined by ||.
+    Vote across passes instead of trusting one OCR result.
     """
-    raw = (
-        text.replace("−", "-")
-        .replace("–", "-")
-        .replace("—", "-")
-        .replace("＋", "+")
-        .replace("½", ".5")
-    )
-    low = raw.lower().replace(" ", "")
+    pieces = [x.strip() for x in text.split("||") if x.strip()]
+    candidates = []
 
-    side = None
-    if low.startswith("o") or low.startswith("0"):
-        side = "over"
-    elif low.startswith("u"):
-        side = "under"
+    for piece in pieces:
+        raw = (
+            piece.replace("−", "-")
+            .replace("–", "-")
+            .replace("—", "-")
+            .replace("＋", "+")
+            .replace("½", ".5")
+        )
+        low = raw.lower().replace(" ", "")
 
-    # Juice is usually in parentheses and is much easier to read than ½.
-    odds = _parse_parenthesized_american(raw)
+        side = None
+        if low.startswith("o") or low.startswith("0"):
+            side = "over"
+        elif low.startswith("u"):
+            side = "under"
 
-    # Find the first plausible baseball full-game total number.
-    m = re.search(r"[ou0]?\s*(\d{1,2})", low)
-    line = None
-    if m:
-        base = int(m.group(1))
-        if 6 <= base <= 14:
-            # Explicit .5 or common OCR substitutions for the small ½ glyph.
-            half = bool(re.search(r"\.5|%|z|y%|7(?=\s*\()", low))
-            line = float(base) + (0.5 if half else 0.0)
+        odds = _parse_parenthesized_american(raw)
 
-    return side, line, odds
+        # Look for a plausible MLB full-game total 6-14.
+        m = re.search(r"[ou0]?(\d{1,2})", low)
+        line = None
+        if m:
+            base = int(m.group(1))
+            if 6 <= base <= 14:
+                # Treat any explicit .5, %, or a trailing 5 after base as a half.
+                half = (
+                    ".5" in low
+                    or "%" in low
+                    or bool(re.search(rf"{base}5(?!\d)", low))
+                )
+                line = float(base) + (0.5 if half else 0.0)
+
+        if side and line is not None and odds is not None:
+            candidates.append((side, line, odds))
+
+    if not candidates:
+        return None, None, None
+
+    counts = {}
+    for c in candidates:
+        counts[c] = counts.get(c, 0) + 1
+
+    return max(counts, key=lambda c: counts[c])
 
 
 def parse_734_image(image, away, home, text_hint=""):
@@ -431,10 +454,10 @@ def parse_734_image(image, away, home, text_hint=""):
     row1 = (row1_top + pad_y, row1_top + row_h - pad_y)
     row2 = (row2_top + pad_y, row2_top + row_h - pad_y)
 
-    away_mid = _crop_text(image, (mid_x1, row1[0], mid_x2, row1[1]), psm=7)
-    home_mid = _crop_text(image, (mid_x1, row2[0], mid_x2, row2[1]), psm=7)
-    away_tot = _crop_text(image, (tot_x1, row1[0], tot_x2, row1[1]), psm=7)
-    home_tot = _crop_text(image, (tot_x1, row2[0], tot_x2, row2[1]), psm=7)
+    away_mid = _crop_text(image, (mid_x1, row1[0], mid_x2, row1[1]), psm=7, mode="middle")
+    home_mid = _crop_text(image, (mid_x1, row2[0], mid_x2, row2[1]), psm=7, mode="middle")
+    away_tot = _crop_text(image, (tot_x1, row1[0], tot_x2, row1[1]), psm=7, mode="total")
+    home_tot = _crop_text(image, (tot_x1, row2[0], tot_x2, row2[1]), psm=7, mode="total")
 
     spread_screen = _looks_like_spread_cell(away_mid) or _looks_like_spread_cell(home_mid)
 
@@ -855,7 +878,7 @@ if "last_results" in st.session_state:
         )
 
         if uploads:
-            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; PaddleOCR reads each 734 table cell separately.")
+            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; the app reads each 734 table cell separately.")
             for i, uploaded in enumerate(uploads, start=1):
                 uploaded.seek(0)
                 image = Image.open(uploaded)
@@ -1096,4 +1119,4 @@ if "last_results" in st.session_state:
         st.download_button("⬇️ Download Full Slate CSV", data=df.to_csv(index=False).encode("utf-8"), file_name="mlb_model_full_slate.csv", mime="text/csv")
 
 st.divider()
-st.caption("PaddleOCR screenshot reading is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
+st.caption("Screenshot reading is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
