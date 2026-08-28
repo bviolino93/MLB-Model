@@ -15,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.2-MULTI-SCREENSHOT-TOTAL"
+APP_VERSION = "0.6.3-SMARTER-OCR"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -45,7 +45,12 @@ def clean_ocr_image(image):
 
 
 def ocr_text(image):
-    return pytesseract.image_to_string(clean_ocr_image(image), config="--psm 6")
+    img = clean_ocr_image(image)
+    # Use two segmentation modes because sportsbook screenshots often mix
+    # compact tables and isolated labels/prices.
+    a = pytesseract.image_to_string(img, config="--psm 6")
+    b = pytesseract.image_to_string(img, config="--psm 11")
+    return a + "\n\n===== OCR ALT PASS =====\n\n" + b
 
 
 def american_numbers(text):
@@ -68,6 +73,37 @@ def nearby_odds(text, key, window=180):
     return american_numbers(text[max(0, idx - 30):idx + window])
 
 
+def normalize_734_text(text):
+    t = (
+        text.replace("−", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("＋", "+")
+        .replace("½", ".5")
+        .replace("1/2", ".5")
+    )
+
+    # Common OCR variations for baseball run lines.
+    t = re.sub(r'([+-])\s*1\s*[.,|:/]\s*5\b', r'\g<1>1.5', t)
+    t = re.sub(r'([+-])\s*1\s+5\b', r'\g<1>1.5', t)
+
+    # "+15" / "-15" is a common OCR miss for "+1.5" / "-1.5".
+    # It is safe here because American odds are filtered to 3+ digits elsewhere.
+    t = re.sub(r'(?<!\d)([+-])15(?!\d)', r'\g<1>1.5', t)
+
+    return t
+
+
+def valid_total(x):
+    try:
+        x = float(x)
+        # Full-game MLB totals normally live in this range. This intentionally
+        # rejects F5 totals such as 4.5.
+        return 6.0 <= x <= 14.5
+    except Exception:
+        return False
+
+
 def parse_734_lines(text, away, home):
     result = {
         "away_ml": None, "home_ml": None,
@@ -76,13 +112,25 @@ def parse_734_lines(text, away, home):
         "total_line": None, "over_odds": None, "under_odds": None,
     }
 
-    t = text.replace("−", "-").replace("–", "-").replace("—", "-")
-    lines = [re.sub(r"\s+", " ", x).strip() for x in t.splitlines() if x.strip()]
+    t = normalize_734_text(text)
+    raw_lines = [re.sub(r"\\s+", " ", x).strip() for x in t.splitlines() if x.strip()]
+
+    # Also inspect 2- and 3-line windows because OCR often puts the team/market
+    # name on one line and the price on the next line.
+    windows = list(raw_lines)
+    for i in range(len(raw_lines) - 1):
+        windows.append(raw_lines[i] + " " + raw_lines[i + 1])
+    for i in range(len(raw_lines) - 2):
+        windows.append(raw_lines[i] + " " + raw_lines[i + 1] + " " + raw_lines[i + 2])
+
     away_keys = [away.lower(), nickname(away).lower()]
     home_keys = [home.lower(), nickname(home).lower()]
 
+    # -------------------------
+    # MONEYLINE
+    # -------------------------
     team_hits = {"away": [], "home": []}
-    for line in lines:
+    for line in windows:
         ll = line.lower()
         odds = american_numbers(line)
         if not odds:
@@ -97,42 +145,149 @@ def parse_734_lines(text, away, home):
     if team_hits["home"]:
         result["home_ml"] = team_hits["home"][0]
 
-    spread_pat = re.compile(r'([+-]\s?1\.5).*?([+-]\s?\d{2,4})', re.I)
-    for line in lines:
-        ll = line.lower()
-        m = spread_pat.search(line)
-        if not m:
-            continue
-        side = m.group(1).replace(" ", "")
-        odds = int(m.group(2).replace(" ", ""))
-        if any(k in ll for k in away_keys):
-            result["away_rl_side"] = side
-            result["away_rl_odds"] = odds
-        if any(k in ll for k in home_keys):
-            result["home_rl_side"] = side
-            result["home_rl_odds"] = odds
+    # -------------------------
+    # RUN LINE / SPREAD
+    # -------------------------
+    spread_pat = re.compile(r'([+-]1\\.5)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)', re.I)
+    spread_candidates = []
 
-    for line in lines:
-        mo = re.search(r'\b(?:over|o)\s*([0-9]{1,2}(?:\.5)?)\D{0,18}([+-]\s?\d{2,4})', line, re.I)
-        mu = re.search(r'\b(?:under|u)\s*([0-9]{1,2}(?:\.5)?)\D{0,18}([+-]\s?\d{2,4})', line, re.I)
-        if mo:
+    for line in windows:
+        ll = line.lower()
+        for m in spread_pat.finditer(line):
+            side = m.group(1).replace(" ", "")
+            odds = int(m.group(2).replace(" ", ""))
+            if not (100 <= abs(odds) <= 1000):
+                continue
+
+            spread_candidates.append((side, odds, line))
+
+            if any(k in ll for k in away_keys):
+                result["away_rl_side"] = side
+                result["away_rl_odds"] = odds
+            if any(k in ll for k in home_keys):
+                result["home_rl_side"] = side
+                result["home_rl_odds"] = odds
+
+    # Fallback for table-style 734 screenshots where team names are detached
+    # from the spread prices. Prefer one +1.5 and one -1.5 candidate.
+    plus = [(s, o, l) for s, o, l in spread_candidates if s == "+1.5"]
+    minus = [(s, o, l) for s, o, l in spread_candidates if s == "-1.5"]
+
+    if result["away_rl_odds"] is None and result["home_rl_odds"] is None:
+        if plus and minus:
+            # Away underdog convention is common, but do not assume blindly.
+            # Use ML direction when available to determine favorite.
+            if result["away_ml"] is not None and result["home_ml"] is not None:
+                away_is_dog = result["away_ml"] > 0 and result["home_ml"] < 0
+                home_is_dog = result["home_ml"] > 0 and result["away_ml"] < 0
+
+                if away_is_dog:
+                    result["away_rl_side"], result["away_rl_odds"] = plus[0][0], plus[0][1]
+                    result["home_rl_side"], result["home_rl_odds"] = minus[0][0], minus[0][1]
+                elif home_is_dog:
+                    result["away_rl_side"], result["away_rl_odds"] = minus[0][0], minus[0][1]
+                    result["home_rl_side"], result["home_rl_odds"] = plus[0][0], plus[0][1]
+
+    # "Spread +1.5 -130 -1.5 +100" style row.
+    if result["away_rl_odds"] is None or result["home_rl_odds"] is None:
+        for line in windows:
+            if "spread" not in line.lower() and "run line" not in line.lower():
+                continue
+            pairs = [(m.group(1), int(m.group(2).replace(" ", ""))) for m in spread_pat.finditer(line)]
+            if len(pairs) >= 2 and result["away_ml"] is not None and result["home_ml"] is not None:
+                plus_pair = next((p for p in pairs if p[0] == "+1.5"), None)
+                minus_pair = next((p for p in pairs if p[0] == "-1.5"), None)
+                if plus_pair and minus_pair:
+                    if result["away_ml"] > result["home_ml"]:
+                        result["away_rl_side"], result["away_rl_odds"] = plus_pair
+                        result["home_rl_side"], result["home_rl_odds"] = minus_pair
+                    else:
+                        result["away_rl_side"], result["away_rl_odds"] = minus_pair
+                        result["home_rl_side"], result["home_rl_odds"] = plus_pair
+                    break
+
+    # -------------------------
+    # TOTAL
+    # -------------------------
+    # Accept Over 9 -104, O 9 -104, O9 -104, etc.
+    over_pat = re.compile(
+        r'\\b(?:over|ovr|o)\\s*[:\\-]?\\s*([0-9]{1,2}(?:\\.5)?)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)',
+        re.I,
+    )
+    under_pat = re.compile(
+        r'\\b(?:under|undr|u)\\s*[:\\-]?\\s*([0-9]{1,2}(?:\\.5)?)\\D{0,80}?([+-]\\s?\\d{3,4})(?!\\d)',
+        re.I,
+    )
+
+    for line in windows:
+        mo = over_pat.search(line)
+        if mo and valid_total(mo.group(1)):
             result["total_line"] = float(mo.group(1))
             result["over_odds"] = int(mo.group(2).replace(" ", ""))
-        if mu:
+
+        mu = under_pat.search(line)
+        if mu and valid_total(mu.group(1)):
             if result["total_line"] is None:
                 result["total_line"] = float(mu.group(1))
             result["under_odds"] = int(mu.group(2).replace(" ", ""))
 
+    # Table-style fallback:
+    # "Total 9 -104 -126" or "9 O -104 U -126".
+    if result["over_odds"] is None or result["under_odds"] is None:
+        for line in windows:
+            ll = line.lower()
+            if "total" not in ll and not re.search(r'\\b[ou]\\b', ll):
+                continue
+
+            total_nums = re.findall(r'(?<!\\d)([6-9](?:\\.5)?|1[0-4](?:\\.5)?)(?!\\d)', line)
+            total_nums = [float(x) for x in total_nums if valid_total(x)]
+            odds = american_numbers(line)
+
+            if total_nums and len(odds) >= 2:
+                if result["total_line"] is None:
+                    result["total_line"] = total_nums[0]
+
+                # If explicit O/U positions exist, use them. Otherwise 734's
+                # full-game total display is conventionally Over first, Under second.
+                if result["over_odds"] is None:
+                    result["over_odds"] = odds[0]
+                if result["under_odds"] is None:
+                    result["under_odds"] = odds[1]
+                break
+
+    # Last-resort nearby-label fallback with a wider OCR window.
     if result["over_odds"] is None:
-        vals = nearby_odds(t, "over")
+        vals = nearby_odds(t, "over", window=320)
         if vals:
             result["over_odds"] = vals[0]
     if result["under_odds"] is None:
-        vals = nearby_odds(t, "under")
+        vals = nearby_odds(t, "under", window=320)
         if vals:
             result["under_odds"] = vals[0]
 
     return result
+
+
+
+def sync_parsed_to_widgets(parsed, game_pk):
+    mapping = {
+        "away_ml": f"away_ml_{game_pk}",
+        "home_ml": f"home_ml_{game_pk}",
+        "away_rl_odds": f"away_rl_odds_{game_pk}",
+        "home_rl_odds": f"home_rl_odds_{game_pk}",
+        "total_line": f"total_line_{game_pk}",
+        "over_odds": f"over_odds_{game_pk}",
+        "under_odds": f"under_odds_{game_pk}",
+    }
+    for src_key, widget_key in mapping.items():
+        value = parsed.get(src_key)
+        if value is not None:
+            st.session_state[widget_key] = value
+
+    if parsed.get("away_rl_side") in ["+1.5", "-1.5"]:
+        st.session_state[f"away_rl_side_{game_pk}"] = parsed["away_rl_side"]
+    if parsed.get("home_rl_side") in ["+1.5", "-1.5"]:
+        st.session_state[f"home_rl_side_{game_pk}"] = parsed["home_rl_side"]
 
 
 def bet_grade(model_prob, odds, confidence):
@@ -325,7 +480,17 @@ if "last_results" in st.session_state:
 
                         st.session_state.parsed_lines = merged
                         st.session_state.ocr_raw = "\n\n===== NEXT SCREENSHOT =====\n\n".join(all_text)
-                        st.success("Screenshots read. Check the numbers below before using the verdict.")
+                        sync_parsed_to_widgets(merged, row["GamePk"])
+                        st.success("Screenshots read. Extracted values were loaded into the boxes below.")
+                        st.write(
+                            "**Detected:** "
+                            f"{away} ML {merged.get('away_ml')} | "
+                            f"{home} ML {merged.get('home_ml')} | "
+                            f"{away} {merged.get('away_rl_side')} {merged.get('away_rl_odds')} | "
+                            f"{home} {merged.get('home_rl_side')} {merged.get('home_rl_odds')} | "
+                            f"Total {merged.get('total_line')} | "
+                            f"Over {merged.get('over_odds')} | Under {merged.get('under_odds')}"
+                        )
                     except Exception as e:
                         st.error(f"Could not read screenshots: {e}")
 
@@ -334,25 +499,41 @@ if "last_results" in st.session_state:
                 st.code(st.session_state.ocr_raw)
 
         p = st.session_state.get("parsed_lines", {})
+
+        defaults = {
+            f"away_ml_{row['GamePk']}": int(p.get("away_ml") if p.get("away_ml") is not None else 100),
+            f"home_ml_{row['GamePk']}": int(p.get("home_ml") if p.get("home_ml") is not None else -110),
+            f"away_rl_side_{row['GamePk']}": p.get("away_rl_side", "+1.5"),
+            f"away_rl_odds_{row['GamePk']}": int(p.get("away_rl_odds") if p.get("away_rl_odds") is not None else -110),
+            f"home_rl_side_{row['GamePk']}": p.get("home_rl_side", "-1.5"),
+            f"home_rl_odds_{row['GamePk']}": int(p.get("home_rl_odds") if p.get("home_rl_odds") is not None else 100),
+            f"total_line_{row['GamePk']}": float(p.get("total_line") if p.get("total_line") is not None else 9.0),
+            f"over_odds_{row['GamePk']}": int(p.get("over_odds") if p.get("over_odds") is not None else -110),
+            f"under_odds_{row['GamePk']}": int(p.get("under_odds") if p.get("under_odds") is not None else -110),
+        }
+        for k, v in defaults.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+
         st.subheader("Sportsbook Lines")
         st.caption("Confirm the extracted values. If OCR misses something, just edit the box manually.")
 
         ml1, ml2 = st.columns(2)
-        away_ml = ml1.number_input(f"{away} ML", value=int(p.get("away_ml") if p.get("away_ml") is not None else 100), step=5)
-        home_ml = ml2.number_input(f"{home} ML", value=int(p.get("home_ml") if p.get("home_ml") is not None else -110), step=5)
+        away_ml = ml1.number_input(f"{away} ML", step=5, key=f"away_ml_{row['GamePk']}")
+        home_ml = ml2.number_input(f"{home} ML", step=5, key=f"home_ml_{row['GamePk']}")
 
         rl1, rl2 = st.columns(2)
         away_side0 = p.get("away_rl_side", "+1.5")
-        away_rl_side = rl1.selectbox(f"{away} run line", ["+1.5", "-1.5"], index=0 if away_side0 == "+1.5" else 1)
-        away_rl_odds = rl1.number_input(f"{away} RL odds", value=int(p.get("away_rl_odds") if p.get("away_rl_odds") is not None else -110), step=5)
+        away_rl_side = rl1.selectbox(f"{away} run line", ["+1.5", "-1.5"], key=f"away_rl_side_{row['GamePk']}")
+        away_rl_odds = rl1.number_input(f"{away} RL odds", step=5, key=f"away_rl_odds_{row['GamePk']}")
         home_side0 = p.get("home_rl_side", "-1.5")
-        home_rl_side = rl2.selectbox(f"{home} run line", ["-1.5", "+1.5"], index=0 if home_side0 == "-1.5" else 1)
-        home_rl_odds = rl2.number_input(f"{home} RL odds", value=int(p.get("home_rl_odds") if p.get("home_rl_odds") is not None else 100), step=5)
+        home_rl_side = rl2.selectbox(f"{home} run line", ["-1.5", "+1.5"], key=f"home_rl_side_{row['GamePk']}")
+        home_rl_odds = rl2.number_input(f"{home} RL odds", step=5, key=f"home_rl_odds_{row['GamePk']}")
 
         t1, t2, t3 = st.columns(3)
-        total_line = t1.number_input("Total", value=float(p.get("total_line") if p.get("total_line") is not None else 9.0), step=0.5)
-        over_odds = t2.number_input("Over odds", value=int(p.get("over_odds") if p.get("over_odds") is not None else -110), step=5)
-        under_odds = t3.number_input("Under odds", value=int(p.get("under_odds") if p.get("under_odds") is not None else -110), step=5)
+        total_line = t1.number_input("Total", step=0.5, key=f"total_line_{row['GamePk']}")
+        over_odds = t2.number_input("Over odds", step=5, key=f"over_odds_{row['GamePk']}")
+        under_odds = t3.number_input("Under odds", step=5, key=f"under_odds_{row['GamePk']}")
 
         if st.button("✅ Should I Bet?", type="primary"):
             markets = []
