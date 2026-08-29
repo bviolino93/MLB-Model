@@ -15,7 +15,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.6.9-LITE-FIXED-OCR"
+APP_VERSION = "0.7.0-JUICE-AWARE"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
 
@@ -723,18 +723,73 @@ def sync_parsed_to_widgets(parsed, game_pk):
         st.session_state[f"home_rl_side_{game_pk}"] = parsed["home_rl_side"]
 
 
+def juice_thresholds(odds):
+    """
+    Require more model edge as the price gets more expensive.
+
+    Baseline:
+      BET        edge >= 2.5%, EV >= 5%
+      STRONG BET edge >= 4.0%, EV >= 8%
+
+    Heavy favorite / high-juice prices must clear tougher thresholds.
+    """
+    odds = int(odds)
+
+    # Positive odds and modest favorite prices.
+    if odds >= -149:
+        return {
+            "bet_edge": 0.025, "bet_ev": 0.05,
+            "strong_edge": 0.040, "strong_ev": 0.08,
+            "tier": "Normal price",
+        }
+
+    # Moderate juice.
+    if odds >= -179:
+        return {
+            "bet_edge": 0.030, "bet_ev": 0.06,
+            "strong_edge": 0.050, "strong_ev": 0.09,
+            "tier": "Moderate juice",
+        }
+
+    # Heavy juice.
+    if odds >= -199:
+        return {
+            "bet_edge": 0.040, "bet_ev": 0.07,
+            "strong_edge": 0.060, "strong_ev": 0.10,
+            "tier": "Heavy juice",
+        }
+
+    # -200 through -249: materially tougher hurdle.
+    if odds >= -249:
+        return {
+            "bet_edge": 0.050, "bet_ev": 0.08,
+            "strong_edge": 0.070, "strong_ev": 0.12,
+            "tier": "Very heavy juice",
+        }
+
+    # -250 or worse: only allow a BET with a genuinely exceptional edge.
+    return {
+        "bet_edge": 0.070, "bet_ev": 0.12,
+        "strong_edge": 0.090, "strong_ev": 0.15,
+        "tier": "Extreme juice",
+    }
+
+
 def bet_grade(model_prob, odds, confidence):
     imp = implied_prob(odds)
     edge = model_prob - imp
     ev = expected_value(model_prob, odds)
-    if confidence >= 80 and edge >= 0.04 and ev >= 0.08:
+    t = juice_thresholds(odds)
+
+    if confidence >= 80 and edge >= t["strong_edge"] and ev >= t["strong_ev"]:
         verdict = "STRONG BET"
-    elif confidence >= 70 and edge >= 0.025 and ev >= 0.05:
+    elif confidence >= 70 and edge >= t["bet_edge"] and ev >= t["bet_ev"]:
         verdict = "BET"
     elif edge > 0 and ev > 0:
         verdict = "LEAN"
     else:
         verdict = "PASS"
+
     return verdict, edge, ev, imp
 
 
@@ -791,10 +846,11 @@ def total_bet_grade(model_total, line, side, odds, confidence):
     imp = implied_prob(odds)
     edge = conditional_win - imp
     ev = total_expected_value(probs, odds)
+    t = juice_thresholds(odds)
 
-    if confidence >= 80 and edge >= 0.04 and ev >= 0.08:
+    if confidence >= 80 and edge >= t["strong_edge"] and ev >= t["strong_ev"]:
         verdict = "STRONG BET"
-    elif confidence >= 70 and edge >= 0.025 and ev >= 0.05:
+    elif confidence >= 70 and edge >= t["bet_edge"] and ev >= t["bet_ev"]:
         verdict = "BET"
     elif edge > 0 and ev > 0:
         verdict = "LEAN"
@@ -1027,7 +1083,7 @@ if "last_results" in st.session_state:
             for _, m in market_df.iterrows():
                 st.markdown(
                     f"""<div class="bet-card"><div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {int(m['Odds']):+d}</div>
-                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}% • Fair {int(m['Model Fair']):+d}</div>""",
+                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}% • Fair {int(m['Model Fair']):+d} • {juice_thresholds(int(m['Odds']))['tier']}</div>""",
                     unsafe_allow_html=True,
                 )
 
@@ -1095,15 +1151,16 @@ if "last_results" in st.session_state:
                 push_text = f" • Push {m['Push Prob']*100:.1f}%" if m["Push Prob"] > 0 else ""
                 st.markdown(
                     f"""<div class="bet-card"><div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {m['Odds']:+d}</div>
-                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}%{push_text}</div>""",
+                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}%{push_text} • {juice_thresholds(int(m['Odds']))['tier']}</div>""",
                     unsafe_allow_html=True,
                 )
 
             st.caption(
-                "BET = confidence ≥70, edge ≥2.5 percentage points, EV ≥5%. "
-                "STRONG BET = confidence ≥80, edge ≥4 points, EV ≥8%. "
-                "Positive value below those levels = LEAN. "
-                "Total probabilities are EXPERIMENTAL and use a Poisson distribution centered on the model total."
+                "Bet thresholds are now JUICE-AWARE. Normal prices use the original thresholds "
+                "(BET: confidence ≥70, edge ≥2.5%, EV ≥5%). Prices from -150 to -179, -180 to -199, "
+                "-200 to -249, and -250 or worse require progressively larger edge and EV. "
+                "Positive value that does not clear the price-adjusted threshold is labeled LEAN. "
+                "Total probabilities remain EXPERIMENTAL and use a Poisson distribution centered on the model total."
             )
 
         csv = df.to_csv(index=False).encode("utf-8")
