@@ -1,4 +1,9 @@
 import re
+import math
+import time
+from statistics import median
+
+import requests
 
 import pandas as pd
 import streamlit as st
@@ -15,21 +20,272 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.7.0-JUICE-AWARE"
+APP_VERSION = "0.8.0-GENERAL-MARKET"
 
-st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-.block-container {max-width: 760px; padding-top: 1rem; padding-bottom: 3rem;}
+.block-container {max-width: 1180px; padding-top: 1rem; padding-bottom: 3rem;}
 div[data-testid="stMetricValue"] {font-size: 1.65rem;}
-.stButton > button {width: 100%; min-height: 3rem; font-weight: 700;}
+.stButton > button {width: 100%; min-height: 3rem; font-weight: 700; border-radius: 10px;}
 .bet-card {border: 1px solid rgba(128,128,128,.28); border-radius: 14px; padding: 14px 16px; margin: 8px 0;}
 .bet-big {font-size: 1.15rem; font-weight: 800;}
+
+.mlb-hero {
+    padding: 18px 20px; margin: 2px 0 14px 0; border-radius: 18px;
+    background: linear-gradient(135deg, rgba(17,34,58,.96), rgba(8,20,36,.98));
+    border: 1px solid rgba(148,163,184,.14);
+}
+.mlb-kicker {font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:#8EA4BE; font-weight:800;}
+.mlb-title {font-size:1.72rem; line-height:1.05; font-weight:900; color:#F5F8FC; margin-top:4px;}
+.mlb-sub {font-size:.82rem; color:#9FB2C8; margin-top:7px;}
+
+.slate-card {
+    margin: 10px 0 4px 0; padding: 15px; border-radius: 16px;
+    background: linear-gradient(180deg, rgba(14,28,48,.96), rgba(9,21,37,.98));
+    border: 1px solid rgba(148,163,184,.13);
+}
+.slate-card-top {display:flex; align-items:flex-start; justify-content:space-between; gap:10px;}
+.slate-time {font-size:.72rem; color:#8EA4BE; font-weight:750;}
+.slate-matchup {font-size:1.02rem; color:#F2F6FB; font-weight:900; margin-top:3px;}
+.slate-matchup span {color:#7D93AD; font-weight:700;}
+.slate-badge {padding:5px 9px; border-radius:999px; font-size:.67rem; font-weight:900; white-space:nowrap;}
+.badge-strong {background:rgba(35,197,94,.20); color:#91F2AE; border:1px solid rgba(35,197,94,.30);}
+.badge-bet {background:rgba(34,197,94,.15); color:#8AE9A5; border:1px solid rgba(34,197,94,.22);}
+.badge-lean {background:rgba(234,179,8,.14); color:#F7D76B; border:1px solid rgba(234,179,8,.24);}
+.badge-pass {background:rgba(148,163,184,.10); color:#AEBAC8; border:1px solid rgba(148,163,184,.15);}
+
+.slate-reco {margin-top:12px; padding:12px; border-radius:12px; background:rgba(5,16,30,.56);}
+.slate-reco-label {font-size:.65rem; text-transform:uppercase; letter-spacing:.11em; color:#7890AA; font-weight:800;}
+.slate-reco-value {font-size:1.08rem; color:#F6F9FC; font-weight:900; margin-top:2px;}
+.slate-reco-meta {font-size:.76rem; color:#9EB0C4; margin-top:3px;}
+
+.slate-grid {display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px;}
+.slate-box {padding:9px 10px; border-radius:10px; background:rgba(255,255,255,.025); border:1px solid rgba(148,163,184,.08);}
+.slate-box-label {font-size:.62rem; color:#7187A0; text-transform:uppercase; font-weight:800;}
+.slate-box-value {font-size:.86rem; color:#EAF0F7; font-weight:850; margin-top:2px;}
+.slate-footer {font-size:.70rem; color:#7E93AA; margin-top:10px;}
+.slate-footer span {margin:0 5px;}
+
+.market-row {margin:7px 0; padding:10px 11px; border-radius:10px; background:rgba(13,26,45,.72); border:1px solid rgba(148,163,184,.10);}
+.market-row-title {color:#E8EEF8; font-size:.86rem; font-weight:800;}
+.market-row-sub {margin-top:3px; color:#8EA4BE; font-size:.73rem; font-weight:650;}
+
+@media (max-width: 720px) {
+    .block-container {padding-left:.75rem; padding-right:.75rem;}
+    .slate-grid {grid-template-columns:repeat(2,minmax(0,1fr));}
+    .mlb-title {font-size:1.45rem;}
+}
 </style>
 """, unsafe_allow_html=True)
 
 
+
+
+
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+ODDS_SPORT_KEY = "baseball_mlb"
+
+def get_odds_api_key():
+    try:
+        return str(st.secrets.get("ODDS_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+def _team_key(name):
+    s = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    aliases = {
+        "oaklandathletics": "athletics",
+        "athletics": "athletics",
+        "losangelesangels": "losangelesangels",
+        "laangels": "losangelesangels",
+        "arizonadiamondbacks": "arizonadiamondbacks",
+        "dbacks": "arizonadiamondbacks",
+        "chicagowhitesox": "chicagowhitesox",
+        "whitesox": "chicagowhitesox",
+        "bostonredsox": "bostonredsox",
+        "redsox": "bostonredsox",
+        "torontobluejays": "torontobluejays",
+        "bluejays": "torontobluejays",
+        "tampabayrays": "tampabayrays",
+    }
+    return aliases.get(s, s)
+
+def _median_num(vals):
+    vals = [float(x) for x in vals if x is not None]
+    return float(median(vals)) if vals else None
+
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_general_mlb_odds(api_key):
+    """
+    Current general MLB market from The Odds API.
+    One US-region request returns moneyline, run line and total markets.
+    """
+    if not api_key:
+        return {"events": [], "error": "ODDS_API_KEY is not configured.", "quota": {}}
+
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/odds",
+            params={
+                "apiKey": api_key,
+                "regions": "us",
+                "markets": "h2h,spreads,totals",
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+            timeout=25,
+        )
+        quota = {
+            "remaining": r.headers.get("x-requests-remaining"),
+            "used": r.headers.get("x-requests-used"),
+            "last": r.headers.get("x-requests-last"),
+        }
+        r.raise_for_status()
+        return {"events": r.json(), "error": "", "quota": quota}
+    except Exception as e:
+        return {"events": [], "error": str(e), "quota": {}}
+
+def _event_match_score(event, game):
+    if _team_key(event.get("away_team")) != _team_key(game.get("Away")):
+        return None
+    if _team_key(event.get("home_team")) != _team_key(game.get("Home")):
+        return None
+
+    # Doubleheaders can have the same two teams twice. Match the nearest start time.
+    try:
+        e = pd.to_datetime(event.get("commence_time"), utc=True)
+        g = pd.to_datetime(game.get("GameDate"), utc=True)
+        return abs((e - g).total_seconds())
+    except Exception:
+        return 0.0
+
+def match_odds_event(events, game):
+    choices = []
+    for e in events:
+        score = _event_match_score(e, game)
+        if score is not None:
+            choices.append((score, e))
+    if not choices:
+        return None
+    choices.sort(key=lambda x: x[0])
+    return choices[0][1]
+
+def consensus_from_event(event):
+    """
+    Build a general/consensus line by taking the median across available books.
+    For spreads/totals, the consensus point is the median point and the consensus
+    price is the median price among books at the closest available point.
+    """
+    if not event:
+        return None
+
+    h2h = {}
+    spreads = {}
+    totals = {"Over": [], "Under": []}
+    providers = set()
+    updates = []
+
+    for book in event.get("bookmakers", []):
+        providers.add(book.get("title") or book.get("key") or "book")
+        if book.get("last_update"):
+            updates.append(book.get("last_update"))
+        for market in book.get("markets", []):
+            key = market.get("key")
+            if market.get("last_update"):
+                updates.append(market.get("last_update"))
+
+            if key == "h2h":
+                for o in market.get("outcomes", []):
+                    name = o.get("name")
+                    price = o.get("price")
+                    if name is not None and price is not None:
+                        h2h.setdefault(_team_key(name), []).append(float(price))
+
+            elif key == "spreads":
+                for o in market.get("outcomes", []):
+                    name = o.get("name")
+                    point = o.get("point")
+                    price = o.get("price")
+                    if name is not None and point is not None and price is not None:
+                        spreads.setdefault(_team_key(name), []).append((float(point), float(price)))
+
+            elif key == "totals":
+                for o in market.get("outcomes", []):
+                    name = str(o.get("name", "")).title()
+                    point = o.get("point")
+                    price = o.get("price")
+                    if name in totals and point is not None and price is not None:
+                        totals[name].append((float(point), float(price)))
+
+    away_key = _team_key(event.get("away_team"))
+    home_key = _team_key(event.get("home_team"))
+
+    out = {
+        "event_id": event.get("id"),
+        "commence_time": event.get("commence_time"),
+        "away_team": event.get("away_team"),
+        "home_team": event.get("home_team"),
+        "provider_count": len(providers),
+        "providers": ", ".join(sorted(providers)),
+        "last_update": max(updates) if updates else None,
+        "away_ml": None,
+        "home_ml": None,
+        "away_rl": None,
+        "away_rl_odds": None,
+        "home_rl": None,
+        "home_rl_odds": None,
+        "total": None,
+        "over_odds": None,
+        "under_odds": None,
+    }
+
+    if h2h.get(away_key):
+        out["away_ml"] = int(round(_median_num(h2h[away_key])))
+    if h2h.get(home_key):
+        out["home_ml"] = int(round(_median_num(h2h[home_key])))
+
+    def spread_consensus(items):
+        if not items:
+            return None, None
+        point = _median_num([x[0] for x in items])
+        nearest = min(abs(x[0] - point) for x in items)
+        prices = [x[1] for x in items if abs(abs(x[0] - point) - nearest) < 1e-9]
+        return float(point), int(round(_median_num(prices)))
+
+    out["away_rl"], out["away_rl_odds"] = spread_consensus(spreads.get(away_key, []))
+    out["home_rl"], out["home_rl_odds"] = spread_consensus(spreads.get(home_key, []))
+
+    all_total_points = [x[0] for side in totals.values() for x in side]
+    if all_total_points:
+        total_line = _median_num(all_total_points)
+        out["total"] = float(total_line)
+
+        for side_name, odds_key in [("Over", "over_odds"), ("Under", "under_odds")]:
+            items = totals[side_name]
+            if items:
+                nearest = min(abs(x[0] - total_line) for x in items)
+                prices = [x[1] for x in items if abs(abs(x[0] - total_line) - nearest) < 1e-9]
+                out[odds_key] = int(round(_median_num(prices)))
+
+    return out
+
+def market_for_game(games, events, game_pk):
+    game = next((g for g in games if g["GamePk"] == game_pk), None)
+    if not game:
+        return None
+    return consensus_from_event(match_odds_event(events, game))
+
+def _verdict_rank(v):
+    return {"STRONG BET": 4, "BET": 3, "LEAN": 2, "PASS": 1, "NO LINE": 0}.get(str(v), 0)
+
+def _verdict_class(v):
+    return {
+        "STRONG BET": "badge-strong",
+        "BET": "badge-bet",
+        "LEAN": "badge-lean",
+    }.get(str(v), "badge-pass")
 
 
 def nickname(team):
@@ -859,16 +1115,26 @@ def total_bet_grade(model_total, line, side, odds, confidence):
 
     return verdict, edge, ev, imp, conditional_win, probs
 
-st.title("⚾ MLB Model")
-st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")
+st.markdown(
+    f"""
+    <div class="mlb-hero">
+      <div class="mlb-kicker">MLB EDGE</div>
+      <div class="mlb-title">Daily MLB Betting Model</div>
+      <div class="mlb-sub">App {APP_VERSION} • Engine {MODEL_VERSION} • General market consensus across available US books</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if "games" not in st.session_state:
     with st.spinner("Loading today's MLB schedule..."):
         st.session_state.games = fetch_today_games()
 
-if st.button("🔄 Refresh Today's Games"):
-    with st.spinner("Refreshing schedule..."):
+if st.button("🔄 Refresh Today's Games + Market"):
+    with st.spinner("Refreshing schedule and general market..."):
         st.session_state.games = fetch_today_games()
+        fetch_general_mlb_odds.clear()
+        st.session_state.general_odds_payload = fetch_general_mlb_odds(get_odds_api_key())
     for k in ["last_results", "parsed_lines", "ocr_raw"]:
         st.session_state.pop(k, None)
     st.rerun()
@@ -877,6 +1143,10 @@ games = st.session_state.games
 if not games:
     st.warning("No MLB games were found for today.")
     st.stop()
+
+odds_api_key = get_odds_api_key()
+if "general_odds_payload" not in st.session_state:
+    st.session_state.general_odds_payload = fetch_general_mlb_odds(odds_api_key)
 
 labels = {}
 for g in games:
@@ -1168,12 +1438,305 @@ if "last_results" in st.session_state:
 
     else:
         st.divider()
-        st.subheader("Full Slate")
-        table = df[["Game", "Away_Proj_Runs", "Home_Proj_Runs", "Model_Total", "Away_WinProb", "Home_WinProb", "Away_FairML", "Home_FairML", "Model_Confidence", "Confidence_Grade"]].copy()
-        table["Away_WinProb"] = (table["Away_WinProb"] * 100).round(1)
-        table["Home_WinProb"] = (table["Home_WinProb"] * 100).round(1)
-        st.dataframe(table, hide_index=True, use_container_width=True)
-        st.download_button("⬇️ Download Full Slate CSV", data=df.to_csv(index=False).encode("utf-8"), file_name="mlb_model_full_slate.csv", mime="text/csv")
+        st.subheader("Full Slate • Ranked Market Board")
+
+        payload = st.session_state.get("general_odds_payload") or {}
+        events = payload.get("events", [])
+        market_error = payload.get("error", "")
+        quota = payload.get("quota", {})
+
+        if not odds_api_key:
+            st.warning("General market feed is not configured. Add ODDS_API_KEY to Streamlit Secrets.")
+        elif market_error:
+            st.warning(f"General market feed error: {market_error}")
+        else:
+            remaining = quota.get("remaining")
+            provider_games = len(events)
+            cap = f" • API credits remaining: {remaining}" if remaining not in [None, ""] else ""
+            st.caption(f"General market feed loaded for {provider_games} MLB event(s){cap}. Consensus = median across available US books.")
+
+        slate_rows = []
+        for _, r in df.iterrows():
+            game_pk = int(r["GamePk"])
+            market = market_for_game(games, events, game_pk)
+            conf = int(r["Model_Confidence"])
+
+            candidates = []
+
+            if market:
+                if market.get("away_ml") is not None:
+                    verdict, edge, ev, imp = bet_grade(float(r["Away_WinProb"]), int(market["away_ml"]), conf)
+                    candidates.append({
+                        "verdict": verdict,
+                        "market": f"{r['Away']} ML",
+                        "odds": int(market["away_ml"]),
+                        "edge": edge,
+                        "ev": ev,
+                        "model_prob": float(r["Away_WinProb"]),
+                        "implied_prob": imp,
+                    })
+                if market.get("home_ml") is not None:
+                    verdict, edge, ev, imp = bet_grade(float(r["Home_WinProb"]), int(market["home_ml"]), conf)
+                    candidates.append({
+                        "verdict": verdict,
+                        "market": f"{r['Home']} ML",
+                        "odds": int(market["home_ml"]),
+                        "edge": edge,
+                        "ev": ev,
+                        "model_prob": float(r["Home_WinProb"]),
+                        "implied_prob": imp,
+                    })
+
+                # Current engine only models standard +/-1.5 run lines.
+                for side, point_key, odds_key in [
+                    ("away", "away_rl", "away_rl_odds"),
+                    ("home", "home_rl", "home_rl_odds"),
+                ]:
+                    point = market.get(point_key)
+                    odds = market.get(odds_key)
+                    if point is None or odds is None or abs(abs(float(point)) - 1.5) > 1e-8:
+                        continue
+
+                    team = r["Away"] if side == "away" else r["Home"]
+                    prefix = "Away" if side == "away" else "Home"
+                    prob_col = f"{prefix}_{float(point):+g}_Prob"
+                    # Columns are stored as Away_+1.5_Prob / Away_-1.5_Prob.
+                    prob_col = f"{prefix}_{'+' if float(point) > 0 else '-'}1.5_Prob"
+                    if prob_col in r.index:
+                        prob = float(r[prob_col])
+                        verdict, edge, ev, imp = bet_grade(prob, int(odds), conf)
+                        candidates.append({
+                            "verdict": verdict,
+                            "market": f"{team} {float(point):+g}",
+                            "odds": int(odds),
+                            "edge": edge,
+                            "ev": ev,
+                            "model_prob": prob,
+                            "implied_prob": imp,
+                        })
+
+                if market.get("total") is not None:
+                    total_line = float(market["total"])
+                    if market.get("over_odds") is not None:
+                        verdict, edge, ev, imp, prob, probs = total_bet_grade(
+                            float(r["Model_Total"]), total_line, "Over", int(market["over_odds"]), conf
+                        )
+                        candidates.append({
+                            "verdict": verdict,
+                            "market": f"Over {total_line:g}",
+                            "odds": int(market["over_odds"]),
+                            "edge": edge,
+                            "ev": ev,
+                            "model_prob": prob,
+                            "implied_prob": imp,
+                        })
+                    if market.get("under_odds") is not None:
+                        verdict, edge, ev, imp, prob, probs = total_bet_grade(
+                            float(r["Model_Total"]), total_line, "Under", int(market["under_odds"]), conf
+                        )
+                        candidates.append({
+                            "verdict": verdict,
+                            "market": f"Under {total_line:g}",
+                            "odds": int(market["under_odds"]),
+                            "edge": edge,
+                            "ev": ev,
+                            "model_prob": prob,
+                            "implied_prob": imp,
+                        })
+
+            candidates = sorted(
+                candidates,
+                key=lambda x: (_verdict_rank(x["verdict"]), x["edge"], x["ev"]),
+                reverse=True,
+            )
+
+            if candidates:
+                best = candidates[0]
+                best_verdict = best["verdict"]
+                best_market = best["market"]
+                best_odds = best["odds"]
+                best_edge = best["edge"]
+                best_ev = best["ev"]
+            else:
+                best_verdict = "NO LINE"
+                best_market = "No general line"
+                best_odds = None
+                best_edge = None
+                best_ev = None
+
+            game_meta = next((g for g in games if int(g["GamePk"]) == game_pk), {})
+            slate_rows.append({
+                "game_pk": game_pk,
+                "kickoff_et": game_meta.get("TimeLabel", ""),
+                "away": r["Away"],
+                "home": r["Home"],
+                "away_proj": float(r["Away_Proj_Runs"]),
+                "home_proj": float(r["Home_Proj_Runs"]),
+                "model_total": float(r["Model_Total"]),
+                "away_fair": int(r["Away_FairML"]),
+                "home_fair": int(r["Home_FairML"]),
+                "confidence": conf,
+                "best_verdict": best_verdict,
+                "best_market": best_market,
+                "best_odds": best_odds,
+                "best_edge": best_edge,
+                "best_ev": best_ev,
+                "market": market,
+                "market_grades": candidates,
+            })
+
+        slate_rows = sorted(
+            slate_rows,
+            key=lambda x: (
+                _verdict_rank(x["best_verdict"]),
+                x["best_edge"] if x["best_edge"] is not None else -999,
+                x["best_ev"] if x["best_ev"] is not None else -999,
+            ),
+            reverse=True,
+        )
+
+        bets = [x for x in slate_rows if x["best_verdict"] in ["STRONG BET", "BET"]]
+        leans = [x for x in slate_rows if x["best_verdict"] == "LEAN"]
+        passes = [x for x in slate_rows if x["best_verdict"] in ["PASS", "NO LINE"]]
+
+        a, b, c = st.columns(3)
+        a.metric("Games", len(slate_rows))
+        b.metric("Bet Signals", len(bets))
+        c.metric("Leans", len(leans))
+
+        def render_game_card(item, rank_num=None):
+            market = item["market"] or {}
+            verdict = item["best_verdict"]
+            rank_text = f"#{rank_num} • " if rank_num is not None else ""
+            best_odds_txt = f" {int(item['best_odds']):+d}" if item["best_odds"] is not None else ""
+            edge_txt = f"{item['best_edge']*100:+.1f}%" if item["best_edge"] is not None else "—"
+            ev_txt = f"{item['best_ev']*100:+.1f}%" if item["best_ev"] is not None else "—"
+
+            away_ml_txt = f"{int(market['away_ml']):+d}" if market.get("away_ml") is not None else "—"
+            home_ml_txt = f"{int(market['home_ml']):+d}" if market.get("home_ml") is not None else "—"
+            total_txt = f"{float(market['total']):g}" if market.get("total") is not None else "—"
+            provider_txt = f"{int(market.get('provider_count', 0))} books" if market else "No line"
+
+            st.markdown(
+                f"""
+                <div class="slate-card">
+                  <div class="slate-card-top">
+                    <div>
+                      <div class="slate-time">{rank_text}{item['kickoff_et']} ET • {provider_txt}</div>
+                      <div class="slate-matchup">{item['away']} <span>@</span> {item['home']}</div>
+                    </div>
+                    <div class="slate-badge {_verdict_class(verdict)}">{verdict}</div>
+                  </div>
+
+                  <div class="slate-reco">
+                    <div class="slate-reco-label">Top Model Call</div>
+                    <div class="slate-reco-value">{item['best_market']}{best_odds_txt}</div>
+                    <div class="slate-reco-meta">Edge {edge_txt} &nbsp;•&nbsp; EV {ev_txt}</div>
+                  </div>
+
+                  <div class="slate-grid">
+                    <div class="slate-box">
+                      <div class="slate-box-label">Projected Score</div>
+                      <div class="slate-box-value">{item['away_proj']:.1f} – {item['home_proj']:.1f}</div>
+                    </div>
+                    <div class="slate-box">
+                      <div class="slate-box-label">Model / Market Total</div>
+                      <div class="slate-box-value">{item['model_total']:.1f} / {total_txt}</div>
+                    </div>
+                    <div class="slate-box">
+                      <div class="slate-box-label">Away Fair / Market</div>
+                      <div class="slate-box-value">{item['away_fair']:+d} / {away_ml_txt}</div>
+                    </div>
+                    <div class="slate-box">
+                      <div class="slate-box-label">Home Fair / Market</div>
+                      <div class="slate-box-value">{item['home_fair']:+d} / {home_ml_txt}</div>
+                    </div>
+                  </div>
+
+                  <div class="slate-footer">
+                    Confidence {item['confidence']}/100
+                    <span>•</span>
+                    Market updated {market.get('last_update') or '—'}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            with st.expander(f"All Markets • {item['away']} @ {item['home']}", expanded=False):
+                if not item["market_grades"]:
+                    st.caption("No current general market was matched to this game.")
+                else:
+                    for m in item["market_grades"]:
+                        odds_txt = f"{int(m['odds']):+d}"
+                        st.markdown(
+                            f"""
+                            <div class="market-row">
+                              <div class="market-row-title">{icon(m['verdict'])} {m['verdict']} · {m['market']} {odds_txt}</div>
+                              <div class="market-row-sub">
+                                Model {m['model_prob']*100:.1f}% • Implied {m['implied_prob']*100:.1f}% •
+                                Edge {m['edge']*100:+.1f}% • EV {m['ev']*100:+.1f}%
+                              </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+        if bets:
+            st.markdown("### Top Bets")
+            for i, item in enumerate(bets, 1):
+                render_game_card(item, i)
+        else:
+            st.info("No current full-slate markets clear the model's BET threshold.")
+
+        with st.expander(f"Leans ({len(leans)})", expanded=False):
+            for item in leans:
+                render_game_card(item)
+
+        with st.expander(f"Passes / No Line ({len(passes)})", expanded=False):
+            for item in passes:
+                render_game_card(item)
+
+        # Merge consensus market snapshot into the downloadable audit export.
+        export_df = df.copy()
+        market_export = []
+        for _, rr in export_df.iterrows():
+            m = market_for_game(games, events, int(rr["GamePk"])) or {}
+            market_export.append(m)
+
+        export_df["Market_Source"] = "The Odds API general US consensus"
+        export_df["Market_Event_ID"] = [m.get("event_id") for m in market_export]
+        export_df["Market_Provider_Count"] = [m.get("provider_count") for m in market_export]
+        export_df["Market_Last_Update"] = [m.get("last_update") for m in market_export]
+        export_df["Market_Away_ML"] = [m.get("away_ml") for m in market_export]
+        export_df["Market_Home_ML"] = [m.get("home_ml") for m in market_export]
+        export_df["Market_Away_RL"] = [m.get("away_rl") for m in market_export]
+        export_df["Market_Away_RL_Odds"] = [m.get("away_rl_odds") for m in market_export]
+        export_df["Market_Home_RL"] = [m.get("home_rl") for m in market_export]
+        export_df["Market_Home_RL_Odds"] = [m.get("home_rl_odds") for m in market_export]
+        export_df["Market_Total"] = [m.get("total") for m in market_export]
+        export_df["Market_Over_Odds"] = [m.get("over_odds") for m in market_export]
+        export_df["Market_Under_Odds"] = [m.get("under_odds") for m in market_export]
+        export_df["Market_Snapshot_UTC"] = pd.Timestamp.utcnow().isoformat()
+
+        st.download_button(
+            "⬇️ Download Full Slate + Market CSV",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name="mlb_model_v080_full_slate_market.csv",
+            mime="text/csv",
+        )
+
+        with st.expander("Raw Slate Audit Table", expanded=False):
+            audit_cols = [
+                "Game", "Away_Proj_Runs", "Home_Proj_Runs", "Model_Total",
+                "Away_WinProb", "Home_WinProb", "Away_FairML", "Home_FairML",
+                "Model_Confidence", "Confidence_Grade",
+                "Market_Away_ML", "Market_Home_ML", "Market_Away_RL",
+                "Market_Away_RL_Odds", "Market_Home_RL", "Market_Home_RL_Odds",
+                "Market_Total", "Market_Over_Odds", "Market_Under_Odds",
+                "Market_Provider_Count", "Market_Last_Update",
+            ]
+            st.dataframe(export_df[audit_cols], hide_index=True, use_container_width=True)
 
 st.divider()
-st.caption("Screenshot reading is best-effort; always verify parsed sportsbook prices. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
+st.caption("General market lines are median consensus snapshots across available US books. Screenshot reading remains available for 734/manual overrides. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
