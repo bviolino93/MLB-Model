@@ -20,7 +20,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.8.1-AUTO-MARKET"
+APP_VERSION = "0.8.2-ODDS-KEY-HOTFIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -1209,8 +1209,14 @@ if "last_results" in st.session_state:
             st.warning(
                 "Automatic market feed is not configured. Add ODDS_API_KEY to Streamlit Secrets."
             )
+            st.caption('Streamlit Secrets format: ODDS_API_KEY = "your_new_key_here"')
         elif market_error:
-            st.warning(f"General market feed error: {market_error}")
+            safe_market_error = str(market_error)
+            # Never expose the secret if a requests exception includes the full URL.
+            if odds_api_key:
+                safe_market_error = safe_market_error.replace(str(odds_api_key), "[REDACTED]")
+            safe_market_error = re.sub(r"apiKey=[^&\s]+", "apiKey=[REDACTED]", safe_market_error, flags=re.I)
+            st.warning(f"General market feed error: {safe_market_error}")
         elif not current_market:
             st.warning(
                 "No current consensus market matched this game. "
