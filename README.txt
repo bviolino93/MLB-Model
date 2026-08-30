@@ -1,39 +1,55 @@
-MLB Edge v0.10.3-SEASON-SCHEDULE-FIX
+MLB Edge v0.10.4-MONEYLINE-MASTER
 
-Fix
-===
-The free MLB schedule lookup now runs one calendar year at a time instead of
-requesting the entire 2023-2025 range in one call.
+Purpose
+=======
+Convert the paid 2023-2025 historical Moneyline export into a clean master
+dataset with actual final MLB results and a market benchmark.
 
-Why
-===
-The prior multi-year schedule request returned only 188 distinct game dates,
-which was clearly incomplete for three MLB seasons and understated the paid
-Historical Odds credit estimate.
+ZERO additional Odds API credits are required for this step.
 
-New safeguards
-==============
-- Fetch 2023, 2024, 2025 schedule ranges separately
-- Combine and deduplicate dates
-- Display distinct game-date count for each season
-- Full included seasons must each show at least 150 distinct regular-season
-  game dates before the paid Historical Odds build button is enabled
-- If the schedule sanity check fails, paid downloading is blocked
+Workflow
+========
+Backtest Lab -> Moneyline Master Dataset
 
-Credit behavior
+1. Upload the Historical Market CSV from the paid Moneyline pull.
+2. The app cleans it:
+   - valid two-way American Moneyline prices only
+   - 0 to 18 hours before first pitch
+   - one row per historical Event_ID
+3. Click Build Moneyline Master Dataset.
+4. Final scores/results are pulled from MLB's free Stats API.
+5. Historical market odds are converted to no-vig win probabilities.
+6. Games are matched to results by normalized away/home teams, UTC game date,
+   and nearest commence time.
+7. Download mlb_moneyline_master_2023_2025.csv.
+
+Outputs
+=======
+- Away/Home historical Moneyline
+- Away/Home no-vig market probability
+- MLB final score
+- winner
+- away/home win flag
+- favorite and favorite probability
+- favorite result
+- bookmaker count
+- hours before first pitch
+- season
+- result-match status
+
+Market baseline
 ===============
-The MLB schedule lookup remains free and consumes zero Odds API credits.
-No Historical Odds credits are used merely by opening the app.
+The app displays:
+- matched game count
+- market favorite win rate
+- market Brier score
+- probability calibration buckets
+- season-by-season favorite win rate / implied probability / book depth
 
-Recommended workflow
-====================
-1. Deploy v0.10.3.
-2. Open Backtest Lab -> Historical Data Builder.
-3. Confirm 2023, 2024, and 2025 each show roughly a full season of distinct
-   game dates, and total dates are around the expected multi-season range.
-4. Confirm Moneyline credit estimate.
-5. Only then activate the paid Historical Odds plan.
-6. Start with Moneyline only.
+Important
+=========
+This creates the historical MARKET + RESULT master dataset.
 
-Historical snapshot remains 15:00 UTC and is a consistent pregame baseline,
-not a verified closing line.
+It does not yet reconstruct the production model's historical point-in-time
+features/probabilities. That is the next validation layer. We should not use
+future/full-season information when building historical model predictions.

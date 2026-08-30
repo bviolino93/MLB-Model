@@ -27,7 +27,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.3-SEASON-SCHEDULE-FIX"
+APP_VERSION = "0.10.4-MONEYLINE-MASTER"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -2352,6 +2352,316 @@ def restore_cache_zip(uploaded_file):
             (HISTORY_CACHE_DIR/name).write_bytes(zf.read(member)); restored+=1
     return restored
 
+
+MLB_RESULTS_CACHE_DIR = Path(".mlb_results_cache")
+
+
+def american_to_implied_prob(odds):
+    o = valid_american_odds(odds)
+    if o is None:
+        return None
+    o = float(o)
+    if o < 0:
+        return abs(o) / (abs(o) + 100.0)
+    return 100.0 / (o + 100.0)
+
+
+def two_way_no_vig_prob(odds_a, odds_b):
+    pa = american_to_implied_prob(odds_a)
+    pb = american_to_implied_prob(odds_b)
+    if pa is None or pb is None:
+        return None, None
+    denom = pa + pb
+    if denom <= 0:
+        return None, None
+    return pa / denom, pb / denom
+
+
+def clean_historical_moneyline_df(df, max_hours_to_first_pitch=18.0):
+    """
+    Clean the paid historical market export into one usable pregame ML row per event.
+    Keeps games 0–18 hours from first pitch and valid two-way American prices.
+    """
+    out = df.copy()
+
+    required = [
+        "Snapshot_Date", "Event_ID", "Commence_Time",
+        "Away_Team", "Home_Team", "Away_ML", "Home_ML"
+    ]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        return None, {"missing": missing}
+
+    out["Snapshot_Date"] = pd.to_datetime(out["Snapshot_Date"], errors="coerce", utc=True)
+    out["Commence_Time"] = pd.to_datetime(out["Commence_Time"], errors="coerce", utc=True)
+    out["Away_ML"] = pd.to_numeric(out["Away_ML"], errors="coerce")
+    out["Home_ML"] = pd.to_numeric(out["Home_ML"], errors="coerce")
+
+    # Snapshot hour is 15:00 UTC by design in v0.10.3.
+    out["Snapshot_Timestamp"] = (
+        out["Snapshot_Date"].dt.normalize()
+        + pd.to_timedelta(pd.to_numeric(out.get("Snapshot_Hour_UTC", 15), errors="coerce").fillna(15), unit="h")
+    )
+    out["Hours_To_First_Pitch"] = (
+        (out["Commence_Time"] - out["Snapshot_Timestamp"]).dt.total_seconds() / 3600.0
+    )
+
+    out["Away_ML_Valid"] = out["Away_ML"].apply(lambda x: valid_american_odds(x) is not None)
+    out["Home_ML_Valid"] = out["Home_ML"].apply(lambda x: valid_american_odds(x) is not None)
+
+    cleaned = out[
+        out["Away_ML_Valid"]
+        & out["Home_ML_Valid"]
+        & out["Hours_To_First_Pitch"].between(0, float(max_hours_to_first_pitch), inclusive="both")
+    ].copy()
+
+    # One row per historical event.
+    cleaned = (
+        cleaned.sort_values(["Commence_Time", "Snapshot_Timestamp"])
+        .drop_duplicates(["Event_ID"], keep="last")
+    )
+
+    no_vig = cleaned.apply(
+        lambda r: two_way_no_vig_prob(r["Away_ML"], r["Home_ML"]),
+        axis=1
+    )
+    cleaned["Away_Market_Prob"] = [x[0] for x in no_vig]
+    cleaned["Home_Market_Prob"] = [x[1] for x in no_vig]
+
+    cleaned["Season"] = cleaned["Commence_Time"].dt.year
+    cleaned["Game_Date_UTC"] = cleaned["Commence_Time"].dt.date.astype(str)
+
+    stats = {
+        "raw_rows": len(out),
+        "clean_rows": len(cleaned),
+        "invalid_away_ml": int((~out["Away_ML_Valid"]).sum()),
+        "invalid_home_ml": int((~out["Home_ML_Valid"]).sum()),
+        "outside_window": int((~out["Hours_To_First_Pitch"].between(0, float(max_hours_to_first_pitch), inclusive="both")).sum()),
+        "missing": [],
+    }
+    return cleaned, stats
+
+
+def _mlb_results_cache_file(season):
+    MLB_RESULTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return MLB_RESULTS_CACHE_DIR / f"mlb_results_{int(season)}.json"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_mlb_results_season(season):
+    """
+    Pull one season of final MLB regular-season results from MLB's free Stats API.
+    Zero Odds API credits.
+    """
+    cache_file = _mlb_results_cache_file(season)
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text()), None, True
+        except Exception:
+            pass
+
+    url = "https://statsapi.mlb.com/api/v1/schedule"
+    params = {
+        "sportId": 1,
+        "gameType": "R",
+        "season": int(season),
+        "startDate": f"{int(season)}-03-20",
+        "endDate": f"{int(season)}-10-10",
+        "hydrate": "linescore",
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=35)
+    except requests.RequestException:
+        return None, f"Could not reach MLB's free results service for {season}.", False
+
+    if resp.status_code != 200:
+        return None, f"MLB results service returned HTTP {resp.status_code} for {season}.", False
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return None, f"MLB results response for {season} was not valid JSON.", False
+
+    try:
+        cache_file.write_text(json.dumps(payload))
+    except Exception:
+        pass
+
+    return payload, None, False
+
+
+def flatten_mlb_results(payload):
+    rows = []
+    if not isinstance(payload, dict):
+        return rows
+
+    for day in payload.get("dates", []) or []:
+        for game in day.get("games", []) or []:
+            status = ((game.get("status") or {}).get("abstractGameState") or "").lower()
+            detailed = ((game.get("status") or {}).get("detailedState") or "").lower()
+            if status != "final" and "final" not in detailed and "completed" not in detailed:
+                continue
+
+            teams = game.get("teams") or {}
+            away_obj = teams.get("away") or {}
+            home_obj = teams.get("home") or {}
+
+            away_team = ((away_obj.get("team") or {}).get("name"))
+            home_team = ((home_obj.get("team") or {}).get("name"))
+            away_score = away_obj.get("score")
+            home_score = home_obj.get("score")
+
+            try:
+                away_score = int(away_score)
+                home_score = int(home_score)
+            except Exception:
+                continue
+
+            rows.append({
+                "MLB_GamePk": game.get("gamePk"),
+                "Result_Commence_Time": game.get("gameDate"),
+                "Result_Game_Date": day.get("date"),
+                "Away_Team_Result": away_team,
+                "Home_Team_Result": home_team,
+                "Away_Score": away_score,
+                "Home_Score": home_score,
+                "Winner": away_team if away_score > home_score else home_team,
+                "Away_Win": int(away_score > home_score),
+                "Home_Win": int(home_score > away_score),
+                "Final_Total_Runs": away_score + home_score,
+            })
+    return rows
+
+
+def normalize_team_name_for_match(name):
+    if name is None:
+        return ""
+    s = str(name).lower().strip()
+    replacements = {
+        "d-backs": "diamondbacks",
+        "arizona d-backs": "arizona diamondbacks",
+        "athletics": "oakland athletics",
+        "a's": "oakland athletics",
+        "la angels": "los angeles angels",
+    }
+    s = replacements.get(s, s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def build_moneyline_master(clean_market_df, results_df):
+    """
+    Match cleaned historical market rows to free MLB final results using
+    normalized away/home team names plus commence date proximity.
+    """
+    market = clean_market_df.copy()
+    results = results_df.copy()
+
+    market["_away_key"] = market["Away_Team"].map(normalize_team_name_for_match)
+    market["_home_key"] = market["Home_Team"].map(normalize_team_name_for_match)
+    market["_game_day"] = market["Commence_Time"].dt.date.astype(str)
+
+    results["Result_Commence_Time"] = pd.to_datetime(
+        results["Result_Commence_Time"], errors="coerce", utc=True
+    )
+    results["_away_key"] = results["Away_Team_Result"].map(normalize_team_name_for_match)
+    results["_home_key"] = results["Home_Team_Result"].map(normalize_team_name_for_match)
+    results["_game_day"] = results["Result_Commence_Time"].dt.date.astype(str)
+
+    # Exact team/date match handles virtually all games and doubleheaders because
+    # commence times differ. Merge candidates, then pick nearest time.
+    cand = market.merge(
+        results,
+        on=["_away_key", "_home_key", "_game_day"],
+        how="left",
+        suffixes=("", "_res")
+    )
+
+    cand["_time_diff_min"] = (
+        (cand["Commence_Time"] - cand["Result_Commence_Time"]).abs().dt.total_seconds() / 60.0
+    )
+
+    cand = (
+        cand.sort_values(["Event_ID", "_time_diff_min"], na_position="last")
+        .drop_duplicates(["Event_ID"], keep="first")
+    )
+
+    cand["Result_Matched"] = cand["MLB_GamePk"].notna()
+    cand["Market_Favorite"] = np.where(
+        cand["Home_Market_Prob"] >= cand["Away_Market_Prob"],
+        cand["Home_Team"], cand["Away_Team"]
+    )
+    cand["Favorite_Prob"] = cand[["Home_Market_Prob", "Away_Market_Prob"]].max(axis=1)
+    cand["Favorite_Won"] = np.where(
+        cand["Result_Matched"],
+        (cand["Winner"] == cand["Market_Favorite"]).astype(int),
+        np.nan
+    )
+
+    keep = [
+        "Season", "Game_Date_UTC", "Event_ID", "MLB_GamePk", "Commence_Time",
+        "Snapshot_Timestamp", "Hours_To_First_Pitch",
+        "Away_Team", "Home_Team", "Away_ML", "Home_ML",
+        "Away_Market_Prob", "Home_Market_Prob",
+        "ML_Books", "Away_Score", "Home_Score", "Winner",
+        "Away_Win", "Home_Win", "Final_Total_Runs",
+        "Market_Favorite", "Favorite_Prob", "Favorite_Won",
+        "Result_Matched"
+    ]
+    keep = [c for c in keep if c in cand.columns]
+    return cand[keep].copy()
+
+
+def market_calibration_summary(master_df):
+    x = master_df[master_df["Result_Matched"]].copy()
+    if x.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for side in ["Away", "Home"]:
+        pcol = f"{side}_Market_Prob"
+        wcol = f"{side}_Win"
+        tmp = x[[pcol, wcol]].dropna().copy()
+        tmp["Bucket"] = pd.cut(
+            tmp[pcol],
+            bins=[0,.40,.45,.50,.55,.60,.65,.70,1.0],
+            labels=["<40%","40–45%","45–50%","50–55%","55–60%","60–65%","65–70%","70%+"],
+            include_lowest=True,
+            right=False
+        )
+        for bucket, grp in tmp.groupby("Bucket", observed=True):
+            if grp.empty:
+                continue
+            rows.append({
+                "Probability Bucket": str(bucket),
+                "Team-Sides": len(grp),
+                "Avg Market %": round(grp[pcol].mean()*100,1),
+                "Actual Win %": round(grp[wcol].mean()*100,1),
+                "Abs Error": round(abs(grp[pcol].mean()-grp[wcol].mean())*100,1),
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return (
+        out.groupby("Probability Bucket", as_index=False)
+        .agg({
+            "Team-Sides":"sum",
+            "Avg Market %":"mean",
+            "Actual Win %":"mean",
+            "Abs Error":"mean"
+        })
+        .round({"Avg Market %":1,"Actual Win %":1,"Abs Error":1})
+    )
+
+
+def moneyline_market_brier(master_df):
+    x = master_df[master_df["Result_Matched"]].dropna(
+        subset=["Home_Market_Prob", "Home_Win"]
+    )
+    if x.empty:
+        return None
+    return float(((x["Home_Market_Prob"] - x["Home_Win"].astype(float))**2).mean())
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -2978,6 +3288,162 @@ if mode == "Backtest Lab":
                 )
             else:
                 st.info("No cached historical game rows are available yet.")
+
+    st.divider()
+
+    st.markdown('<div class="section-kicker">MONEYLINE MASTER DATASET</div>', unsafe_allow_html=True)
+    st.caption(
+        "Turn the paid historical Moneyline export into a clean, result-matched master dataset. "
+        "MLB final scores come from MLB's free Stats API, so this step uses zero Odds API credits."
+    )
+
+    ml_history_upload = st.file_uploader(
+        "Upload Historical Market CSV",
+        type=["csv"],
+        key="moneyline_master_upload",
+        help="Use the Moneyline CSV downloaded from Historical Data Builder."
+    )
+
+    if ml_history_upload is not None:
+        try:
+            ml_raw = pd.read_csv(ml_history_upload)
+            ml_clean, clean_stats = clean_historical_moneyline_df(
+                ml_raw, max_hours_to_first_pitch=18.0
+            )
+
+            if clean_stats.get("missing"):
+                st.error("Missing columns: " + ", ".join(clean_stats["missing"]))
+            elif ml_clean is None or ml_clean.empty:
+                st.error("No usable Moneyline rows remained after cleaning.")
+            else:
+                st.markdown(
+                    f"""
+                    <div class="bt-metrics">
+                      <div class="bt-metric"><span>Raw Rows</span><b>{clean_stats['raw_rows']:,}</b></div>
+                      <div class="bt-metric"><span>Usable Games</span><b>{clean_stats['clean_rows']:,}</b></div>
+                      <div class="bt-metric"><span>Invalid Away ML</span><b>{clean_stats['invalid_away_ml']:,}</b></div>
+                      <div class="bt-metric"><span>Invalid Home ML</span><b>{clean_stats['invalid_home_ml']:,}</b></div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                st.caption(
+                    "Cleaning rule: valid two-way American prices and 0–18 hours before first pitch, "
+                    "then one row per historical event."
+                )
+
+                seasons = sorted(
+                    int(x) for x in ml_clean["Season"].dropna().unique().tolist()
+                )
+
+                if st.button(
+                    "Build Moneyline Master Dataset",
+                    type="primary",
+                    key="build_moneyline_master"
+                ):
+                    result_rows = []
+                    result_errors = []
+                    cache_notes = []
+
+                    prog = st.progress(0)
+                    stat = st.empty()
+
+                    for i, season in enumerate(seasons, start=1):
+                        stat.caption(f"Getting final MLB results for {season}…")
+                        payload, err, cached = fetch_mlb_results_season(season)
+                        if err:
+                            result_errors.append(err)
+                            continue
+                        result_rows.extend(flatten_mlb_results(payload))
+                        cache_notes.append(f"{season}: {'cached' if cached else 'downloaded free'}")
+                        prog.progress(i / max(1, len(seasons)))
+
+                    prog.empty()
+                    stat.empty()
+
+                    if result_errors:
+                        for err in result_errors:
+                            st.warning(err)
+
+                    if not result_rows:
+                        st.error("No MLB final results were available.")
+                    else:
+                        results_df = pd.DataFrame(result_rows)
+                        master_df = build_moneyline_master(ml_clean, results_df)
+
+                        matched = int(master_df["Result_Matched"].sum())
+                        total = len(master_df)
+                        match_rate = matched / total if total else 0.0
+
+                        st.session_state["moneyline_master_df"] = master_df
+
+                        st.success(
+                            f"Moneyline Master ready: {matched:,} of {total:,} games matched "
+                            f"to final MLB results ({match_rate*100:.1f}%)."
+                        )
+                        st.caption(" • ".join(cache_notes))
+
+                        if match_rate < .985:
+                            st.warning(
+                                "Result match rate is below 98.5%. Review unmatched games before using this for model validation."
+                            )
+
+        except Exception as ex:
+            st.error(f"Could not process Historical Market CSV: {ex}")
+
+    if "moneyline_master_df" in st.session_state:
+        master_df = st.session_state["moneyline_master_df"].copy()
+        matched_df = master_df[master_df["Result_Matched"]].copy()
+
+        if not matched_df.empty:
+            st.markdown('<div class="section-kicker">MARKET BASELINE</div>', unsafe_allow_html=True)
+
+            m1, m2, m3, m4 = st.columns(4)
+            fav_win = matched_df["Favorite_Won"].mean()
+            brier = moneyline_market_brier(matched_df)
+            with m1:
+                st.metric("Matched games", f"{len(matched_df):,}")
+            with m2:
+                st.metric("Market favorite win %", f"{fav_win*100:.1f}%")
+            with m3:
+                st.metric("Market Brier", f"{brier:.4f}" if brier is not None else "—")
+            with m4:
+                med_books = pd.to_numeric(
+                    matched_df.get("ML_Books"), errors="coerce"
+                ).median()
+                st.metric("Median books", f"{med_books:.0f}" if pd.notna(med_books) else "—")
+
+            cal = market_calibration_summary(matched_df)
+            if not cal.empty:
+                st.dataframe(cal, use_container_width=True, hide_index=True)
+
+            by_season = (
+                matched_df.groupby("Season")
+                .agg(
+                    Games=("Event_ID","count"),
+                    Favorite_Win_Pct=("Favorite_Won","mean"),
+                    Avg_Favorite_Prob=("Favorite_Prob","mean"),
+                    Median_Books=("ML_Books","median")
+                )
+                .reset_index()
+            )
+            by_season["Favorite Win %"] = (by_season["Favorite_Win_Pct"]*100).round(1)
+            by_season["Avg Favorite %"] = (by_season["Avg_Favorite_Prob"]*100).round(1)
+            by_season = by_season[
+                ["Season","Games","Favorite Win %","Avg Favorite %","Median_Books"]
+            ]
+            st.dataframe(by_season, use_container_width=True, hide_index=True)
+
+        with st.expander("Preview / download Moneyline Master", expanded=False):
+            st.dataframe(master_df.head(150), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Moneyline Master CSV",
+                master_df.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_moneyline_master_2023_2025.csv",
+                mime="text/csv",
+                key="download_moneyline_master"
+            )
 
     st.divider()
     uploaded_bt = st.file_uploader(
