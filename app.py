@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.3-PITCHER-CAUSALITY-AUDIT"
+APP_VERSION = "0.13.0-PITCHER-MODEL-2"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3223,52 +3223,154 @@ def parse_pitcher_gamelog(payload):
                 "homeRuns": num("homeRuns", 0.0),
                 "earnedRuns": num("earnedRuns", 0.0),
                 "battersFaced": num("battersFaced", 0.0),
+                "numberOfPitches": num("numberOfPitches", np.nan),
+                "hitBatsmen": num("hitBatsmen", 0.0),
             })
     return pd.DataFrame(rows)
 
 
 def summarize_pitcher_before_game(gamelog_df, game_time, min_starts=3):
-    """
-    Point-in-time pitcher form using only prior starts before game_time.
+    """Point-in-time starter profile using only starts before game_time.
+
+    v0.13 keeps the original v0.12 features for apples-to-apples benchmarking and
+    adds a more baseball-specific profile: FIP-style components, exponential
+    recency weighting, shrinkage toward league priors, workload, pitch-count and
+    rest features. Nothing from the target game is used.
     """
     if gamelog_df is None or gamelog_df.empty:
         return None
 
     g = gamelog_df.copy()
+    g["date"] = pd.to_datetime(g["date"], errors="coerce", utc=True)
     g = g[g["date"] < game_time].copy()
     if "gamesStarted" in g.columns:
         g = g[g["gamesStarted"] >= 1].copy()
+    g = g.sort_values("date").reset_index(drop=True)
     if len(g) < int(min_starts):
         return None
 
-    last5 = g.sort_values("date").tail(5)
-    season = g.sort_values("date")
+    def col(name, default=0.0):
+        if name not in g.columns:
+            return pd.Series(default, index=g.index, dtype=float)
+        return pd.to_numeric(g[name], errors="coerce").fillna(default).astype(float)
 
-    ip = pd.to_numeric(season["inningsPitched"], errors="coerce").sum()
-    er = pd.to_numeric(season["earnedRuns"], errors="coerce").sum()
-    so = pd.to_numeric(season["strikeOuts"], errors="coerce").sum()
-    bb = pd.to_numeric(season["baseOnBalls"], errors="coerce").sum()
-    hr = pd.to_numeric(season["homeRuns"], errors="coerce").sum()
-    h = pd.to_numeric(season["hits"], errors="coerce").sum()
+    ip_s = col("inningsPitched")
+    er_s = col("earnedRuns")
+    so_s = col("strikeOuts")
+    bb_s = col("baseOnBalls")
+    hr_s = col("homeRuns")
+    h_s = col("hits")
+    pitches_s = pd.to_numeric(g.get("numberOfPitches", pd.Series(np.nan, index=g.index)), errors="coerce")
 
-    l5_ip = pd.to_numeric(last5["inningsPitched"], errors="coerce").sum()
-    l5_er = pd.to_numeric(last5["earnedRuns"], errors="coerce").sum()
-    l5_so = pd.to_numeric(last5["strikeOuts"], errors="coerce").sum()
-    l5_bb = pd.to_numeric(last5["baseOnBalls"], errors="coerce").sum()
-
-    if ip <= 0 or l5_ip <= 0:
+    ip = float(ip_s.sum()); er = float(er_s.sum()); so = float(so_s.sum())
+    bb = float(bb_s.sum()); hr = float(hr_s.sum()); hits = float(h_s.sum())
+    if ip <= 0:
         return None
 
+    last5 = g.tail(5).copy()
+    l5_ip = float(pd.to_numeric(last5["inningsPitched"], errors="coerce").fillna(0).sum())
+    l5_er = float(pd.to_numeric(last5["earnedRuns"], errors="coerce").fillna(0).sum())
+    l5_so = float(pd.to_numeric(last5["strikeOuts"], errors="coerce").fillna(0).sum())
+    l5_bb = float(pd.to_numeric(last5["baseOnBalls"], errors="coerce").fillna(0).sum())
+    if l5_ip <= 0:
+        return None
+
+    # Original v0.12 features.
+    season_era = 9.0 * er / ip
+    season_k9 = 9.0 * so / ip
+    season_bb9 = 9.0 * bb / ip
+    season_hr9 = 9.0 * hr / ip
+    season_whip = (hits + bb) / ip
+    l5_era = 9.0 * l5_er / l5_ip
+    l5_k9 = 9.0 * l5_so / l5_ip
+    l5_bb9 = 9.0 * l5_bb / l5_ip
+
+    # FIP-style estimator. The constant is fixed and therefore cannot leak target-game info.
+    fip_const = 3.20
+    season_fip = (13.0 * hr + 3.0 * bb - 2.0 * so) / ip + fip_const
+    season_kbb9 = 9.0 * (so - bb) / ip
+
+    # Exponential recency weighting by START, half-life = 3 starts.
+    n = len(g)
+    age = np.arange(n - 1, -1, -1, dtype=float)  # newest start age 0
+    weights = np.power(0.5, age / 3.0)
+    wip = float(np.sum(weights * ip_s.to_numpy(float)))
+    if wip <= 0:
+        return None
+    wer = float(np.sum(weights * er_s.to_numpy(float)))
+    wso = float(np.sum(weights * so_s.to_numpy(float)))
+    wbb = float(np.sum(weights * bb_s.to_numpy(float)))
+    whr = float(np.sum(weights * hr_s.to_numpy(float)))
+    whits = float(np.sum(weights * h_s.to_numpy(float)))
+    ew_era = 9.0 * wer / wip
+    ew_k9 = 9.0 * wso / wip
+    ew_bb9 = 9.0 * wbb / wip
+    ew_hr9 = 9.0 * whr / wip
+    ew_whip = (whits + wbb) / wip
+    ew_fip = (13.0 * whr + 3.0 * wbb - 2.0 * wso) / wip + fip_const
+    ew_kbb9 = 9.0 * (wso - wbb) / wip
+
+    # Empirical-Bayes shrinkage toward broad MLB starter priors. We intentionally
+    # use fixed priors rather than season-end league stats to avoid look-ahead.
+    prior_ip = 20.0
+    prior = {"ERA": 4.20, "K9": 8.50, "BB9": 3.20, "HR9": 1.20, "WHIP": 1.30, "FIP": 4.20, "KBB9": 5.30}
+    shrink_w = ip / (ip + prior_ip)
+    shr_era = shrink_w * season_era + (1.0 - shrink_w) * prior["ERA"]
+    shr_k9 = shrink_w * season_k9 + (1.0 - shrink_w) * prior["K9"]
+    shr_bb9 = shrink_w * season_bb9 + (1.0 - shrink_w) * prior["BB9"]
+    shr_hr9 = shrink_w * season_hr9 + (1.0 - shrink_w) * prior["HR9"]
+    shr_whip = shrink_w * season_whip + (1.0 - shrink_w) * prior["WHIP"]
+    shr_fip = shrink_w * season_fip + (1.0 - shrink_w) * prior["FIP"]
+    shr_kbb9 = shrink_w * season_kbb9 + (1.0 - shrink_w) * prior["KBB9"]
+
+    last_start = g.iloc[-1]
+    last_date = pd.to_datetime(last_start["date"], utc=True)
+    days_rest = max(0.0, (game_time - last_date).total_seconds() / 86400.0)
+    cutoff14 = game_time - pd.Timedelta(days=14)
+    cutoff30 = game_time - pd.Timedelta(days=30)
+    work14 = float(pd.to_numeric(g.loc[g["date"] >= cutoff14, "inningsPitched"], errors="coerce").fillna(0).sum())
+    work30 = float(pd.to_numeric(g.loc[g["date"] >= cutoff30, "inningsPitched"], errors="coerce").fillna(0).sum())
+    last_pitch = pd.to_numeric(pd.Series([last_start.get("numberOfPitches", np.nan)]), errors="coerce").iloc[0]
+    p5 = pd.to_numeric(g.tail(5).get("numberOfPitches", pd.Series(dtype=float)), errors="coerce")
+    avg_pitches5 = float(p5.mean()) if len(p5) and p5.notna().any() else np.nan
+
     return {
-        "Starts": int(len(season)),
-        "ERA": 9.0 * er / ip,
-        "K9": 9.0 * so / ip,
-        "BB9": 9.0 * bb / ip,
-        "HR9": 9.0 * hr / ip,
-        "WHIP_Approx": (h + bb) / ip,
-        "Last5_ERA": 9.0 * l5_er / l5_ip,
-        "Last5_K9": 9.0 * l5_so / l5_ip,
-        "Last5_BB9": 9.0 * l5_bb / l5_ip,
+        "Starts": int(len(g)),
+        "ERA": season_era,
+        "K9": season_k9,
+        "BB9": season_bb9,
+        "HR9": season_hr9,
+        "WHIP_Approx": season_whip,
+        "Last5_ERA": l5_era,
+        "Last5_K9": l5_k9,
+        "Last5_BB9": l5_bb9,
+        # v0.13 engineered features
+        "Season_IP": ip,
+        "IP_Per_Start": ip / max(1.0, float(len(g))),
+        "FIP": season_fip,
+        "KBB9": season_kbb9,
+        "EW_ERA": ew_era,
+        "EW_K9": ew_k9,
+        "EW_BB9": ew_bb9,
+        "EW_HR9": ew_hr9,
+        "EW_WHIP": ew_whip,
+        "EW_FIP": ew_fip,
+        "EW_KBB9": ew_kbb9,
+        "Shrunk_ERA": shr_era,
+        "Shrunk_K9": shr_k9,
+        "Shrunk_BB9": shr_bb9,
+        "Shrunk_HR9": shr_hr9,
+        "Shrunk_WHIP": shr_whip,
+        "Shrunk_FIP": shr_fip,
+        "Shrunk_KBB9": shr_kbb9,
+        "Form_ERA_Delta": ew_era - shr_era,
+        "Form_FIP_Delta": ew_fip - shr_fip,
+        "Form_KBB9_Delta": ew_kbb9 - shr_kbb9,
+        "Days_Rest": days_rest,
+        "Workload14_IP": work14,
+        "Workload30_IP": work30,
+        "Last_Start_Pitches": float(last_pitch) if pd.notna(last_pitch) else np.nan,
+        "Avg_Pitches_Last5": avg_pitches5,
     }
 
 
@@ -3913,6 +4015,122 @@ def run_pitcher_causality_audit(master_df, min_prior_games=12, min_pitcher_start
         for name,g in [("Favorites",x[x["Odds"]<0]),("Underdogs",x[x["Odds"]>0])]:
             seg.append({"Segment":name,**summarize_sim_bets(g)})
     return {"pit":pit,"table":table,"results":full,"segments":pd.DataFrame(seg)}
+
+
+PITCHER_V2_FEATURES = [
+    "Season_WinPct_Diff","Season_RunDiff_Diff","Last10_WinPct_Diff","Last10_RunDiff_Diff","Rest_Diff",
+    "V2_Shrunk_FIP_Diff","V2_Shrunk_ERA_Diff","V2_Shrunk_KBB9_Diff",
+    "V2_EW_FIP_Diff","V2_EW_KBB9_Diff","V2_Form_FIP_Diff","V2_Form_KBB9_Diff",
+    "V2_IPPerStart_Diff","V2_DaysRest_Diff","V2_Workload14_Diff","V2_Workload30_Diff",
+    "V2_LastStartPitches_Diff","V2_AvgPitches5_Diff","V2_Starts_Diff",
+]
+
+
+def pitcher_v2_feature_matrix(df):
+    """Engineered v0.13 starter features. Signs are oriented so positive generally
+    means a home-side advantage when practical; ridge logistic is free to learn
+    either direction. Missing pitch-count fields are imputed from development data.
+    """
+    x = pit_feature_matrix(df).copy()
+    x["V2_Shrunk_FIP_Diff"] = df["Away_SP_Shrunk_FIP"] - df["Home_SP_Shrunk_FIP"]
+    x["V2_Shrunk_ERA_Diff"] = df["Away_SP_Shrunk_ERA"] - df["Home_SP_Shrunk_ERA"]
+    x["V2_Shrunk_KBB9_Diff"] = df["Home_SP_Shrunk_KBB9"] - df["Away_SP_Shrunk_KBB9"]
+    x["V2_EW_FIP_Diff"] = df["Away_SP_EW_FIP"] - df["Home_SP_EW_FIP"]
+    x["V2_EW_KBB9_Diff"] = df["Home_SP_EW_KBB9"] - df["Away_SP_EW_KBB9"]
+    x["V2_Form_FIP_Diff"] = df["Away_SP_Form_FIP_Delta"] - df["Home_SP_Form_FIP_Delta"]
+    x["V2_Form_KBB9_Diff"] = df["Home_SP_Form_KBB9_Delta"] - df["Away_SP_Form_KBB9_Delta"]
+    x["V2_IPPerStart_Diff"] = df["Home_SP_IP_Per_Start"] - df["Away_SP_IP_Per_Start"]
+    x["V2_DaysRest_Diff"] = df["Home_SP_Days_Rest"] - df["Away_SP_Days_Rest"]
+    x["V2_Workload14_Diff"] = df["Away_SP_Workload14_IP"] - df["Home_SP_Workload14_IP"]
+    x["V2_Workload30_Diff"] = df["Away_SP_Workload30_IP"] - df["Home_SP_Workload30_IP"]
+    x["V2_LastStartPitches_Diff"] = df["Away_SP_Last_Start_Pitches"] - df["Home_SP_Last_Start_Pitches"]
+    x["V2_AvgPitches5_Diff"] = df["Home_SP_Avg_Pitches_Last5"] - df["Away_SP_Avg_Pitches_Last5"]
+    x["V2_Starts_Diff"] = df["Home_SP_Starts"] - df["Away_SP_Starts"]
+    return x
+
+
+def _fit_feature_model_walkforward(d, feature_builder, label, ridge=3.0):
+    """Fixed 2023 train -> 2024 blend selection -> 2023+24 refit -> 2025 holdout.
+    Betting thresholds are exactly the same simulate_ml_bets defaults used in v0.12.3.
+    """
+    raw = d.copy().reset_index(drop=True)
+    fmat = feature_builder(raw).reset_index(drop=True)
+    work = pd.concat([raw, fmat], axis=1)
+    fcols = list(fmat.columns)
+    tr = work[work["Season"] == 2023].copy()
+    va = work[work["Season"] == 2024].copy()
+    ho = work[work["Season"] == 2025].copy()
+    if min(len(tr), len(va), len(ho)) < 150:
+        return {"Model":label,"Error":f"Too little coverage: {len(tr)}/{len(va)}/{len(ho)}"}
+
+    Xtr, Xva = tr[fcols].to_numpy(float), va[fcols].to_numpy(float)
+    ytr, yva = tr["Home_Win"].to_numpy(float), va["Home_Win"].to_numpy(float)
+    Xtrz, Xvaz, _, _ = _standardize_train_apply(Xtr, Xva)
+    b23 = fit_ridge_logit(Xtrz, ytr, ridge=ridge)
+    raw24 = predict_logit(b23, Xvaz)
+    choices=[]
+    for w in [0.0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.0]:
+        p=blend_prob(raw24, va["Home_Market_Prob"].to_numpy(float), w)
+        choices.append((w,brier_score_binary(p,yva),log_loss_binary(p,yva)))
+    bw,b24,ll24=sorted(choices,key=lambda z:(z[1],z[2]))[0]
+    bw=float(bw)
+
+    dev=work[work["Season"].isin([2023,2024])].copy()
+    Xdev,X25=dev[fcols].to_numpy(float),ho[fcols].to_numpy(float)
+    ydev,y25=dev["Home_Win"].to_numpy(float),ho["Home_Win"].to_numpy(float)
+    Xdz,X25z,mu,sd=_standardize_train_apply(Xdev,X25)
+    bd=fit_ridge_logit(Xdz,ydev,ridge=ridge)
+    raw25=predict_logit(bd,X25z)
+    mkt=ho["Home_Market_Prob"].to_numpy(float)
+    cal25=blend_prob(raw25,mkt,bw)
+    out=ho.copy(); out["V13_Raw_Prob"]=raw25; out["V13_Cal_Prob"]=cal25
+    bets=simulate_ml_bets(out,"V13_Cal_Prob")
+    bs=summarize_sim_bets(bets)
+    coef=pd.DataFrame({"Feature":["Intercept"]+fcols,"Coefficient":bd})
+    coef["Abs_Coefficient"]=coef["Coefficient"].abs()
+    coef=coef.sort_values("Abs_Coefficient",ascending=False).reset_index(drop=True)
+    return {
+        "Model":label,"Games_2025":len(ho),"Model_Weight":bw,
+        "Validation_2024_Brier":float(b24),"Validation_2024_LogLoss":float(ll24),
+        "Market_Brier":brier_score_binary(mkt,y25),"Raw_Model_Brier":brier_score_binary(raw25,y25),
+        "Cal_Brier":brier_score_binary(cal25,y25),"Market_LogLoss":log_loss_binary(mkt,y25),
+        "Raw_Model_LogLoss":log_loss_binary(raw25,y25),"Cal_LogLoss":log_loss_binary(cal25,y25),
+        "Brier_Improvement":brier_score_binary(mkt,y25)-brier_score_binary(cal25,y25),
+        "Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],
+        "hold25":out,"bets":bets,"coefficients":coef,
+    }
+
+
+def run_pitcher_model_2_test(master_df,min_prior_games=12,min_pitcher_starts=3):
+    """v0.13 benchmark test. Builds one PIT dataset then compares the frozen
+    v0.12.3 feature recipe against Pitcher Model 2.0 on the identical strict sample.
+    """
+    pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
+    if pit.empty:
+        raise ValueError("No PIT pitcher rows were built.")
+    strict=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts)
+    if strict.empty:
+        raise ValueError("No eligible ≤6h non-doubleheader rows were available.")
+
+    base=_fit_feature_model_walkforward(strict,pitcher_feature_matrix,"v0.12.3 benchmark",ridge=3.0)
+    v2=_fit_feature_model_walkforward(strict,pitcher_v2_feature_matrix,"v0.13 Pitcher Model 2.0",ridge=5.0)
+    results=[base,v2]
+    table=pd.DataFrame([{k:v for k,v in r.items() if k not in ("hold25","bets","coefficients")} for r in results])
+
+    seg=[]
+    if not v2.get("Error") and isinstance(v2.get("bets"),pd.DataFrame) and not v2["bets"].empty:
+        x=v2["bets"].copy(); x["Commence_Time"]=pd.to_datetime(x["Commence_Time"],errors="coerce",utc=True)
+        x["Month"]=x["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in x.groupby("Month"):
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",x[x["Odds"]<0]),("Underdogs",x[x["Odds"]>0])]:
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+
+    return {
+        "pit":pit,"strict_rows":len(strict),"table":table,
+        "results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),
+        "coefficients":v2.get("coefficients",pd.DataFrame()),
+    }
 
 def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
     pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
@@ -5272,6 +5490,81 @@ if mode == "Backtest Lab":
             st.download_button("Download Causality Summary CSV",ct.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_causality_summary.csv",mime="text/csv",key="dl_causality_summary")
             if seg is not None and not seg.empty:
                 st.download_button("Download Causality Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_causality_segments.csv",mime="text/csv",key="dl_causality_segments")
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.13.0 • PITCHER MODEL 2.0</div>', unsafe_allow_html=True)
+    st.caption("Engineer the starter signal instead of tuning betting thresholds. Uses the same strict ≤6h, no-doubleheader sample and the same 2023 → 2024 → 2025 walk-forward protocol.")
+    st.info("Adds fixed-prior shrinkage, FIP-style components, exponentially weighted recent form, K-BB skill, innings/start, starter rest, recent workload and pitch-count features. The v0.12.3 benchmark is rerun on the exact same rows for a fair comparison.")
+    v13_upload=st.file_uploader("Upload Moneyline Master CSV for Pitcher Model 2.0",type=["csv"],key="pitcher_v13_upload")
+    if v13_upload is not None:
+        try:
+            v13_master=pd.read_csv(v13_upload)
+            vc1,vc2=st.columns(2)
+            with vc1: v13_team=st.slider("v0.13 prior team games",5,25,12,1,key="v13_team")
+            with vc2: v13_starts=st.slider("v0.13 prior starter starts",1,8,3,1,key="v13_starts")
+            if st.button("Run Pitcher Model 2.0 Test",type="primary",key="run_v13_pitcher"):
+                st.session_state["v13_pitcher_pending"]=True
+                st.session_state["v13_pitcher_params"]=(int(v13_team),int(v13_starts))
+                st.session_state.pop("v13_pitcher_result",None)
+                st.rerun()
+            if st.session_state.get("v13_pitcher_pending",False):
+                rt,rs=st.session_state.get("v13_pitcher_params",(v13_team,v13_starts))
+                st.info("Pitcher Model 2.0 test started. Cached MLB starter histories will be reused where available.")
+                prog=st.progress(8,text="Building enhanced point-in-time starter profiles…")
+                try:
+                    out=run_pitcher_model_2_test(v13_master,min_prior_games=rt,min_pitcher_starts=rs)
+                    prog.progress(100,text="Pitcher Model 2.0 comparison complete.")
+                    st.session_state["v13_pitcher_result"]=out
+                    st.session_state["v13_pitcher_pending"]=False
+                    st.session_state["v13_pitcher_just_completed"]=True
+                    st.rerun()
+                except Exception as ex:
+                    st.session_state["v13_pitcher_pending"]=False
+                    st.error(f"Pitcher Model 2.0 test failed: {ex}")
+        except Exception as ex:
+            st.error(f"Could not prepare Pitcher Model 2.0 test: {ex}")
+
+    if "v13_pitcher_result" in st.session_state:
+        vr=st.session_state["v13_pitcher_result"] or {}; vt=vr.get("table",pd.DataFrame())
+        if st.session_state.pop("v13_pitcher_just_completed",False):
+            st.success("Pitcher Model 2.0 test complete — benchmark comparison below.")
+        if vt is None or vt.empty:
+            st.error("Pitcher Model 2.0 returned no comparison rows.")
+        else:
+            st.markdown("**2025 untouched holdout — same rows, same bet thresholds**")
+            show_cols=[c for c in ["Model","Games_2025","Model_Weight","Market_Brier","Raw_Model_Brier","Cal_Brier","Brier_Improvement","Bets","Wins","Losses","Units","ROI"] if c in vt.columns]
+            st.dataframe(vt[show_cols].round({"Model_Weight":2,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            try:
+                b=vt[vt["Model"]=="v0.12.3 benchmark"].iloc[0]
+                n=vt[vt["Model"]=="v0.13 Pitcher Model 2.0"].iloc[0]
+                if float(n["Cal_Brier"]) < float(b["Cal_Brier"]) - .001:
+                    st.success(f"MODEL 2.0 PASS: calibrated Brier improved by {float(b['Cal_Brier'])-float(n['Cal_Brier']):.4f} versus the frozen v0.12.3 benchmark.")
+                elif float(n["Cal_Brier"]) <= float(b["Cal_Brier"]):
+                    st.info("MODEL 2.0 NEUTRAL: predictive accuracy is roughly tied with v0.12.3. Do not promote based on ROI alone.")
+                else:
+                    st.warning("MODEL 2.0 FAIL: v0.13 did not beat the frozen v0.12.3 benchmark on 2025 Brier. Keep v0.12.3 as the research baseline.")
+            except Exception:
+                pass
+            seg=vr.get("segments",pd.DataFrame())
+            if seg is not None and not seg.empty:
+                with st.expander("v0.13 2025 betting robustness splits",expanded=True):
+                    st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            coef=vr.get("coefficients",pd.DataFrame())
+            if coef is not None and not coef.empty:
+                with st.expander("Pitcher Model 2.0 fitted coefficients",expanded=False):
+                    st.caption("Standardized development-set coefficients. Useful for diagnosis, not causal interpretation.")
+                    st.dataframe(coef.round({"Coefficient":4,"Abs_Coefficient":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download v0.13 Comparison CSV",vt.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_comparison.csv",mime="text/csv",key="dl_v13_compare")
+            if seg is not None and not seg.empty:
+                st.download_button("Download v0.13 Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_segments.csv",mime="text/csv",key="dl_v13_segments")
+            if coef is not None and not coef.empty:
+                st.download_button("Download v0.13 Coefficients CSV",coef.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_coefficients.csv",mime="text/csv",key="dl_v13_coefficients")
+            v2res=(vr.get("results") or {}).get("v0.13 Pitcher Model 2.0",{})
+            if isinstance(v2res,dict):
+                hold=v2res.get("hold25"); bets=v2res.get("bets")
+                if isinstance(hold,pd.DataFrame) and not hold.empty:
+                    st.download_button("Download v0.13 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_holdout_2025.csv",mime="text/csv",key="dl_v13_hold")
+                if isinstance(bets,pd.DataFrame) and not bets.empty:
+                    st.download_button("Download v0.13 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_bets_2025.csv",mime="text/csv",key="dl_v13_bets")
     st.divider()
     uploaded_bt = st.file_uploader(
         "Upload completed backtest dataset",

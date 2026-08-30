@@ -1,23 +1,46 @@
-MLB Model v0.12.3 — Pitcher Causality Audit
+MLB Model v0.13.0 — Pitcher Model 2.0
 
 Purpose
-- Fixes the conceptual flaw in the old swapped-starter placebo: swapping train + validation + holdout lets the model simply relearn the inverse mapping.
-- v0.12.3 trains on correct 2023/2024 starter features, then corrupts ONLY the untouched 2025 inference rows.
-- Adds inference-only scrambled starters, opponent-starter swap, and lagged-wrong-starter controls.
-- Adds feature-family ablations for ERA, K/9, BB/9, HR/9, WHIP, recent form, starter experience, and all pitcher features.
-- Uses strict <=6h, no-doubleheader sample.
-- Keeps 2023 train -> 2024 validation -> 2025 holdout.
-- Uses free MLB Stats API and local cache; zero Odds API historical credits.
+- Moves from pitcher-signal validation to pitcher-signal engineering.
+- Keeps the v0.12.3 causality benchmark intact and reruns it on the exact same strict sample.
+- Adds a second starter model with more baseball-specific point-in-time features.
+- Does NOT loosen or optimize betting thresholds on 2025.
+
+Pitcher Model 2.0 features
+- Fixed-prior empirical-Bayes shrinkage for ERA, K/9, BB/9, HR/9, WHIP, FIP and K-BB/9.
+- FIP-style skill components.
+- Exponentially weighted recent form with a fixed 3-start half-life.
+- Recent-vs-baseline form deltas.
+- Innings per start / starter experience.
+- Days rest before the target start.
+- 14-day and 30-day prior workload.
+- Last-start and last-five pitch counts when MLB game-log data exposes them.
+- Existing point-in-time team-form features remain in the model.
+
+Validation protocol
+- Strict <=6 hours to first pitch.
+- Doubleheaders removed.
+- 2023 = train.
+- 2024 = select ONLY model-vs-market blend weight.
+- 2023+2024 = refit.
+- 2025 = untouched holdout.
+- v0.12.3 benchmark ridge = 3.0.
+- v0.13 Model 2.0 ridge = 5.0 (fixed in advance; not selected on 2025).
+- Same bet thresholds as prior research: 2.5% model-vs-market edge, 4.5% EV, no +300 or longer dogs.
 
 Run
-1. Deploy app.py/model.py/requirements.txt.
-2. Open Backtest Lab -> v0.12.3 Pitcher Causality Audit.
+1. Deploy app.py, model.py, requirements.txt.
+2. Open Backtest Lab -> v0.13.0 Pitcher Model 2.0.
 3. Upload mlb_moneyline_master_2023_2025.csv.
 4. Leave defaults at 12 prior team games / 3 prior starter starts.
-5. Run the audit.
-6. Download mlb_pit_pitcher_causality_summary.csv and mlb_pit_pitcher_causality_segments.csv.
+5. Run Pitcher Model 2.0 Test.
+6. Send mlb_pitcher_model_2_comparison.csv back for analysis.
 
 Interpretation
-- Correct starters should outperform the market.
-- Inference-only wrong-starter controls should materially worsen because the trained model cannot relearn the corruption.
-- Feature ablations identify which pitcher-stat families contribute incremental OOS information.
+- Primary criterion is 2025 calibrated Brier improvement vs the frozen v0.12.3 benchmark.
+- ROI is secondary and should not determine promotion.
+- If Model 2.0 fails to improve holdout Brier, retain v0.12.3 as the research baseline.
+- This remains a research validator. It is not yet wired into the live production slate model.
+
+Data caveat
+- Historical starter identities come from MLB's historical schedule/game records. Prior causality tests materially deteriorated when starter assignment was corrupted, but exact historical 'starter known at snapshot' provenance is still not independently archived in this build.
