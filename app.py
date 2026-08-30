@@ -3,6 +3,11 @@ import math
 import time
 import html
 import statistics
+import io
+import json
+import zipfile
+from pathlib import Path
+from datetime import date, datetime, timezone, timedelta
 from statistics import median
 
 import requests
@@ -22,7 +27,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.0-BACKTEST-LAB"
+APP_VERSION = "0.10.1-HISTORY-BUILDER"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -566,6 +571,16 @@ div[data-testid="stExpander"] details summary p{
 .bt-good{color:#86efac !important}
 .bt-bad{color:#fca5a5 !important}
 @media(max-width:700px){.bt-metrics{grid-template-columns:repeat(2,1fr)}}
+
+
+/* ===== v0.10.1 HISTORICAL BUILDER ===== */
+.credit-box{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:8px 0 12px}
+.credit-cell{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(148,163,184,.08)}
+.credit-cell span{display:block;color:#6f879e;font-size:.50rem;font-weight:850;text-transform:uppercase;letter-spacing:.06em}
+.credit-cell b{display:block;color:#edf4fb;font-size:.90rem;margin-top:3px}
+.guard-box{padding:10px 12px;border-radius:11px;background:rgba(34,197,94,.04);border:1px solid rgba(34,197,94,.12);color:#9db4c8;font-size:.68rem;line-height:1.5}
+.guard-box b{color:#bbf7d0}
+@media(max-width:700px){.credit-box{grid-template-columns:1fr}}
 
 </style>
 """, unsafe_allow_html=True)
@@ -2020,6 +2035,192 @@ def calibration_table(df, prob_col):
     return pd.DataFrame(rows)
 
 
+
+HISTORICAL_ODDS_ENDPOINT = f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds"
+HISTORY_CACHE_DIR = Path(".mlb_history_cache")
+HISTORY_DEFAULT_START = date(2023, 4, 1)
+HISTORY_DEFAULT_END = date(2025, 10, 5)
+HISTORY_SNAPSHOT_HOUR_UTC = 15
+
+def historical_dates(start_date, end_date):
+    cur = start_date
+    out = []
+    while cur <= end_date:
+        out.append(cur)
+        cur += timedelta(days=1)
+    return out
+
+def historical_credit_estimate(start_date, end_date, markets, regions=("us",)):
+    days = len(historical_dates(start_date, end_date))
+    per_snapshot = 10 * max(1, len(markets)) * max(1, len(regions))
+    return {"snapshots": days, "per_snapshot_max": per_snapshot, "max_credits": days * per_snapshot}
+
+def _history_cache_file(snapshot_date, markets):
+    market_key = "-".join(sorted(markets))
+    return HISTORY_CACHE_DIR / f"{snapshot_date.isoformat()}__{market_key}.json"
+
+def _redacted_history_error(resp):
+    if resp.status_code == 401:
+        return "Historical Odds authorization failed. Confirm the paid plan is active and your Streamlit secret contains a valid key."
+    if resp.status_code == 422:
+        return "The historical request was rejected. Check the selected date and markets."
+    if resp.status_code == 429:
+        return "The Odds API quota/rate limit was reached."
+    return f"Historical Odds request failed with HTTP {resp.status_code}."
+
+def fetch_historical_snapshot(snapshot_date, markets, force=False):
+    cache_file = _history_cache_file(snapshot_date, markets)
+    if cache_file.exists() and not force:
+        try:
+            return json.loads(cache_file.read_text()), {"cached": True, "remaining": None, "used": None, "last": 0}, None
+        except Exception:
+            pass
+    try:
+        api_key = st.secrets.get("ODDS_API_KEY")
+    except Exception:
+        api_key = None
+    if not api_key:
+        return None, {}, "ODDS_API_KEY is missing from Streamlit Secrets."
+    HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot_dt = datetime(snapshot_date.year, snapshot_date.month, snapshot_date.day, HISTORY_SNAPSHOT_HOUR_UTC, 0, 0, tzinfo=timezone.utc)
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": ",".join(markets),
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+        "date": snapshot_dt.isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        resp = requests.get(HISTORICAL_ODDS_ENDPOINT, params=params, timeout=25)
+    except requests.RequestException:
+        return None, {}, "Network error while contacting The Odds API."
+    meta = {
+        "cached": False,
+        "remaining": resp.headers.get("x-requests-remaining"),
+        "used": resp.headers.get("x-requests-used"),
+        "last": resp.headers.get("x-requests-last"),
+    }
+    if resp.status_code != 200:
+        return None, meta, _redacted_history_error(resp)
+    try:
+        payload = resp.json()
+    except Exception:
+        return None, meta, "The historical odds response was not valid JSON."
+    try:
+        cache_file.write_text(json.dumps(payload))
+    except Exception:
+        pass
+    return payload, meta, None
+
+def historical_payload_games(payload):
+    if isinstance(payload, dict):
+        data = payload.get("data", [])
+        return data if isinstance(data, list) else []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+def _median_or_none(values):
+    vals=[]
+    for v in values:
+        try:
+            f=float(v)
+            if math.isfinite(f): vals.append(f)
+        except Exception:
+            pass
+    return float(median(vals)) if vals else None
+
+def flatten_historical_snapshot(payload, requested_snapshot_date):
+    rows=[]
+    for game in historical_payload_games(payload):
+        home, away = game.get("home_team"), game.get("away_team")
+        if not home or not away:
+            continue
+        home_ml=[]; away_ml=[]; home_spread_pts=[]; home_spread_px=[]; away_spread_pts=[]; away_spread_px=[]; total_pts=[]; over_px=[]; under_px=[]
+        books_h2h=set(); books_spread=set(); books_total=set()
+        for book in game.get("bookmakers", []) or []:
+            bkey=book.get("key") or book.get("title") or "book"
+            for market in book.get("markets", []) or []:
+                mkey=market.get("key"); outcomes=market.get("outcomes", []) or []
+                if mkey=="h2h":
+                    found=False
+                    for o in outcomes:
+                        price=valid_american_odds(o.get("price")); name=o.get("name")
+                        if price is None: continue
+                        if name==home: home_ml.append(price); found=True
+                        elif name==away: away_ml.append(price); found=True
+                    if found: books_h2h.add(bkey)
+                elif mkey=="spreads":
+                    found=False
+                    for o in outcomes:
+                        price=valid_american_odds(o.get("price")); name=o.get("name")
+                        try: point=float(o.get("point"))
+                        except Exception: point=None
+                        if price is None or point is None: continue
+                        if name==home: home_spread_pts.append(point); home_spread_px.append(price); found=True
+                        elif name==away: away_spread_pts.append(point); away_spread_px.append(price); found=True
+                    if found: books_spread.add(bkey)
+                elif mkey=="totals":
+                    found=False
+                    for o in outcomes:
+                        price=valid_american_odds(o.get("price")); name=str(o.get("name","")).lower()
+                        try: point=float(o.get("point"))
+                        except Exception: point=None
+                        if price is None or point is None: continue
+                        total_pts.append(point)
+                        if name=="over": over_px.append(price); found=True
+                        elif name=="under": under_px.append(price); found=True
+                    if found: books_total.add(bkey)
+        rows.append({
+            "Snapshot_Date": requested_snapshot_date.isoformat(),
+            "Snapshot_Hour_UTC": HISTORY_SNAPSHOT_HOUR_UTC,
+            "Event_ID": game.get("id"),
+            "Commence_Time": game.get("commence_time"),
+            "Away_Team": away,
+            "Home_Team": home,
+            "Away_ML": _median_or_none(away_ml),
+            "Home_ML": _median_or_none(home_ml),
+            "Away_RL": _median_or_none(away_spread_pts),
+            "Away_RL_Odds": _median_or_none(away_spread_px),
+            "Home_RL": _median_or_none(home_spread_pts),
+            "Home_RL_Odds": _median_or_none(home_spread_px),
+            "Total": _median_or_none(total_pts),
+            "Over_Odds": _median_or_none(over_px),
+            "Under_Odds": _median_or_none(under_px),
+            "ML_Books": len(books_h2h),
+            "RL_Books": len(books_spread),
+            "Total_Books": len(books_total),
+        })
+    return rows
+
+def cached_history_manifest(markets):
+    HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    suffix="__"+"-".join(sorted(markets))+".json"
+    out=set()
+    for p in HISTORY_CACHE_DIR.glob(f"*{suffix}"):
+        try: out.add(date.fromisoformat(p.name.split("__",1)[0]))
+        except Exception: pass
+    return out
+
+def build_cache_zip():
+    HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    buf=io.BytesIO()
+    with zipfile.ZipFile(buf,"w",compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(HISTORY_CACHE_DIR.glob("*.json")):
+            zf.writestr(p.name,p.read_bytes())
+    return buf.getvalue()
+
+def restore_cache_zip(uploaded_file):
+    HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    restored=0
+    with zipfile.ZipFile(uploaded_file) as zf:
+        for member in zf.infolist():
+            name=Path(member.filename).name
+            if not name.endswith(".json") or "__" not in name: continue
+            (HISTORY_CACHE_DIR/name).write_bytes(zf.read(member)); restored+=1
+    return restored
+
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -2331,9 +2532,9 @@ if mode == "Backtest Lab":
     st.markdown(
         """
         <div class="bt-note">
-          <b>Backtest Lab makes zero Odds API calls.</b>
-          Upload a saved historical betting CSV and all filtering, ROI calculations,
-          calibration analysis and Top 5 / Top 10 simulations run from that file only.
+          <b>Backtest calculations make zero Odds API calls.</b>
+          The Historical Data Builder below is the only part of this tab that can use paid historical credits,
+          and it cannot run until you explicitly confirm the spend and press the build button.
         </div>
         """,
         unsafe_allow_html=True,
@@ -2367,15 +2568,94 @@ if mode == "Backtest Lab":
             mime="text/csv",
         )
 
+
+    st.markdown('<div class="section-kicker">HISTORICAL DATA BUILDER</div>', unsafe_allow_html=True)
+    st.caption("Use this only after activating a paid Historical Odds plan. Nothing below calls the API until you explicitly press Build Historical Market Dataset.")
+
+    with st.expander("Build historical market dataset", expanded=True):
+        hc1, hc2 = st.columns(2)
+        with hc1:
+            hist_start = st.date_input("Historical start", value=HISTORY_DEFAULT_START, min_value=date(2020,6,6), max_value=date.today(), key="hist_start")
+        with hc2:
+            hist_end = st.date_input("Historical end", value=HISTORY_DEFAULT_END, min_value=date(2020,6,6), max_value=date.today(), key="hist_end")
+        hist_market_labels = st.multiselect("Historical markets", ["Moneyline","Run Line","Total"], default=["Moneyline","Run Line","Total"], key="hist_market_labels")
+        market_map={"Moneyline":"h2h","Run Line":"spreads","Total":"totals"}
+        hist_markets=[market_map[x] for x in hist_market_labels]
+        if hist_end < hist_start:
+            st.error("Historical end date must be on or after the start date.")
+            hist_est={"snapshots":0,"per_snapshot_max":0,"max_credits":0}
+        elif not hist_markets:
+            st.warning("Select at least one market.")
+            hist_est={"snapshots":0,"per_snapshot_max":0,"max_credits":0}
+        else:
+            hist_est=historical_credit_estimate(hist_start,hist_end,hist_markets)
+        cached_dates=cached_history_manifest(hist_markets) if hist_markets else set()
+        selected_dates=set(historical_dates(hist_start,hist_end)) if hist_end>=hist_start else set()
+        cached_in_range=len(cached_dates & selected_dates)
+        remaining_snapshots=max(0,hist_est["snapshots"]-cached_in_range)
+        remaining_credit_ceiling=remaining_snapshots*hist_est["per_snapshot_max"]
+        c1,c2,c3=st.columns(3)
+        c1.metric("Calendar snapshots", f"{hist_est['snapshots']:,}")
+        c2.metric("Max / new snapshot", f"{hist_est['per_snapshot_max']:,}")
+        c3.metric("Remaining ceiling", f"{remaining_credit_ceiling:,}")
+        st.caption(f"{cached_in_range:,} selected snapshots are already cached and will be skipped. This is a conservative ceiling; empty responses cost 0 and usage is based on markets actually returned.")
+        hard_cap=st.number_input("Hard credit cap for this run", min_value=10, max_value=100000, value=min(20000,max(10,remaining_credit_ceiling if remaining_credit_ceiling else 10)), step=10, key="history_hard_cap")
+        confirm_history=st.checkbox("I understand this button can consume paid Historical Odds credits.", key="confirm_history_spend")
+        st.info("Credit guard: cached dates are skipped; one league-wide snapshot is requested per date; successful responses are cached immediately; the run stops before the hard cap is exceeded. Snapshot time is 15:00 UTC.")
+        restore_zip=st.file_uploader("Restore prior historical cache (optional ZIP)", type=["zip"], key="history_cache_restore")
+        if restore_zip is not None and st.button("Restore cache ZIP", key="restore_history_zip"):
+            try:
+                restored_n=restore_cache_zip(restore_zip)
+                st.success(f"Restored {restored_n:,} cached snapshot files.")
+            except Exception as e:
+                st.error(f"Could not restore cache ZIP: {e}")
+        run_history=st.button("Build Historical Market Dataset", type="primary", disabled=(not confirm_history or hist_end<hist_start or not hist_markets or remaining_snapshots==0), key="run_history_builder")
+        if remaining_snapshots==0 and hist_est["snapshots"]>0:
+            st.success("Every selected snapshot is already cached. No API call is needed.")
+        if run_history:
+            dates_to_fetch=[d for d in historical_dates(hist_start,hist_end) if d not in cached_dates]
+            actual_last=None; remaining_hdr=None; estimated_spend=0; stopped_reason=None
+            progress=st.progress(0); status=st.empty(); total_new=len(dates_to_fetch)
+            for i,d in enumerate(dates_to_fetch,start=1):
+                if estimated_spend + hist_est["per_snapshot_max"] > hard_cap:
+                    stopped_reason=f"Stopped at the hard credit cap ({hard_cap:,})."; break
+                status.caption(f"Fetching {d.isoformat()} • {i:,} of {total_new:,} new snapshots")
+                payload,meta,err=fetch_historical_snapshot(d,hist_markets,force=False)
+                if err:
+                    stopped_reason=f"Stopped on {d.isoformat()}: {err}"; break
+                estimated_spend += hist_est["per_snapshot_max"]
+                actual_last=meta.get("last"); remaining_hdr=meta.get("remaining")
+                progress.progress(min(i/max(1,total_new),1.0))
+            all_rows=[]
+            for d in historical_dates(hist_start,hist_end):
+                cf=_history_cache_file(d,hist_markets)
+                if not cf.exists(): continue
+                try: all_rows.extend(flatten_historical_snapshot(json.loads(cf.read_text()),d))
+                except Exception: continue
+            progress.empty(); status.empty()
+            if stopped_reason: st.warning(stopped_reason)
+            if all_rows:
+                hist_df=pd.DataFrame(all_rows)
+                hist_df["Commence_Time"]=pd.to_datetime(hist_df["Commence_Time"],errors="coerce",utc=True)
+                hist_df=hist_df.sort_values(["Snapshot_Date","Commence_Time","Away_Team","Home_Team"]).drop_duplicates(["Snapshot_Date","Event_ID"],keep="last")
+                st.success(f"Historical market dataset ready: {len(hist_df):,} game rows across {hist_df['Snapshot_Date'].nunique():,} cached dates.")
+                if remaining_hdr is not None:
+                    st.caption(f"The Odds API reports {remaining_hdr} credits remaining. Last-request cost: {actual_last if actual_last is not None else '—'}.")
+                st.dataframe(hist_df.head(100),use_container_width=True,hide_index=True)
+                st.download_button("Download Historical Market CSV", hist_df.to_csv(index=False).encode("utf-8"), file_name=f"mlb_historical_market_{hist_start}_{hist_end}.csv", mime="text/csv", key="download_history_csv")
+                st.download_button("Download Cache ZIP", build_cache_zip(), file_name=f"mlb_history_cache_{hist_start}_{hist_end}.zip", mime="application/zip", key="download_history_cache")
+            else:
+                st.info("No cached historical game rows are available yet.")
+    st.divider()
     uploaded_bt = st.file_uploader(
-        "Upload historical betting dataset",
+        "Upload completed backtest dataset",
         type=["csv"],
         key="mlb_backtest_csv",
         help="Processed locally in Streamlit. This does not use The Odds API.",
     )
 
     if uploaded_bt is None:
-        st.info("Upload a historical CSV to run the backtest.")
+        st.info("Build/download the historical market dataset above. The full backtest still needs point-in-time model outputs and final results merged into the completed dataset.")
     else:
         try:
             raw_bt = pd.read_csv(uploaded_bt)

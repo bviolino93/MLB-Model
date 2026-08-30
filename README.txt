@@ -1,49 +1,25 @@
-MLB Edge v0.10.0-BACKTEST-LAB
+MLB Edge v0.10.1-HISTORY-BUILDER
 
-Adds a third app mode: Backtest Lab.
+Adds a guarded Historical Data Builder for The Odds API inside Backtest Lab.
 
-API CREDIT SAFETY
-=================
-Backtest Lab makes ZERO Odds API calls.
-It operates entirely on a historical CSV uploaded by the user.
+Default window: 2023-04-01 through 2025-10-05
+Snapshot: one league-wide MLB snapshot per date at 15:00 UTC
+Markets: h2h, spreads, totals
+Region: us
 
-Required historical CSV columns
-===============================
-Date
-Game
-Market_Type
-Bet
-Odds
-Result
-Raw_Model_Prob
-Market_NoVig_Prob
-Calibrated_Prob
-Edge
-EV
-Verdict
-Confidence
+Historical usage ceiling is 10 credits x markets x regions per snapshot. With all 3 default markets, max is 30 credits per nonempty snapshot. Empty responses cost 0.
 
-Result must be WIN, LOSS, or PUSH.
+Safeguards:
+- no API call just by opening the app
+- explicit paid-credit confirmation checkbox
+- hard credit cap checked before every request
+- successful snapshots cached immediately
+- cached dates skipped
+- downloadable cache ZIP
+- cache ZIP restore after redeploy
+- downloadable historical market CSV
+- API key never displayed in errors
+- API remaining/last-cost headers displayed after requests
 
-Included analysis
-=================
-- Record / hit rate / units / ROI
-- Average odds
-- Max drawdown
-- Season-by-season stability
-- Market breakdown
-- Verdict breakdown
-- Edge buckets
-- Odds buckets
-- Top 5 daily simulation
-- Top 10 daily simulation
-- Raw-model probability calibration
-- v0.9 calibrated probability calibration
-- Brier-score comparison
-- Filtered audit CSV export
-
-Methodology
-===========
-The app does not fabricate historical odds and does not label historical
-prices as closing lines unless the supplied dataset actually contains verified
-closing lines. Point-in-time quality of the source dataset remains critical.
+15:00 UTC is a consistent pregame snapshot, not a verified closing line.
+The builder creates the historical market half of the backtest dataset. Point-in-time model outputs and final game results still need to be merged for the complete production backtest.
