@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.11.1-SCIPY-FIX"
+APP_VERSION = "0.11.2-ARRAY-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -2835,28 +2835,30 @@ def pit_feature_matrix(df):
 
 
 def brier_score_binary(prob, y):
-    p = pd.to_numeric(prob, errors="coerce")
-    yy = pd.to_numeric(y, errors="coerce")
-    mask = p.notna() & yy.notna()
-    if not mask.any():
+    p = np.asarray(pd.to_numeric(pd.Series(prob), errors="coerce"), dtype=float)
+    yy = np.asarray(pd.to_numeric(pd.Series(y), errors="coerce"), dtype=float)
+    mask = np.isfinite(p) & np.isfinite(yy)
+    if not np.any(mask):
         return np.nan
-    return float(np.mean((p[mask].astype(float)-yy[mask].astype(float))**2))
+    return float(np.mean((p[mask] - yy[mask])**2))
 
 
 def log_loss_binary(prob, y):
-    p = pd.to_numeric(prob, errors="coerce").clip(1e-6, 1-1e-6)
-    yy = pd.to_numeric(y, errors="coerce")
-    mask = p.notna() & yy.notna()
-    if not mask.any():
+    p = np.asarray(pd.to_numeric(pd.Series(prob), errors="coerce"), dtype=float)
+    yy = np.asarray(pd.to_numeric(pd.Series(y), errors="coerce"), dtype=float)
+    mask = np.isfinite(p) & np.isfinite(yy)
+    if not np.any(mask):
         return np.nan
-    pp = p[mask].astype(float)
-    yy = yy[mask].astype(float)
-    return float(-np.mean(yy*np.log(pp) + (1-yy)*np.log(1-pp)))
+    pp = np.clip(p[mask], 1e-6, 1-1e-6)
+    yv = yy[mask]
+    return float(-np.mean(yv*np.log(pp) + (1-yv)*np.log(1-pp)))
 
 
 def blend_prob(model_prob, market_prob, model_weight):
     w = float(model_weight)
-    return np.clip(w*np.asarray(model_prob) + (1-w)*np.asarray(market_prob), .01, .99)
+    mp = np.asarray(model_prob, dtype=float)
+    mkp = np.asarray(market_prob, dtype=float)
+    return np.clip(w*mp + (1-w)*mkp, .01, .99)
 
 
 def american_unit_profit(odds, won):

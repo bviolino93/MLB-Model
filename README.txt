@@ -1,19 +1,17 @@
-MLB Edge v0.11.1-SCIPY-FIX
+MLB Edge v0.11.2-ARRAY-FIX
 
 Fix
 ====
-v0.11.0 uses scipy.optimize.minimize to fit the ridge logistic point-in-time
-model, but app.py omitted:
+The point-in-time backtest reached the Brier/log-loss evaluation step, but
+those helpers assumed pandas Series and called `.notna()`.
 
-    from scipy.optimize import minimize
+Some walk-forward predictions are NumPy arrays, which caused:
+  'numpy.ndarray' object has no attribute 'notna'
 
-That caused:
-    name 'minimize' is not defined
+v0.11.2 updates the probability-scoring helpers to accept both pandas Series
+and NumPy arrays using NumPy finite-value masks.
 
-v0.11.1 adds the missing import and explicitly includes scipy in
-requirements.txt.
-
-No backtest methodology, thresholds, historical data, model features,
-market calibration, or Odds API usage changed.
+No backtest methodology, features, thresholds, season split, market blend
+logic, or Odds API usage changed.
 
 This fix consumes zero Odds API credits.
