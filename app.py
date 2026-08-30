@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.1.2-PITCHER-AUDIT-RESULTS-FIX"
+APP_VERSION = "0.12.1.3-PITCHER-AUDIT-RESULTS-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3332,11 +3332,25 @@ def build_pitcher_feature_table(master_df, min_prior_team_games=12, min_pitcher_
     # Match starters onto PIT rows using MLB game identifiers from the master file.
     master_small = master_df.copy()
     master_small["Commence_Time"] = pd.to_datetime(master_small["Commence_Time"], errors="coerce", utc=True)
+    # Preserve the historical market snapshot timing on the PIT rows.
+    # v0.12.1.2 only merged MLB_GamePk here, which silently dropped
+    # Hours_To_First_Pitch and caused every audit window to filter to zero rows.
+    timing_cols = [c for c in [
+        "Event_ID", "MLB_GamePk", "Snapshot_Timestamp", "Hours_To_First_Pitch"
+    ] if c in master_small.columns]
     pit_plus = pit_team.merge(
-        master_small[["Event_ID","MLB_GamePk"]].drop_duplicates("Event_ID"),
+        master_small[timing_cols].drop_duplicates("Event_ID"),
         on="Event_ID",
         how="left"
     )
+
+    # If an older master has Snapshot_Timestamp but not Hours_To_First_Pitch,
+    # reconstruct the interval directly.
+    if "Hours_To_First_Pitch" not in pit_plus.columns and "Snapshot_Timestamp" in pit_plus.columns:
+        snap = pd.to_datetime(pit_plus["Snapshot_Timestamp"], errors="coerce", utc=True)
+        start = pd.to_datetime(pit_plus["Commence_Time"], errors="coerce", utc=True)
+        pit_plus["Hours_To_First_Pitch"] = (start - snap).dt.total_seconds() / 3600.0
+
     pit_plus = attach_pitchers_to_master(pit_plus, schedule_df)
 
     pitcher_ids = set()
@@ -3550,9 +3564,18 @@ def _audit_subset_backtest(pit, max_hours_to_first_pitch=None, exclude_doublehea
     No threshold optimization is performed on 2025.
     """
     d = _mark_doubleheaders(pit)
-    d["Hours_To_First_Pitch"] = pd.to_numeric(d.get("Hours_To_First_Pitch"), errors="coerce")
+    if "Hours_To_First_Pitch" not in d.columns:
+        raise ValueError(
+            "Audit timing is missing from the PIT table. Rebuild with a Moneyline Master that includes "
+            "Snapshot_Timestamp / Hours_To_First_Pitch."
+        )
+    d["Hours_To_First_Pitch"] = pd.to_numeric(d["Hours_To_First_Pitch"], errors="coerce")
     if max_hours_to_first_pitch is not None:
-        d = d[(d["Hours_To_First_Pitch"] >= 0) & (d["Hours_To_First_Pitch"] <= float(max_hours_to_first_pitch))].copy()
+        d = d[
+            d["Hours_To_First_Pitch"].notna()
+            & (d["Hours_To_First_Pitch"] >= 0)
+            & (d["Hours_To_First_Pitch"] <= float(max_hours_to_first_pitch))
+        ].copy()
     if exclude_doubleheaders:
         d = d[~d["Audit_Doubleheader"]].copy()
     d = d[(pd.to_numeric(d["Away_SP_Starts"], errors="coerce") >= int(min_starter_starts)) &
@@ -3631,7 +3654,19 @@ def run_pitcher_audit(master_df, min_prior_games=12, min_pitcher_starts=3):
             full[label]=r
             results.append({k:v for k,v in r.items() if k not in ("hold25","bets")})
     table=pd.DataFrame(results)
-    return {"pit":pit,"table":table,"results":full}
+    timing = pd.to_numeric(pit.get("Hours_To_First_Pitch"), errors="coerce") if "Hours_To_First_Pitch" in pit.columns else pd.Series(dtype=float)
+    timing_diag = {
+        "pit_rows": int(len(pit)),
+        "timing_nonnull": int(timing.notna().sum()) if len(timing) else 0,
+        "timing_min": float(timing.min()) if timing.notna().any() else None,
+        "timing_median": float(timing.median()) if timing.notna().any() else None,
+        "timing_max": float(timing.max()) if timing.notna().any() else None,
+        "within_18h": int(((timing >= 0) & (timing <= 18)).sum()) if len(timing) else 0,
+        "within_12h": int(((timing >= 0) & (timing <= 12)).sum()) if len(timing) else 0,
+        "within_6h": int(((timing >= 0) & (timing <= 6)).sum()) if len(timing) else 0,
+        "within_3h": int(((timing >= 0) & (timing <= 3)).sum()) if len(timing) else 0,
+    }
+    return {"pit":pit,"table":table,"results":full,"timing_diagnostics":timing_diag}
 
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
@@ -4682,10 +4717,11 @@ if mode == "Backtest Lab":
         )
 
     st.divider()
-    st.markdown('<div class="section-kicker">v0.12.1 • PITCHER LEAKAGE AUDIT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">v0.12.1.3 • PITCHER LEAKAGE AUDIT</div>', unsafe_allow_html=True)
     st.caption(
         "Try to break the pitcher result before production. This reruns the same walk-forward test under stricter "
-        "pregame windows and removes doubleheaders. It also fixes MLB innings notation (5.2 = 5⅔ IP). Zero Odds API credits."
+        "pregame windows and removes doubleheaders. It also fixes MLB innings notation (5.2 = 5⅔ IP). "
+        "v0.12.1.3 preserves the historical snapshot timing used by the stress windows. Zero Odds API credits."
     )
     st.warning(
         "Important: MLB's historical starter identity is retrospective. This audit can stress-test the result, "
@@ -4752,8 +4788,13 @@ if mode == "Backtest Lab":
             )
             pit_rows = len(ar.get("pit", [])) if ar.get("pit") is not None else 0
             st.caption(f"PIT feature rows built: {pit_rows:,} • Stress-test rows: 0")
-            if results_map:
-                with st.expander("Audit diagnostics", expanded=True):
+            diag = ar.get("timing_diagnostics", {}) or {}
+            with st.expander("Audit timing diagnostics", expanded=True):
+                if diag:
+                    st.json(diag)
+                else:
+                    st.write("No timing diagnostics were produced.")
+                if results_map:
                     st.write(results_map)
         else:
             show = at.copy()
