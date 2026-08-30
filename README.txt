@@ -1,53 +1,21 @@
-MLB Edge v0.12.0-PIT-PITCHER
+MLB Model v0.12.1 — Pitcher Leakage Audit
 
-New
-===
-Adds a historical point-in-time starting-pitcher validation layer.
+What changed
+- Adds a hostile audit of the PIT starting-pitcher result.
+- Reruns walk-forward validation at <=18h, <=12h, <=6h, and <=3h before first pitch.
+- Removes doubleheaders in conservative audit rows.
+- Fixes MLB innings notation: 5.1 = 5 1/3 IP and 5.2 = 5 2/3 IP.
+- Keeps 2025 untouched: 2024 still chooses the model/market blend.
+- Produces downloadable audit summary and strict-window holdouts.
+- Uses MLB Stats API only; zero The Odds API credits.
 
-Data source
-===========
-MLB Stats API only.
-ZERO Odds API credits are used.
+Important limitation
+MLB's current historical schedule record is retrospective. The starter attached to an old game cannot by itself prove that pitcher was publicly announced at the exact historical odds snapshot. The audit therefore treats starter identity as a potential leakage vector and stress-tests it; it does not claim to eliminate that uncertainty.
 
-Historical pitcher workflow
-===========================
-1. Upload mlb_moneyline_master_2023_2025.csv
-2. Free MLB schedule data supplies historical starter/probable-pitcher IDs
-3. One free game-log request per pitcher-season is cached
-4. For each target game, the app uses ONLY prior starts before first pitch
-5. Current-game and future pitcher results are excluded
-
-Pitcher features
-================
-- prior starts
-- ERA
-- K/9
-- BB/9
-- HR/9
-- approximate WHIP
-- last-5-start ERA
-- last-5-start K/9
-- last-5-start BB/9
-
-These are combined with the existing lagged team features:
-- season win %
-- season run differential/game
-- last-10 win %
-- last-10 run differential/game
-- rest difference
-
-Walk-forward
-============
-2023: fit
-2024: choose model/market blend by Brier score
-2023+2024: refit
-2025: untouched holdout
-
-Important
-=========
-This is still a validation model, not a perfect replay of the live production
-engine. It specifically tests whether point-in-time starter information adds
-predictive value beyond the historical market benchmark.
-
-First run may take several minutes because pitcher logs are downloaded from
-MLB's free API and cached.
+Recommended run
+1. Open Backtest Lab.
+2. Go to v0.12.1 Pitcher Leakage Audit.
+3. Upload mlb_moneyline_master_2023_2025.csv.
+4. Leave 12 prior team games / 3 prior starter starts.
+5. Run Pitcher Leakage Audit.
+6. Download mlb_pit_pitcher_audit_summary.csv and send it back for review.

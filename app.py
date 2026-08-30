@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.0-PIT-PITCHER"
+APP_VERSION = "0.12.1-PITCHER-AUDIT"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3197,8 +3197,16 @@ def parse_pitcher_gamelog(payload):
                     return default
 
             innings = stat.get("inningsPitched")
+            # MLB encodes partial innings as baseball notation: 5.1 = 5 1/3, 5.2 = 5 2/3.
+            # Treating this as a normal decimal biases every rate stat, so parse outs explicitly.
             try:
-                ip = float(innings)
+                txt = str(innings).strip()
+                if "." in txt:
+                    whole, outs = txt.split(".", 1)
+                    outs_i = int(outs)
+                    ip = float(int(whole)) + (outs_i / 3.0 if outs_i in (0, 1, 2) else float("nan"))
+                else:
+                    ip = float(txt)
             except Exception:
                 ip = np.nan
 
@@ -3517,6 +3525,114 @@ def run_pitcher_point_in_time_backtest(master_df, min_prior_games=12, min_pitche
         "cal_summary":summarize_sim_bets(cal_bets),
         "feature_cols":fcols,
     }
+
+
+def _mark_doubleheaders(df):
+    """Flag team/date duplicates without relying on post-game scores."""
+    x = df.copy()
+    x["_audit_day"] = pd.to_datetime(x["Commence_Time"], errors="coerce", utc=True).dt.date.astype(str)
+    x["_audit_matchup"] = x.apply(
+        lambda r: "|".join(sorted([
+            normalize_team_name_for_match(r.get("Away_Team")),
+            normalize_team_name_for_match(r.get("Home_Team")),
+        ])), axis=1
+    )
+    counts = x.groupby(["_audit_day", "_audit_matchup"])["Event_ID"].transform("nunique")
+    x["Audit_Doubleheader"] = counts > 1
+    return x.drop(columns=["_audit_day", "_audit_matchup"], errors="ignore")
+
+
+def _audit_subset_backtest(pit, max_hours_to_first_pitch=None, exclude_doubleheaders=True,
+                           min_starter_starts=3, label="Audit"):
+    """
+    Refit the exact same walk-forward model on a stricter eligible subset.
+    2023 fit -> 2024 chooses market/model blend -> 2023+24 refit -> 2025 holdout.
+    No threshold optimization is performed on 2025.
+    """
+    d = _mark_doubleheaders(pit)
+    d["Hours_To_First_Pitch"] = pd.to_numeric(d.get("Hours_To_First_Pitch"), errors="coerce")
+    if max_hours_to_first_pitch is not None:
+        d = d[(d["Hours_To_First_Pitch"] >= 0) & (d["Hours_To_First_Pitch"] <= float(max_hours_to_first_pitch))].copy()
+    if exclude_doubleheaders:
+        d = d[~d["Audit_Doubleheader"]].copy()
+    d = d[(pd.to_numeric(d["Away_SP_Starts"], errors="coerce") >= int(min_starter_starts)) &
+          (pd.to_numeric(d["Home_SP_Starts"], errors="coerce") >= int(min_starter_starts))].copy()
+
+    if d.empty:
+        return None
+    fmat = pitcher_feature_matrix(d)
+    d = pd.concat([d.reset_index(drop=True), fmat.reset_index(drop=True)], axis=1)
+    fcols = list(fmat.columns)
+    train23 = d[d["Season"] == 2023].copy()
+    val24 = d[d["Season"] == 2024].copy()
+    hold25 = d[d["Season"] == 2025].copy()
+    if min(len(train23), len(val24), len(hold25)) < 150:
+        return {"Label": label, "Error": f"Too little coverage: {len(train23)}/{len(val24)}/{len(hold25)}"}
+
+    X23, X24 = train23[fcols].to_numpy(float), val24[fcols].to_numpy(float)
+    y23, y24 = train23["Home_Win"].to_numpy(float), val24["Home_Win"].to_numpy(float)
+    X23z, X24z, _, _ = _standardize_train_apply(X23, X24)
+    b23 = fit_ridge_logit(X23z, y23, ridge=3.0)
+    raw24 = predict_logit(b23, X24z)
+    weights = [0.0,0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.0]
+    blends=[]
+    for w in weights:
+        pp=blend_prob(raw24, val24["Home_Market_Prob"].to_numpy(float), w)
+        blends.append((w,brier_score_binary(pp,y24),log_loss_binary(pp,y24)))
+    blends=sorted(blends,key=lambda z:(z[1],z[2]))
+    best_weight=float(blends[0][0])
+
+    dev=d[d["Season"].isin([2023,2024])].copy()
+    Xdev, X25 = dev[fcols].to_numpy(float), hold25[fcols].to_numpy(float)
+    ydev, y25 = dev["Home_Win"].to_numpy(float), hold25["Home_Win"].to_numpy(float)
+    Xdevz, X25z, _, _ = _standardize_train_apply(Xdev, X25)
+    bdev=fit_ridge_logit(Xdevz,ydev,ridge=3.0)
+    raw25=predict_logit(bdev,X25z)
+    cal25=blend_prob(raw25,hold25["Home_Market_Prob"].to_numpy(float),best_weight)
+    hold25=hold25.copy()
+    hold25["Audit_Raw_Prob"]=raw25
+    hold25["Audit_Cal_Prob"]=cal25
+    bets=simulate_ml_bets(hold25.rename(columns={"Audit_Cal_Prob":"_P"}),"_P")
+    bs=summarize_sim_bets(bets)
+    return {
+        "Label":label,"Games_2023":len(train23),"Games_2024":len(val24),"Games_2025":len(hold25),
+        "Model_Weight":best_weight,
+        "Market_Brier_2025":brier_score_binary(hold25["Home_Market_Prob"],hold25["Home_Win"]),
+        "Model_Brier_2025":brier_score_binary(raw25,y25),
+        "Cal_Brier_2025":brier_score_binary(cal25,y25),
+        "Brier_Improvement":brier_score_binary(hold25["Home_Market_Prob"],hold25["Home_Win"])-brier_score_binary(cal25,y25),
+        "Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],
+        "hold25":hold25,"bets":bets,
+    }
+
+
+def run_pitcher_audit(master_df, min_prior_games=12, min_pitcher_starts=3):
+    """
+    Deliberately hostile audit of the pitcher result. Starter identity from MLB's historical record
+    is retrospective and therefore cannot by itself prove that the starter was known at the odds snapshot.
+    We stress the result by moving snapshots closer to first pitch and removing doubleheaders.
+    """
+    pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
+    if pit.empty:
+        raise ValueError("No PIT games had sufficient starter history for the audit.")
+    specs=[
+        (18,False,"Baseline ≤18h"),
+        (18,True,"No doubleheaders ≤18h"),
+        (12,True,"No DH • ≤12h"),
+        (6,True,"No DH • ≤6h"),
+        (3,True,"No DH • ≤3h"),
+    ]
+    results=[]
+    full={}
+    for hrs,no_dh,label in specs:
+        r=_audit_subset_backtest(pit,max_hours_to_first_pitch=hrs,exclude_doubleheaders=no_dh,
+                                 min_starter_starts=min_pitcher_starts,label=label)
+        if r:
+            full[label]=r
+            results.append({k:v for k,v in r.items() if k not in ("hold25","bets")})
+    table=pd.DataFrame(results)
+    return {"pit":pit,"table":table,"results":full}
+
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -4564,6 +4680,62 @@ if mode == "Backtest Lab":
             "Interpretation guard: historical probable/starter identity coverage can be incomplete. "
             "Only games with sufficient prior-start history for both starters enter this test."
         )
+
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.12.1 • PITCHER LEAKAGE AUDIT</div>', unsafe_allow_html=True)
+    st.caption(
+        "Try to break the pitcher result before production. This reruns the same walk-forward test under stricter "
+        "pregame windows and removes doubleheaders. It also fixes MLB innings notation (5.2 = 5⅔ IP). Zero Odds API credits."
+    )
+    st.warning(
+        "Important: MLB's historical starter identity is retrospective. This audit can stress-test the result, "
+        "but it cannot prove the listed starter was publicly known at the exact historical odds snapshot."
+    )
+    audit_upload = st.file_uploader(
+        "Upload Moneyline Master CSV for Audit",
+        type=["csv"], key="pitcher_audit_master_upload"
+    )
+    if audit_upload is not None:
+        try:
+            audit_master=pd.read_csv(audit_upload)
+            ac1,ac2=st.columns(2)
+            with ac1:
+                audit_team=st.slider("Audit prior team games",5,25,12,1,key="audit_team")
+            with ac2:
+                audit_starts=st.slider("Audit prior starter starts",1,8,3,1,key="audit_starts")
+            if st.button("Run Pitcher Leakage Audit",type="primary",key="run_pitcher_audit"):
+                with st.spinner("Running hostile pitcher audit across stricter pregame windows…"):
+                    st.session_state["pitcher_audit_result"]=run_pitcher_audit(
+                        audit_master,min_prior_games=audit_team,min_pitcher_starts=audit_starts
+                    )
+        except Exception as ex:
+            st.error(f"Could not run pitcher audit: {ex}")
+
+    if "pitcher_audit_result" in st.session_state:
+        ar=st.session_state["pitcher_audit_result"]
+        at=ar["table"].copy()
+        if not at.empty:
+            show=at.copy()
+            for c in ["Model_Weight","Market_Brier_2025","Model_Brier_2025","Cal_Brier_2025","Brier_Improvement","ROI","Units"]:
+                if c in show.columns: show[c]=pd.to_numeric(show[c],errors="coerce")
+            st.markdown("**2025 stress-test ladder**")
+            st.dataframe(show.round({"Model_Weight":2,"Market_Brier_2025":4,"Model_Brier_2025":4,"Cal_Brier_2025":4,"Brier_Improvement":4,"ROI":4,"Units":2}),use_container_width=True,hide_index=True)
+            strict=ar["results"].get("No DH • ≤3h") or ar["results"].get("No DH • ≤6h")
+            if strict and not strict.get("Error"):
+                imp=float(strict.get("Brier_Improvement",0))
+                roi=float(strict.get("ROI",0))
+                wt=float(strict.get("Model_Weight",0))
+                if imp>0 and wt>0:
+                    st.success(f"Strict-window signal survived: Brier improvement {imp:+.4f}, validation model weight {wt*100:.0f}%, betting ROI {roi*100:+.1f}%.")
+                else:
+                    st.warning("The strict-window test did not preserve the original signal. Do not promote the pitcher model to production yet.")
+            with st.expander("Download audit outputs",expanded=False):
+                st.download_button("Download Audit Summary",at.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_audit_summary.csv",mime="text/csv",key="dl_pitcher_audit_summary")
+                for label,r in ar["results"].items():
+                    if isinstance(r,dict) and "hold25" in r:
+                        safe=re.sub(r"[^a-z0-9]+","_",label.lower()).strip("_")
+                        st.download_button(f"Download {label} Holdout",r["hold25"].to_csv(index=False).encode("utf-8"),file_name=f"mlb_pit_pitcher_audit_{safe}_2025.csv",mime="text/csv",key=f"dl_{safe}")
+            st.caption("Pass condition is not a fixed ROI target. We want positive out-of-sample Brier improvement that persists as the odds snapshot moves closer to first pitch, without tuning on 2025.")
 
     st.divider()
     uploaded_bt = st.file_uploader(
