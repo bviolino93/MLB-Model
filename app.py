@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
 from statistics import median
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -29,7 +30,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.13.0-PITCHER-MODEL-2"
+APP_VERSION = "0.14.0-PIT-BULLPEN"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3123,6 +3124,8 @@ def flatten_schedule_pitchers(payload):
                 "Pitcher_GameDate": game.get("gameDate"),
                 "Away_Team_Pitcher": away_team,
                 "Home_Team_Pitcher": home_team,
+                "Away_Team_ID": ((away.get("team") or {}).get("id")),
+                "Home_Team_ID": ((home.get("team") or {}).get("id")),
                 "Away_Starter_ID": away_pp.get("id"),
                 "Away_Starter_Name": away_pp.get("fullName"),
                 "Home_Starter_ID": home_pp.get("id"),
@@ -4130,6 +4133,412 @@ def run_pitcher_model_2_test(master_df,min_prior_games=12,min_pitcher_starts=3):
         "pit":pit,"strict_rows":len(strict),"table":table,
         "results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),
         "coefficients":v2.get("coefficients",pd.DataFrame()),
+    }
+
+
+# ===== v0.14 point-in-time bullpen research layer =====
+BULLPEN_CACHE_DIR = Path(".mlb_bullpen_cache")
+BULLPEN_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _bullpen_cache_file(season, team_id):
+    return BULLPEN_CACHE_DIR / f"team_{int(team_id)}_{int(season)}_pitching_gamelog.json"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_team_pitching_gamelog(season, team_id):
+    """Fetch all pitcher-game logs for one MLB team-season in one free MLB Stats API call.
+
+    `stats=gameLog` returns pitcher appearances. We later retain appearances where
+    gamesStarted == 0, which gives a point-in-time bullpen ledger without using
+    season-end relief aggregates. Disk + Streamlit caching keeps reruns cheap.
+    """
+    cache_file = _bullpen_cache_file(season, team_id)
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text()), None, True
+        except Exception:
+            pass
+
+    url = "https://statsapi.mlb.com/api/v1/stats"
+    params = {
+        "stats": "gameLog",
+        "group": "pitching",
+        "season": int(season),
+        "teamId": int(team_id),
+        "sportIds": 1,
+        "gameType": "R",
+        "playerPool": "ALL",
+        "limit": 1000,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=45)
+    except requests.RequestException as ex:
+        return None, f"Team {team_id} {season} pitching log request failed: {ex}", False
+    if resp.status_code != 200:
+        return None, f"Team {team_id} {season} pitching log returned HTTP {resp.status_code}.", False
+    try:
+        payload = resp.json()
+    except Exception:
+        return None, f"Team {team_id} {season} pitching log was not valid JSON.", False
+    try:
+        cache_file.write_text(json.dumps(payload))
+    except Exception:
+        pass
+    return payload, None, False
+
+
+def parse_team_reliever_gamelog(payload, team_id=None, season=None):
+    """Parse pitcher gameLog splits and retain relief appearances only.
+
+    This deliberately uses the per-game `gamesStarted` flag instead of a player's
+    roster role. A pitcher who starts one game and relieves in another is treated
+    correctly for each appearance.
+    """
+    rows = []
+    for block in (payload or {}).get("stats", []) or []:
+        for split in block.get("splits", []) or []:
+            stat = split.get("stat") or {}
+            game = split.get("game") or {}
+            person = split.get("player") or split.get("person") or {}
+            raw_date = split.get("date")
+            if not raw_date:
+                continue
+            try:
+                d = pd.to_datetime(raw_date, errors="raise", utc=True)
+            except Exception:
+                continue
+
+            def num(key, default=0.0):
+                try:
+                    v = stat.get(key)
+                    return float(v) if v not in (None, "", "-") else float(default)
+                except Exception:
+                    return float(default)
+
+            gs = num("gamesStarted", 0.0)
+            if gs >= 1.0:
+                continue
+            try:
+                txt=str(stat.get("inningsPitched",0.0)).strip()
+                if "." in txt:
+                    whole,outs=txt.split(".",1); oi=int(outs)
+                    ip=float(int(whole)) + (oi/3.0 if oi in (0,1,2) else float("nan"))
+                else:
+                    ip=float(txt)
+            except Exception:
+                ip=float("nan")
+            if not np.isfinite(ip) or ip <= 0:
+                continue
+            pid = person.get("id")
+            rows.append({
+                "date": d,
+                "gamePk": game.get("gamePk"),
+                "team_id": int(team_id) if team_id is not None else np.nan,
+                "season": int(season) if season is not None else d.year,
+                "player_id": pid,
+                "inningsPitched": float(ip),
+                "earnedRuns": num("earnedRuns"),
+                "strikeOuts": num("strikeOuts"),
+                "baseOnBalls": num("baseOnBalls"),
+                "homeRuns": num("homeRuns"),
+                "hits": num("hits"),
+                "hitBatsmen": num("hitBatsmen"),
+                "battersFaced": num("battersFaced"),
+                "numberOfPitches": num("numberOfPitches", np.nan),
+            })
+    return pd.DataFrame(rows)
+
+
+def summarize_bullpen_before_game(relief_df, game_time, min_relief_ip=12.0):
+    """Build a bullpen profile using only relief appearances before target game.
+
+    Features cover underlying skill plus availability/fatigue. Calendar-day cutoffs
+    are intentionally conservative: same-day appearances are excluded, which avoids
+    accidentally using Game 1 relief work for a Game 1 target. Target doubleheaders
+    are removed by the strict research sample anyway.
+    """
+    if relief_df is None or relief_df.empty:
+        return None
+    g = relief_df.copy()
+    g["date"] = pd.to_datetime(g["date"], errors="coerce", utc=True)
+    target_day = pd.Timestamp(game_time).tz_convert("UTC").normalize()
+    g = g[g["date"].dt.normalize() < target_day].copy()
+    if g.empty:
+        return None
+
+    def sums(df):
+        ip = float(pd.to_numeric(df["inningsPitched"], errors="coerce").fillna(0).sum())
+        er = float(pd.to_numeric(df["earnedRuns"], errors="coerce").fillna(0).sum())
+        so = float(pd.to_numeric(df["strikeOuts"], errors="coerce").fillna(0).sum())
+        bb = float(pd.to_numeric(df["baseOnBalls"], errors="coerce").fillna(0).sum())
+        hr = float(pd.to_numeric(df["homeRuns"], errors="coerce").fillna(0).sum())
+        h = float(pd.to_numeric(df["hits"], errors="coerce").fillna(0).sum())
+        pit = pd.to_numeric(df["numberOfPitches"], errors="coerce")
+        pitches = float(pit.fillna(0).sum()) if pit.notna().any() else np.nan
+        if ip <= 0:
+            return {"IP":0.0,"ERA":np.nan,"FIP":np.nan,"KBB9":np.nan,"WHIP":np.nan,"Pitches":pitches}
+        return {
+            "IP": ip,
+            "ERA": 9.0 * er / ip,
+            "FIP": (13.0*hr + 3.0*bb - 2.0*so) / ip + 3.20,
+            "KBB9": 9.0 * (so - bb) / ip,
+            "WHIP": (h + bb) / ip,
+            "Pitches": pitches,
+        }
+
+    season = sums(g)
+    if season["IP"] < float(min_relief_ip):
+        return None
+
+    d1 = target_day - pd.Timedelta(days=1)
+    d2 = target_day - pd.Timedelta(days=2)
+    last1 = g[g["date"].dt.normalize() == d1].copy()
+    last3 = g[g["date"].dt.normalize() >= target_day - pd.Timedelta(days=3)].copy()
+    last7 = g[g["date"].dt.normalize() >= target_day - pd.Timedelta(days=7)].copy()
+    last14 = g[g["date"].dt.normalize() >= target_day - pd.Timedelta(days=14)].copy()
+    s1, s3, s7, s14 = sums(last1), sums(last3), sums(last7), sums(last14)
+
+    # Fixed priors prevent early-season extremes from dominating without peeking at
+    # the target season's final league averages.
+    prior_ip = 25.0
+    w = season["IP"] / (season["IP"] + prior_ip)
+    shr_fip = w*season["FIP"] + (1-w)*4.20
+    shr_era = w*season["ERA"] + (1-w)*4.20
+    shr_kbb9 = w*season["KBB9"] + (1-w)*5.10
+    shr_whip = w*season["WHIP"] + (1-w)*1.32
+
+    heavy1 = 0
+    if not last1.empty:
+        p = pd.to_numeric(last1["numberOfPitches"], errors="coerce")
+        heavy1 = int((p >= 20).fillna(False).sum())
+    day1_arms = set(last1["player_id"].dropna().tolist()) if "player_id" in last1 else set()
+    day2_df = g[g["date"].dt.normalize() == d2]
+    day2_arms = set(day2_df["player_id"].dropna().tolist()) if "player_id" in day2_df else set()
+    b2b = len(day1_arms.intersection(day2_arms))
+
+    return {
+        "BP_IP": season["IP"],
+        "BP_Shrunk_FIP": shr_fip,
+        "BP_Shrunk_ERA": shr_era,
+        "BP_Shrunk_KBB9": shr_kbb9,
+        "BP_Shrunk_WHIP": shr_whip,
+        "BP_Last7_FIP": s7["FIP"],
+        "BP_Last7_KBB9": s7["KBB9"],
+        "BP_Last14_FIP": s14["FIP"],
+        "BP_Last14_KBB9": s14["KBB9"],
+        "BP_Last1_IP": s1["IP"],
+        "BP_Last3_IP": s3["IP"],
+        "BP_Last1_Pitches": s1["Pitches"],
+        "BP_Last3_Pitches": s3["Pitches"],
+        "BP_Last1_Arms": int(last1["player_id"].nunique()) if not last1.empty else 0,
+        "BP_Last3_Arms": int(last3["player_id"].nunique()) if not last3.empty else 0,
+        "BP_Heavy20_Last1": heavy1,
+        "BP_BackToBack_Arms": int(b2b),
+    }
+
+
+def build_bullpen_feature_table(master_df, min_prior_team_games=12, min_pitcher_starts=3, min_bullpen_ip=12.0):
+    """Add point-in-time bullpen quality + availability to the frozen v0.13 starter table."""
+    pit = build_pitcher_feature_table(
+        master_df,
+        min_prior_team_games=min_prior_team_games,
+        min_pitcher_starts=min_pitcher_starts,
+    )
+    if pit.empty:
+        return pit, pd.DataFrame()
+    need = [c for c in ["Away_Team_ID","Home_Team_ID"] if c not in pit.columns]
+    if need:
+        raise ValueError("Historical schedule did not supply MLB team IDs needed for bullpen logs: " + ", ".join(need))
+
+    pairs=set()
+    for _,r in pit.iterrows():
+        try:
+            season=int(r["Season"])
+        except Exception:
+            continue
+        for c in ["Away_Team_ID","Home_Team_ID"]:
+            try:
+                pairs.add((season,int(r[c])))
+            except Exception:
+                pass
+    if not pairs:
+        raise ValueError("No team-season pairs were available for bullpen history.")
+
+    status=st.empty(); prog=st.progress(0)
+    ledgers={}; errors=[]; cache_hits=0
+    pairs_sorted=sorted(pairs)
+    max_workers=min(6,max(1,len(pairs_sorted)))
+    status.caption(f"Loading free MLB bullpen histories • {len(pairs_sorted)} team-seasons")
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        fut={ex.submit(fetch_team_pitching_gamelog,season,tid):(season,tid) for season,tid in pairs_sorted}
+        done=0
+        for f in as_completed(fut):
+            season,tid=fut[f]
+            done+=1
+            try:
+                payload,err,cached=f.result()
+            except Exception as exc:
+                payload,err,cached=None,str(exc),False
+            if cached: cache_hits+=1
+            if err:
+                errors.append(err)
+            else:
+                df=parse_team_reliever_gamelog(payload,team_id=tid,season=season)
+                if not df.empty:
+                    ledgers[(season,tid)]=df
+                else:
+                    errors.append(f"Team {tid} {season} returned no relief game-log rows.")
+            prog.progress(min(100,int(done*100/len(pairs_sorted))),text=f"Bullpen histories • {done}/{len(pairs_sorted)}")
+    status.empty(); prog.empty()
+
+    if len(ledgers) < max(10, int(len(pairs_sorted)*0.70)):
+        sample="; ".join(errors[:3])
+        raise ValueError(f"Bullpen game-log coverage too low ({len(ledgers)}/{len(pairs_sorted)} team-seasons). {sample}")
+
+    rows=[]
+    feat_names=None
+    for _,r in pit.iterrows():
+        try:
+            season=int(r["Season"]); aid=int(r["Away_Team_ID"]); hid=int(r["Home_Team_ID"])
+            gt=pd.to_datetime(r["Commence_Time"],errors="coerce",utc=True)
+        except Exception:
+            continue
+        if pd.isna(gt):
+            continue
+        af=summarize_bullpen_before_game(ledgers.get((season,aid)),gt,min_relief_ip=min_bullpen_ip)
+        hf=summarize_bullpen_before_game(ledgers.get((season,hid)),gt,min_relief_ip=min_bullpen_ip)
+        if af is None or hf is None:
+            continue
+        rec=r.to_dict()
+        feat_names=list(af.keys())
+        for k,v in af.items(): rec[f"Away_{k}"]=v
+        for k,v in hf.items(): rec[f"Home_{k}"]=v
+        rows.append(rec)
+    out=pd.DataFrame(rows)
+    quality=pd.DataFrame([{
+        "Team_Seasons_Requested":len(pairs_sorted),
+        "Team_Seasons_Loaded":len(ledgers),
+        "Cache_Hits":cache_hits,
+        "PIT_Pitcher_Rows":len(pit),
+        "PIT_Bullpen_Rows":len(out),
+        "Coverage":len(out)/len(pit) if len(pit) else 0.0,
+        "Fetch_Errors":len(errors),
+    }])
+    return out, quality
+
+
+BULLPEN_FEATURES = [
+    "BP_Shrunk_FIP_Diff","BP_Shrunk_ERA_Diff","BP_Shrunk_KBB9_Diff","BP_Shrunk_WHIP_Diff",
+    "BP_Last7_FIP_Diff","BP_Last7_KBB9_Diff","BP_Last14_FIP_Diff","BP_Last14_KBB9_Diff",
+    "BP_Last1_IP_Diff","BP_Last3_IP_Diff","BP_Last1_Pitches_Diff","BP_Last3_Pitches_Diff",
+    "BP_Last1_Arms_Diff","BP_Last3_Arms_Diff","BP_Heavy20_Last1_Diff","BP_BackToBack_Arms_Diff",
+]
+
+
+def pitcher_bullpen_feature_matrix(df):
+    x=pitcher_v2_feature_matrix(df).copy()
+    # Quality signs: positive = home bullpen advantage when practical.
+    x["BP_Shrunk_FIP_Diff"] = df["Away_BP_Shrunk_FIP"] - df["Home_BP_Shrunk_FIP"]
+    x["BP_Shrunk_ERA_Diff"] = df["Away_BP_Shrunk_ERA"] - df["Home_BP_Shrunk_ERA"]
+    x["BP_Shrunk_KBB9_Diff"] = df["Home_BP_Shrunk_KBB9"] - df["Away_BP_Shrunk_KBB9"]
+    x["BP_Shrunk_WHIP_Diff"] = df["Away_BP_Shrunk_WHIP"] - df["Home_BP_Shrunk_WHIP"]
+    x["BP_Last7_FIP_Diff"] = df["Away_BP_Last7_FIP"] - df["Home_BP_Last7_FIP"]
+    x["BP_Last7_KBB9_Diff"] = df["Home_BP_Last7_KBB9"] - df["Away_BP_Last7_KBB9"]
+    x["BP_Last14_FIP_Diff"] = df["Away_BP_Last14_FIP"] - df["Home_BP_Last14_FIP"]
+    x["BP_Last14_KBB9_Diff"] = df["Home_BP_Last14_KBB9"] - df["Away_BP_Last14_KBB9"]
+    # Fatigue signs: positive = away bullpen worked harder, therefore home advantage.
+    x["BP_Last1_IP_Diff"] = df["Away_BP_Last1_IP"] - df["Home_BP_Last1_IP"]
+    x["BP_Last3_IP_Diff"] = df["Away_BP_Last3_IP"] - df["Home_BP_Last3_IP"]
+    x["BP_Last1_Pitches_Diff"] = df["Away_BP_Last1_Pitches"] - df["Home_BP_Last1_Pitches"]
+    x["BP_Last3_Pitches_Diff"] = df["Away_BP_Last3_Pitches"] - df["Home_BP_Last3_Pitches"]
+    x["BP_Last1_Arms_Diff"] = df["Away_BP_Last1_Arms"] - df["Home_BP_Last1_Arms"]
+    x["BP_Last3_Arms_Diff"] = df["Away_BP_Last3_Arms"] - df["Home_BP_Last3_Arms"]
+    x["BP_Heavy20_Last1_Diff"] = df["Away_BP_Heavy20_Last1"] - df["Home_BP_Heavy20_Last1"]
+    x["BP_BackToBack_Arms_Diff"] = df["Away_BP_BackToBack_Arms"] - df["Home_BP_BackToBack_Arms"]
+    # Recent windows can be empty. Preserve the row and let train-only standardization
+    # impute from the development distribution rather than deleting games.
+    return x.replace([np.inf,-np.inf],np.nan)
+
+
+def _fit_feature_model_walkforward_impute(d, feature_builder, label, ridge=6.0):
+    """Same frozen walk-forward protocol, with train-only median imputation.
+
+    v0.13 had very few missing engineered starter fields. Bullpen 7/14-day windows
+    can legitimately be empty early in a season, so this version learns medians
+    from the training/development sample only and applies them forward.
+    """
+    raw=d.copy().reset_index(drop=True)
+    fmat=feature_builder(raw).reset_index(drop=True)
+    work=pd.concat([raw,fmat],axis=1); fcols=list(fmat.columns)
+    tr=work[work["Season"]==2023].copy(); va=work[work["Season"]==2024].copy(); ho=work[work["Season"]==2025].copy()
+    if min(len(tr),len(va),len(ho))<150:
+        return {"Model":label,"Error":f"Too little coverage: {len(tr)}/{len(va)}/{len(ho)}"}
+
+    med23=tr[fcols].median(numeric_only=True).reindex(fcols).fillna(0.0)
+    Xtr=tr[fcols].fillna(med23).to_numpy(float); Xva=va[fcols].fillna(med23).to_numpy(float)
+    ytr=tr["Home_Win"].to_numpy(float); yva=va["Home_Win"].to_numpy(float)
+    Xtrz,Xvaz,_,_=_standardize_train_apply(Xtr,Xva)
+    b23=fit_ridge_logit(Xtrz,ytr,ridge=ridge); raw24=predict_logit(b23,Xvaz)
+    choices=[]
+    for w in [0.0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.0]:
+        pp=blend_prob(raw24,va["Home_Market_Prob"].to_numpy(float),w)
+        choices.append((w,brier_score_binary(pp,yva),log_loss_binary(pp,yva)))
+    bw,b24,ll24=sorted(choices,key=lambda z:(z[1],z[2]))[0]; bw=float(bw)
+
+    dev=work[work["Season"].isin([2023,2024])].copy()
+    meddev=dev[fcols].median(numeric_only=True).reindex(fcols).fillna(0.0)
+    Xdev=dev[fcols].fillna(meddev).to_numpy(float); X25=ho[fcols].fillna(meddev).to_numpy(float)
+    ydev=dev["Home_Win"].to_numpy(float); y25=ho["Home_Win"].to_numpy(float)
+    Xdz,X25z,_,_=_standardize_train_apply(Xdev,X25)
+    bd=fit_ridge_logit(Xdz,ydev,ridge=ridge); raw25=predict_logit(bd,X25z)
+    mkt=ho["Home_Market_Prob"].to_numpy(float); cal25=blend_prob(raw25,mkt,bw)
+    out=ho.copy(); out["V14_Raw_Prob"]=raw25; out["V14_Cal_Prob"]=cal25
+    bets=simulate_ml_bets(out,"V14_Cal_Prob"); bs=summarize_sim_bets(bets)
+    coef=pd.DataFrame({"Feature":["Intercept"]+fcols,"Coefficient":bd}); coef["Abs_Coefficient"]=coef["Coefficient"].abs(); coef=coef.sort_values("Abs_Coefficient",ascending=False).reset_index(drop=True)
+    return {
+        "Model":label,"Games_2025":len(ho),"Model_Weight":bw,
+        "Validation_2024_Brier":float(b24),"Validation_2024_LogLoss":float(ll24),
+        "Market_Brier":brier_score_binary(mkt,y25),"Raw_Model_Brier":brier_score_binary(raw25,y25),
+        "Cal_Brier":brier_score_binary(cal25,y25),"Market_LogLoss":log_loss_binary(mkt,y25),
+        "Raw_Model_LogLoss":log_loss_binary(raw25,y25),"Cal_LogLoss":log_loss_binary(cal25,y25),
+        "Brier_Improvement":brier_score_binary(mkt,y25)-brier_score_binary(cal25,y25),
+        "Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],
+        "hold25":out,"bets":bets,"coefficients":coef,
+    }
+
+
+def run_pitcher_bullpen_test(master_df,min_prior_games=12,min_pitcher_starts=3,min_bullpen_ip=12.0):
+    """Frozen v0.13 champion versus v0.14 Pitcher 2.0 + PIT Bullpen.
+
+    Both are refit on the exact same bullpen-eligible strict rows. 2025 never chooses
+    weights or thresholds. Promotion is based on Brier, not backtest ROI.
+    """
+    pit,quality=build_bullpen_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts,min_bullpen_ip=min_bullpen_ip)
+    if pit.empty:
+        raise ValueError("No point-in-time pitcher + bullpen rows were built.")
+    strict=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts)
+    if strict.empty:
+        raise ValueError("No eligible ≤6h non-doubleheader pitcher + bullpen rows were available.")
+
+    # Frozen champion is rerun on the identical rows. Use the same v0.13 fitter/recipe.
+    base=_fit_feature_model_walkforward(strict,pitcher_v2_feature_matrix,"v0.13 frozen Pitcher 2.0",ridge=5.0)
+    v14=_fit_feature_model_walkforward_impute(strict,pitcher_bullpen_feature_matrix,"v0.14 Pitcher 2.0 + Bullpen",ridge=6.0)
+    results=[base,v14]
+    table=pd.DataFrame([{k:v for k,v in r.items() if k not in ("hold25","bets","coefficients")} for r in results])
+
+    seg=[]
+    if not v14.get("Error") and isinstance(v14.get("bets"),pd.DataFrame) and not v14["bets"].empty:
+        x=v14["bets"].copy(); x["Commence_Time"]=pd.to_datetime(x["Commence_Time"],errors="coerce",utc=True); x["Month"]=x["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in x.groupby("Month"):
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",x[x["Odds"]<0]),("Underdogs",x[x["Odds"]>0])]:
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+
+    return {
+        "pit":pit,"strict_rows":len(strict),"quality":quality,"table":table,
+        "results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),
+        "coefficients":v14.get("coefficients",pd.DataFrame()),
     }
 
 def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
@@ -5565,6 +5974,92 @@ if mode == "Backtest Lab":
                     st.download_button("Download v0.13 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_holdout_2025.csv",mime="text/csv",key="dl_v13_hold")
                 if isinstance(bets,pd.DataFrame) and not bets.empty:
                     st.download_button("Download v0.13 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_bets_2025.csv",mime="text/csv",key="dl_v13_bets")
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.14.0 • PIT BULLPEN TEST</div>', unsafe_allow_html=True)
+    st.caption("Frozen v0.13 Pitcher Model 2.0 versus Pitcher 2.0 + point-in-time bullpen quality and availability. Same ≤6h, no-doubleheader walk-forward protocol.")
+    st.info("Bullpen data comes from free MLB pitcher game logs and is filtered strictly to relief appearances before each target game. Adds season-shrunk relief skill, 7/14-day form, 1/3-day workload, heavy-use arms and back-to-back availability. 2025 never selects the blend or betting thresholds.")
+    v14_upload=st.file_uploader("Upload Moneyline Master CSV for Bullpen Test",type=["csv"],key="bullpen_v14_upload")
+    if v14_upload is not None:
+        try:
+            v14_master=pd.read_csv(v14_upload)
+            bc1,bc2,bc3=st.columns(3)
+            with bc1: v14_team=st.slider("v0.14 prior team games",5,25,12,1,key="v14_team")
+            with bc2: v14_starts=st.slider("v0.14 prior starter starts",1,8,3,1,key="v14_starts")
+            with bc3: v14_bpip=st.slider("Minimum prior bullpen IP",6,30,12,1,key="v14_bpip")
+            if st.button("Run Pitcher + Bullpen Test",type="primary",key="run_v14_bullpen"):
+                st.session_state["v14_bullpen_pending"]=True
+                st.session_state["v14_bullpen_params"]=(int(v14_team),int(v14_starts),float(v14_bpip))
+                st.session_state.pop("v14_bullpen_result",None)
+                st.rerun()
+            if st.session_state.get("v14_bullpen_pending",False):
+                rt,rs,rip=st.session_state.get("v14_bullpen_params",(v14_team,v14_starts,v14_bpip))
+                st.info("Bullpen test started. First run may take a few minutes while team-season relief logs are cached; reruns should be much faster.")
+                prog14=st.progress(5,text="Building point-in-time pitcher + bullpen states…")
+                try:
+                    out=run_pitcher_bullpen_test(v14_master,min_prior_games=rt,min_pitcher_starts=rs,min_bullpen_ip=rip)
+                    prog14.progress(100,text="Pitcher + bullpen comparison complete.")
+                    st.session_state["v14_bullpen_result"]=out
+                    st.session_state["v14_bullpen_pending"]=False
+                    st.session_state["v14_bullpen_just_completed"]=True
+                    st.rerun()
+                except Exception as ex:
+                    st.session_state["v14_bullpen_pending"]=False
+                    st.error(f"Pitcher + bullpen test failed: {ex}")
+        except Exception as ex:
+            st.error(f"Could not prepare bullpen test: {ex}")
+
+    if "v14_bullpen_result" in st.session_state:
+        br=st.session_state["v14_bullpen_result"] or {}; bt14=br.get("table",pd.DataFrame())
+        if st.session_state.pop("v14_bullpen_just_completed",False):
+            st.success("Bullpen test complete — frozen champion comparison below.")
+        q=br.get("quality",pd.DataFrame())
+        if isinstance(q,pd.DataFrame) and not q.empty:
+            qq=q.iloc[0]
+            st.caption(f"Bullpen coverage: {int(qq.get('PIT_Bullpen_Rows',0)):,}/{int(qq.get('PIT_Pitcher_Rows',0)):,} PIT rows • {int(qq.get('Team_Seasons_Loaded',0))}/{int(qq.get('Team_Seasons_Requested',0))} team-seasons loaded • {int(qq.get('Cache_Hits',0))} cache hits")
+        if bt14 is None or bt14.empty:
+            st.error("Bullpen test returned no comparison rows.")
+        else:
+            st.markdown("**2025 untouched holdout — identical bullpen-eligible rows**")
+            cols=[c for c in ["Model","Games_2025","Model_Weight","Validation_2024_Brier","Market_Brier","Raw_Model_Brier","Cal_Brier","Brier_Improvement","Bets","Wins","Losses","Units","ROI"] if c in bt14.columns]
+            st.dataframe(bt14[cols].round({"Model_Weight":2,"Validation_2024_Brier":4,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            try:
+                base=bt14[bt14["Model"]=="v0.13 frozen Pitcher 2.0"].iloc[0]
+                new=bt14[bt14["Model"]=="v0.14 Pitcher 2.0 + Bullpen"].iloc[0]
+                delta=float(base["Cal_Brier"])-float(new["Cal_Brier"])
+                val_delta=float(base["Validation_2024_Brier"])-float(new["Validation_2024_Brier"])
+                if delta>=.001 and val_delta>=0:
+                    st.success(f"BULLPEN PASS: 2025 calibrated Brier improves by {delta:.4f} and 2024 validation does not deteriorate. Bullpen earns the next research slot.")
+                elif delta>0 and val_delta>=-.0005:
+                    st.info(f"BULLPEN NEUTRAL: small 2025 Brier gain ({delta:.4f}). Keep v0.13 frozen until the gain is stronger; do not promote on ROI alone.")
+                else:
+                    st.warning("BULLPEN FAIL: point-in-time bullpen features did not improve the frozen champion cleanly. Keep v0.13 and discard/tighten this bullpen layer.")
+            except Exception:
+                pass
+            seg=br.get("segments",pd.DataFrame())
+            if isinstance(seg,pd.DataFrame) and not seg.empty:
+                with st.expander("v0.14 2025 betting robustness splits",expanded=True):
+                    st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            coef=br.get("coefficients",pd.DataFrame())
+            if isinstance(coef,pd.DataFrame) and not coef.empty:
+                bpcoef=coef[coef["Feature"].astype(str).str.startswith("BP_")].copy()
+                with st.expander("Bullpen feature coefficients",expanded=False):
+                    st.caption("Standardized development-set coefficients. Diagnostic only; promotion is based on out-of-sample Brier.")
+                    st.dataframe((bpcoef if not bpcoef.empty else coef.head(25)).round({"Coefficient":4,"Abs_Coefficient":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download v0.14 Comparison CSV",bt14.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_comparison.csv",mime="text/csv",key="dl_v14_compare")
+            if isinstance(q,pd.DataFrame) and not q.empty:
+                st.download_button("Download v0.14 Data Quality CSV",q.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_data_quality.csv",mime="text/csv",key="dl_v14_quality")
+            if isinstance(seg,pd.DataFrame) and not seg.empty:
+                st.download_button("Download v0.14 Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_segments.csv",mime="text/csv",key="dl_v14_segments")
+            if isinstance(coef,pd.DataFrame) and not coef.empty:
+                st.download_button("Download v0.14 Coefficients CSV",coef.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_coefficients.csv",mime="text/csv",key="dl_v14_coefficients")
+            v14res=(br.get("results") or {}).get("v0.14 Pitcher 2.0 + Bullpen",{})
+            if isinstance(v14res,dict):
+                hold=v14res.get("hold25"); bets=v14res.get("bets")
+                if isinstance(hold,pd.DataFrame) and not hold.empty:
+                    st.download_button("Download v0.14 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_holdout_2025.csv",mime="text/csv",key="dl_v14_hold")
+                if isinstance(bets,pd.DataFrame) and not bets.empty:
+                    st.download_button("Download v0.14 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_bets_2025.csv",mime="text/csv",key="dl_v14_bets")
+
     st.divider()
     uploaded_bt = st.file_uploader(
         "Upload completed backtest dataset",
