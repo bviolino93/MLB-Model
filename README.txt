@@ -1,25 +1,43 @@
-MLB Edge v0.10.1-HISTORY-BUILDER
+MLB Edge v0.10.2-SMART-HISTORY
 
-Adds a guarded Historical Data Builder for The Odds API inside Backtest Lab.
+Main improvement
+================
+Historical Odds planning now uses ACTUAL MLB regular-season game dates from
+MLB's free Stats API rather than every calendar day.
 
-Default window: 2023-04-01 through 2025-10-05
-Snapshot: one league-wide MLB snapshot per date at 15:00 UTC
-Markets: h2h, spreads, totals
-Region: us
+This means:
+- offseason dates are skipped
+- no-game dates are skipped
+- the displayed Odds API credit ceiling is much more realistic
+- the free schedule lookup consumes zero Odds API credits
 
-Historical usage ceiling is 10 credits x markets x regions per snapshot. With all 3 default markets, max is 30 credits per nonempty snapshot. Empty responses cost 0.
+Default workflow
+================
+2023-03-30 through 2025-09-28
+Moneyline only (Phase 1)
 
-Safeguards:
-- no API call just by opening the app
-- explicit paid-credit confirmation checkbox
-- hard credit cap checked before every request
-- successful snapshots cached immediately
+Then, only after downloading and saving the cache:
+Phase 2: Run Line
+Phase 3: Total
+
+The app shows conservative credit ceilings for each phase and all three
+combined. It warns when a selected run can exceed a 20K plan.
+
+Safeguards retained
+===================
+- explicit paid-credit confirmation
+- hard credit cap
 - cached dates skipped
-- downloadable cache ZIP
-- cache ZIP restore after redeploy
-- downloadable historical market CSV
-- API key never displayed in errors
-- API remaining/last-cost headers displayed after requests
+- successful snapshots saved immediately
+- downloadable Historical Market CSV
+- downloadable Cache ZIP
+- API key is never displayed in errors
 
-15:00 UTC is a consistent pregame snapshot, not a verified closing line.
-The builder creates the historical market half of the backtest dataset. Point-in-time model outputs and final game results still need to be merged for the complete production backtest.
+UI
+==
+Dark-mode/mobile label readability has been improved.
+
+Methodology
+===========
+The snapshot remains fixed at 15:00 UTC as a consistent pregame baseline.
+It is NOT described as a verified closing line.

@@ -27,7 +27,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.1-HISTORY-BUILDER"
+APP_VERSION = "0.10.2-SMART-HISTORY"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -581,6 +581,63 @@ div[data-testid="stExpander"] details summary p{
 .guard-box{padding:10px 12px;border-radius:11px;background:rgba(34,197,94,.04);border:1px solid rgba(34,197,94,.12);color:#9db4c8;font-size:.68rem;line-height:1.5}
 .guard-box b{color:#bbf7d0}
 @media(max-width:700px){.credit-box{grid-template-columns:1fr}}
+
+
+/* ===== v0.10.2 SMART HISTORY / MOBILE READABILITY ===== */
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary *,
+[data-testid="stWidgetLabel"] p,
+.stMultiSelect label p,
+.stDateInput label p,
+.stNumberInput label p,
+.stCheckbox label p,
+.stFileUploader label p {
+  color:#dce8f3 !important;
+  opacity:1 !important;
+}
+.phase-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:7px;
+  margin:8px 0 10px;
+}
+.phase-cell{
+  padding:10px;
+  border-radius:11px;
+  background:rgba(255,255,255,.025);
+  border:1px solid rgba(148,163,184,.10);
+}
+.phase-cell.recommended{
+  background:rgba(34,197,94,.05);
+  border-color:rgba(34,197,94,.20);
+}
+.phase-cell span{
+  display:block;
+  color:#91a7ba;
+  font-size:.50rem;
+  font-weight:850;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+}
+.phase-cell b{
+  display:block;
+  color:#f1f7fb;
+  font-size:.80rem;
+  margin-top:2px;
+}
+.phase-cell em{
+  display:block;
+  color:#b0c5d6;
+  font-size:.63rem;
+  font-style:normal;
+  margin-top:2px;
+}
+@media(max-width:700px){
+  .phase-grid{grid-template-columns:1fr}
+  [data-testid="stExpander"] summary{
+    background:#102236 !important;
+  }
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -2042,7 +2099,7 @@ HISTORY_DEFAULT_START = date(2023, 4, 1)
 HISTORY_DEFAULT_END = date(2025, 10, 5)
 HISTORY_SNAPSHOT_HOUR_UTC = 15
 
-def historical_dates(start_date, end_date):
+def calendar_dates(start_date, end_date):
     cur = start_date
     out = []
     while cur <= end_date:
@@ -2050,10 +2107,66 @@ def historical_dates(start_date, end_date):
         cur += timedelta(days=1)
     return out
 
-def historical_credit_estimate(start_date, end_date, markets, regions=("us",)):
-    days = len(historical_dates(start_date, end_date))
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_mlb_regular_season_dates(start_date, end_date):
+    """
+    Fetch actual MLB regular-season game dates from MLB's free Stats API.
+    This consumes ZERO Odds API credits.
+    """
+    if end_date < start_date:
+        return [], "End date is before start date."
+
+    url = "https://statsapi.mlb.com/api/v1/schedule"
+    params = {
+        "sportId": 1,
+        "gameType": "R",
+        "startDate": start_date.strftime("%Y-%m-%d"),
+        "endDate": end_date.strftime("%Y-%m-%d"),
+        "hydrate": "none",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=25)
+    except requests.RequestException:
+        return [], "Could not reach the free MLB schedule service."
+
+    if resp.status_code != 200:
+        return [], f"MLB schedule service returned HTTP {resp.status_code}."
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return [], "MLB schedule response was not valid JSON."
+
+    dates = []
+    for day in payload.get("dates", []) or []:
+        raw = day.get("date")
+        games = day.get("games") or []
+        if not raw or not games:
+            continue
+        try:
+            dates.append(date.fromisoformat(raw))
+        except Exception:
+            continue
+
+    return sorted(set(dates)), None
+
+def historical_credit_estimate(game_dates, markets, regions=("us",)):
+    snapshots = len(game_dates)
     per_snapshot = 10 * max(1, len(markets)) * max(1, len(regions))
-    return {"snapshots": days, "per_snapshot_max": per_snapshot, "max_credits": days * per_snapshot}
+    return {
+        "snapshots": snapshots,
+        "per_snapshot_max": per_snapshot,
+        "max_credits": snapshots * per_snapshot,
+    }
+
+def phase_credit_plan(game_dates):
+    n = len(game_dates)
+    return {
+        "moneyline": n * 10,
+        "runline": n * 10,
+        "total": n * 10,
+        "all_three": n * 30,
+    }
 
 def _history_cache_file(snapshot_date, markets):
     market_key = "-".join(sorted(markets))
@@ -2570,82 +2683,250 @@ if mode == "Backtest Lab":
 
 
     st.markdown('<div class="section-kicker">HISTORICAL DATA BUILDER</div>', unsafe_allow_html=True)
-    st.caption("Use this only after activating a paid Historical Odds plan. Nothing below calls the API until you explicitly press Build Historical Market Dataset.")
+    st.caption(
+        "The builder first finds actual MLB regular-season game dates from MLB's free schedule service. "
+        "That lookup uses zero Odds API credits."
+    )
 
     with st.expander("Build historical market dataset", expanded=True):
         hc1, hc2 = st.columns(2)
         with hc1:
-            hist_start = st.date_input("Historical start", value=HISTORY_DEFAULT_START, min_value=date(2020,6,6), max_value=date.today(), key="hist_start")
+            hist_start = st.date_input(
+                "Historical start",
+                value=date(2023,3,30),
+                min_value=date(2020,6,6),
+                max_value=date.today(),
+                key="hist_start"
+            )
         with hc2:
-            hist_end = st.date_input("Historical end", value=HISTORY_DEFAULT_END, min_value=date(2020,6,6), max_value=date.today(), key="hist_end")
-        hist_market_labels = st.multiselect("Historical markets", ["Moneyline","Run Line","Total"], default=["Moneyline","Run Line","Total"], key="hist_market_labels")
-        market_map={"Moneyline":"h2h","Run Line":"spreads","Total":"totals"}
-        hist_markets=[market_map[x] for x in hist_market_labels]
+            hist_end = st.date_input(
+                "Historical end",
+                value=date(2025,9,28),
+                min_value=date(2020,6,6),
+                max_value=date.today(),
+                key="hist_end"
+            )
+
+        with st.spinner("Finding actual MLB game dates…"):
+            mlb_game_dates, schedule_err = fetch_mlb_regular_season_dates(hist_start, hist_end)
+
+        if schedule_err:
+            st.error(schedule_err)
+            mlb_game_dates = []
+        elif mlb_game_dates:
+            st.success(
+                f"Found {len(mlb_game_dates):,} actual MLB regular-season game dates. "
+                "Offseason and no-game dates will be skipped."
+            )
+        else:
+            st.warning("No MLB regular-season game dates were found in this range.")
+
+        hist_market_labels = st.multiselect(
+            "Historical markets",
+            ["Moneyline","Run Line","Total"],
+            default=["Moneyline"],
+            key="hist_market_labels",
+            help="Recommended: build Moneyline first. Add Run Line and Total later only if budget remains."
+        )
+        market_map = {"Moneyline":"h2h","Run Line":"spreads","Total":"totals"}
+        hist_markets = [market_map[x] for x in hist_market_labels]
+
         if hist_end < hist_start:
             st.error("Historical end date must be on or after the start date.")
-            hist_est={"snapshots":0,"per_snapshot_max":0,"max_credits":0}
+            hist_est = {"snapshots":0,"per_snapshot_max":0,"max_credits":0}
         elif not hist_markets:
             st.warning("Select at least one market.")
-            hist_est={"snapshots":0,"per_snapshot_max":0,"max_credits":0}
+            hist_est = {"snapshots":0,"per_snapshot_max":0,"max_credits":0}
         else:
-            hist_est=historical_credit_estimate(hist_start,hist_end,hist_markets)
-        cached_dates=cached_history_manifest(hist_markets) if hist_markets else set()
-        selected_dates=set(historical_dates(hist_start,hist_end)) if hist_end>=hist_start else set()
-        cached_in_range=len(cached_dates & selected_dates)
-        remaining_snapshots=max(0,hist_est["snapshots"]-cached_in_range)
-        remaining_credit_ceiling=remaining_snapshots*hist_est["per_snapshot_max"]
-        c1,c2,c3=st.columns(3)
-        c1.metric("Calendar snapshots", f"{hist_est['snapshots']:,}")
+            hist_est = historical_credit_estimate(mlb_game_dates, hist_markets)
+
+        phase_plan = phase_credit_plan(mlb_game_dates)
+        cached_dates = cached_history_manifest(hist_markets) if hist_markets else set()
+        selected_dates = set(mlb_game_dates)
+        cached_in_range = len(cached_dates & selected_dates)
+        remaining_snapshots = max(0, hist_est["snapshots"] - cached_in_range)
+        remaining_credit_ceiling = remaining_snapshots * hist_est["per_snapshot_max"]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("MLB game dates", f"{hist_est['snapshots']:,}")
         c2.metric("Max / new snapshot", f"{hist_est['per_snapshot_max']:,}")
         c3.metric("Remaining ceiling", f"{remaining_credit_ceiling:,}")
-        st.caption(f"{cached_in_range:,} selected snapshots are already cached and will be skipped. This is a conservative ceiling; empty responses cost 0 and usage is based on markets actually returned.")
-        hard_cap=st.number_input("Hard credit cap for this run", min_value=10, max_value=100000, value=min(20000,max(10,remaining_credit_ceiling if remaining_credit_ceiling else 10)), step=10, key="history_hard_cap")
-        confirm_history=st.checkbox("I understand this button can consume paid Historical Odds credits.", key="confirm_history_spend")
-        st.info("Credit guard: cached dates are skipped; one league-wide snapshot is requested per date; successful responses are cached immediately; the run stops before the hard cap is exceeded. Snapshot time is 15:00 UTC.")
-        restore_zip=st.file_uploader("Restore prior historical cache (optional ZIP)", type=["zip"], key="history_cache_restore")
+
+        st.markdown(
+            f"""
+            <div class="phase-grid">
+              <div class="phase-cell recommended">
+                <span>Phase 1</span><b>Moneyline</b><em>≤ {phase_plan['moneyline']:,} credits</em>
+              </div>
+              <div class="phase-cell">
+                <span>Phase 2</span><b>Run Line</b><em>+ ≤ {phase_plan['runline']:,}</em>
+              </div>
+              <div class="phase-cell">
+                <span>Phase 3</span><b>Total</b><em>+ ≤ {phase_plan['total']:,}</em>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.caption(
+            f"All three markets together have a conservative ceiling of {phase_plan['all_three']:,} credits. "
+            "Moneyline-first is the safest way to stay inside the 20K plan."
+        )
+        st.caption(
+            f"{cached_in_range:,} selected MLB game-date snapshots are already cached and will be skipped."
+        )
+
+        suggested_cap = min(
+            20000,
+            max(10, remaining_credit_ceiling if remaining_credit_ceiling else 10)
+        )
+        hard_cap = st.number_input(
+            "Hard credit cap for this run",
+            min_value=10,
+            max_value=100000,
+            value=suggested_cap,
+            step=10,
+            key="history_hard_cap"
+        )
+
+        if remaining_credit_ceiling > 20000:
+            st.warning(
+                "This selection can exceed a 20K plan. Reduce the date range or markets before running it."
+            )
+        elif remaining_credit_ceiling > 0:
+            st.info(
+                f"This selection fits under a 20K conservative ceiling with "
+                f"{20000 - remaining_credit_ceiling:,} credits of headroom."
+            )
+
+        confirm_history = st.checkbox(
+            "I understand this button can consume paid Historical Odds credits.",
+            key="confirm_history_spend"
+        )
+
+        st.info(
+            "Credit guard: only actual MLB regular-season game dates are requested; cached dates are skipped; "
+            "one league-wide snapshot is requested per game date; successful responses are cached immediately; "
+            "the run stops before the hard cap is exceeded. Snapshot time is 15:00 UTC."
+        )
+
+        restore_zip = st.file_uploader(
+            "Restore prior historical cache (optional ZIP)",
+            type=["zip"],
+            key="history_cache_restore"
+        )
         if restore_zip is not None and st.button("Restore cache ZIP", key="restore_history_zip"):
             try:
-                restored_n=restore_cache_zip(restore_zip)
+                restored_n = restore_cache_zip(restore_zip)
                 st.success(f"Restored {restored_n:,} cached snapshot files.")
-            except Exception as e:
-                st.error(f"Could not restore cache ZIP: {e}")
-        run_history=st.button("Build Historical Market Dataset", type="primary", disabled=(not confirm_history or hist_end<hist_start or not hist_markets or remaining_snapshots==0), key="run_history_builder")
-        if remaining_snapshots==0 and hist_est["snapshots"]>0:
-            st.success("Every selected snapshot is already cached. No API call is needed.")
+            except Exception as ex:
+                st.error(f"Could not restore cache ZIP: {ex}")
+
+        run_history = st.button(
+            "Build Historical Market Dataset",
+            type="primary",
+            disabled=(
+                not confirm_history
+                or hist_end < hist_start
+                or not hist_markets
+                or not mlb_game_dates
+                or remaining_snapshots == 0
+            ),
+            key="run_history_builder"
+        )
+
+        if remaining_snapshots == 0 and hist_est["snapshots"] > 0:
+            st.success("Every selected MLB game-date snapshot is already cached. No Odds API call is needed.")
+
         if run_history:
-            dates_to_fetch=[d for d in historical_dates(hist_start,hist_end) if d not in cached_dates]
-            actual_last=None; remaining_hdr=None; estimated_spend=0; stopped_reason=None
-            progress=st.progress(0); status=st.empty(); total_new=len(dates_to_fetch)
-            for i,d in enumerate(dates_to_fetch,start=1):
+            dates_to_fetch = [d for d in mlb_game_dates if d not in cached_dates]
+            actual_last = None
+            remaining_hdr = None
+            estimated_spend = 0
+            stopped_reason = None
+
+            progress = st.progress(0)
+            status = st.empty()
+            total_new = len(dates_to_fetch)
+
+            for i, d in enumerate(dates_to_fetch, start=1):
                 if estimated_spend + hist_est["per_snapshot_max"] > hard_cap:
-                    stopped_reason=f"Stopped at the hard credit cap ({hard_cap:,})."; break
-                status.caption(f"Fetching {d.isoformat()} • {i:,} of {total_new:,} new snapshots")
-                payload,meta,err=fetch_historical_snapshot(d,hist_markets,force=False)
+                    stopped_reason = f"Stopped before exceeding the hard credit cap ({hard_cap:,})."
+                    break
+
+                status.caption(
+                    f"Fetching MLB game date {d.isoformat()} • {i:,} of {total_new:,} new snapshots"
+                )
+                payload, meta, err = fetch_historical_snapshot(d, hist_markets, force=False)
+
                 if err:
-                    stopped_reason=f"Stopped on {d.isoformat()}: {err}"; break
+                    stopped_reason = f"Stopped on {d.isoformat()}: {err}"
+                    break
+
                 estimated_spend += hist_est["per_snapshot_max"]
-                actual_last=meta.get("last"); remaining_hdr=meta.get("remaining")
-                progress.progress(min(i/max(1,total_new),1.0))
-            all_rows=[]
-            for d in historical_dates(hist_start,hist_end):
-                cf=_history_cache_file(d,hist_markets)
-                if not cf.exists(): continue
-                try: all_rows.extend(flatten_historical_snapshot(json.loads(cf.read_text()),d))
-                except Exception: continue
-            progress.empty(); status.empty()
-            if stopped_reason: st.warning(stopped_reason)
+                actual_last = meta.get("last")
+                remaining_hdr = meta.get("remaining")
+                progress.progress(min(i / max(1,total_new), 1.0))
+
+            all_rows = []
+            for d in mlb_game_dates:
+                cf = _history_cache_file(d, hist_markets)
+                if not cf.exists():
+                    continue
+                try:
+                    all_rows.extend(
+                        flatten_historical_snapshot(json.loads(cf.read_text()), d)
+                    )
+                except Exception:
+                    continue
+
+            progress.empty()
+            status.empty()
+
+            if stopped_reason:
+                st.warning(stopped_reason)
+
             if all_rows:
-                hist_df=pd.DataFrame(all_rows)
-                hist_df["Commence_Time"]=pd.to_datetime(hist_df["Commence_Time"],errors="coerce",utc=True)
-                hist_df=hist_df.sort_values(["Snapshot_Date","Commence_Time","Away_Team","Home_Team"]).drop_duplicates(["Snapshot_Date","Event_ID"],keep="last")
-                st.success(f"Historical market dataset ready: {len(hist_df):,} game rows across {hist_df['Snapshot_Date'].nunique():,} cached dates.")
+                hist_df = pd.DataFrame(all_rows)
+                hist_df["Commence_Time"] = pd.to_datetime(
+                    hist_df["Commence_Time"], errors="coerce", utc=True
+                )
+                hist_df = (
+                    hist_df
+                    .sort_values(["Snapshot_Date","Commence_Time","Away_Team","Home_Team"])
+                    .drop_duplicates(["Snapshot_Date","Event_ID"], keep="last")
+                )
+
+                st.success(
+                    f"Historical market dataset ready: {len(hist_df):,} game rows across "
+                    f"{hist_df['Snapshot_Date'].nunique():,} cached MLB game dates."
+                )
                 if remaining_hdr is not None:
-                    st.caption(f"The Odds API reports {remaining_hdr} credits remaining. Last-request cost: {actual_last if actual_last is not None else '—'}.")
-                st.dataframe(hist_df.head(100),use_container_width=True,hide_index=True)
-                st.download_button("Download Historical Market CSV", hist_df.to_csv(index=False).encode("utf-8"), file_name=f"mlb_historical_market_{hist_start}_{hist_end}.csv", mime="text/csv", key="download_history_csv")
-                st.download_button("Download Cache ZIP", build_cache_zip(), file_name=f"mlb_history_cache_{hist_start}_{hist_end}.zip", mime="application/zip", key="download_history_cache")
+                    st.caption(
+                        f"The Odds API reports {remaining_hdr} credits remaining. "
+                        f"Last-request cost: {actual_last if actual_last is not None else '—'}."
+                    )
+
+                st.dataframe(hist_df.head(100), use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "Download Historical Market CSV",
+                    hist_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"mlb_historical_market_{hist_start}_{hist_end}.csv",
+                    mime="text/csv",
+                    key="download_history_csv"
+                )
+                st.download_button(
+                    "Download Cache ZIP",
+                    build_cache_zip(),
+                    file_name=f"mlb_history_cache_{hist_start}_{hist_end}.zip",
+                    mime="application/zip",
+                    key="download_history_cache"
+                )
             else:
                 st.info("No cached historical game rows are available yet.")
+
     st.divider()
     uploaded_bt = st.file_uploader(
         "Upload completed backtest dataset",
