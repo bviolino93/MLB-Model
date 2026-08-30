@@ -12,6 +12,7 @@ from statistics import median
 
 import requests
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps, ImageFilter
@@ -27,7 +28,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.4-MONEYLINE-MASTER"
+APP_VERSION = "0.10.5-NUMPY-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
