@@ -27,7 +27,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.2-SMART-HISTORY"
+APP_VERSION = "0.10.3-SEASON-SCHEDULE-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -2110,45 +2110,63 @@ def calendar_dates(start_date, end_date):
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_mlb_regular_season_dates(start_date, end_date):
     """
-    Fetch actual MLB regular-season game dates from MLB's free Stats API.
+    Fetch actual MLB regular-season game dates from MLB's free Stats API,
+    one calendar year at a time. Splitting the request prevents long
+    multi-year schedule queries from returning incomplete/truncated ranges.
+
     This consumes ZERO Odds API credits.
     """
     if end_date < start_date:
-        return [], "End date is before start date."
+        return [], {}, "End date is before start date."
 
     url = "https://statsapi.mlb.com/api/v1/schedule"
-    params = {
-        "sportId": 1,
-        "gameType": "R",
-        "startDate": start_date.strftime("%Y-%m-%d"),
-        "endDate": end_date.strftime("%Y-%m-%d"),
-        "hydrate": "none",
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=25)
-    except requests.RequestException:
-        return [], "Could not reach the free MLB schedule service."
+    all_dates = []
+    season_counts = {}
 
-    if resp.status_code != 200:
-        return [], f"MLB schedule service returned HTTP {resp.status_code}."
+    for year in range(start_date.year, end_date.year + 1):
+        chunk_start = max(start_date, date(year, 1, 1))
+        chunk_end = min(end_date, date(year, 12, 31))
 
-    try:
-        payload = resp.json()
-    except Exception:
-        return [], "MLB schedule response was not valid JSON."
+        params = {
+            "sportId": 1,
+            "gameType": "R",
+            "startDate": chunk_start.strftime("%Y-%m-%d"),
+            "endDate": chunk_end.strftime("%Y-%m-%d"),
+            "hydrate": "none",
+        }
 
-    dates = []
-    for day in payload.get("dates", []) or []:
-        raw = day.get("date")
-        games = day.get("games") or []
-        if not raw or not games:
-            continue
         try:
-            dates.append(date.fromisoformat(raw))
-        except Exception:
-            continue
+            resp = requests.get(url, params=params, timeout=25)
+        except requests.RequestException:
+            return [], season_counts, f"Could not reach the free MLB schedule service for {year}."
 
-    return sorted(set(dates)), None
+        if resp.status_code != 200:
+            return [], season_counts, f"MLB schedule service returned HTTP {resp.status_code} for {year}."
+
+        try:
+            payload = resp.json()
+        except Exception:
+            return [], season_counts, f"MLB schedule response for {year} was not valid JSON."
+
+        year_dates = []
+        for day in payload.get("dates", []) or []:
+            raw = day.get("date")
+            games = day.get("games") or []
+            if not raw or not games:
+                continue
+            try:
+                d = date.fromisoformat(raw)
+            except Exception:
+                continue
+
+            if chunk_start <= d <= chunk_end:
+                year_dates.append(d)
+
+        year_dates = sorted(set(year_dates))
+        season_counts[year] = len(year_dates)
+        all_dates.extend(year_dates)
+
+    return sorted(set(all_dates)), season_counts, None
 
 def historical_credit_estimate(game_dates, markets, regions=("us",)):
     snapshots = len(game_dates)
@@ -2707,17 +2725,36 @@ if mode == "Backtest Lab":
                 key="hist_end"
             )
 
-        with st.spinner("Finding actual MLB game dates…"):
-            mlb_game_dates, schedule_err = fetch_mlb_regular_season_dates(hist_start, hist_end)
+        with st.spinner("Finding actual MLB game dates by season…"):
+            mlb_game_dates, season_date_counts, schedule_err = fetch_mlb_regular_season_dates(
+                hist_start, hist_end
+            )
 
         if schedule_err:
             st.error(schedule_err)
             mlb_game_dates = []
+            season_date_counts = {}
         elif mlb_game_dates:
             st.success(
                 f"Found {len(mlb_game_dates):,} actual MLB regular-season game dates. "
                 "Offseason and no-game dates will be skipped."
             )
+
+            if season_date_counts:
+                season_cols = st.columns(min(3, len(season_date_counts)))
+                for i, (season_year, season_count) in enumerate(sorted(season_date_counts.items())):
+                    with season_cols[i % len(season_cols)]:
+                        st.metric(str(season_year), f"{season_count:,} game dates")
+
+                suspicious = [
+                    (yr, cnt) for yr, cnt in season_date_counts.items()
+                    if cnt < 150 and date(yr, 4, 1) >= hist_start and date(yr, 9, 1) <= hist_end
+                ]
+                if suspicious:
+                    st.warning(
+                        "One or more full-season schedule counts look unusually low. "
+                        "Do not run paid historical downloads until the counts are reviewed."
+                    )
         else:
             st.warning("No MLB regular-season game dates were found in this range.")
 
@@ -2823,6 +2860,20 @@ if mode == "Backtest Lab":
             except Exception as ex:
                 st.error(f"Could not restore cache ZIP: {ex}")
 
+        full_season_years = [
+            yr for yr in range(hist_start.year, hist_end.year + 1)
+            if hist_start <= date(yr, 4, 1) and hist_end >= date(yr, 9, 1)
+        ]
+        schedule_sanity_ok = all(
+            season_date_counts.get(yr, 0) >= 150 for yr in full_season_years
+        )
+
+        if full_season_years and not schedule_sanity_ok:
+            st.error(
+                "Schedule sanity check failed. Paid historical downloading is disabled "
+                "until each included full MLB season has at least 150 distinct game dates."
+            )
+
         run_history = st.button(
             "Build Historical Market Dataset",
             type="primary",
@@ -2832,6 +2883,7 @@ if mode == "Backtest Lab":
                 or not hist_markets
                 or not mlb_game_dates
                 or remaining_snapshots == 0
+                or not schedule_sanity_ok
             ),
             key="run_history_builder"
         )

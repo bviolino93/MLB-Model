@@ -1,43 +1,39 @@
-MLB Edge v0.10.2-SMART-HISTORY
+MLB Edge v0.10.3-SEASON-SCHEDULE-FIX
 
-Main improvement
-================
-Historical Odds planning now uses ACTUAL MLB regular-season game dates from
-MLB's free Stats API rather than every calendar day.
+Fix
+===
+The free MLB schedule lookup now runs one calendar year at a time instead of
+requesting the entire 2023-2025 range in one call.
 
-This means:
-- offseason dates are skipped
-- no-game dates are skipped
-- the displayed Odds API credit ceiling is much more realistic
-- the free schedule lookup consumes zero Odds API credits
+Why
+===
+The prior multi-year schedule request returned only 188 distinct game dates,
+which was clearly incomplete for three MLB seasons and understated the paid
+Historical Odds credit estimate.
 
-Default workflow
-================
-2023-03-30 through 2025-09-28
-Moneyline only (Phase 1)
+New safeguards
+==============
+- Fetch 2023, 2024, 2025 schedule ranges separately
+- Combine and deduplicate dates
+- Display distinct game-date count for each season
+- Full included seasons must each show at least 150 distinct regular-season
+  game dates before the paid Historical Odds build button is enabled
+- If the schedule sanity check fails, paid downloading is blocked
 
-Then, only after downloading and saving the cache:
-Phase 2: Run Line
-Phase 3: Total
+Credit behavior
+===============
+The MLB schedule lookup remains free and consumes zero Odds API credits.
+No Historical Odds credits are used merely by opening the app.
 
-The app shows conservative credit ceilings for each phase and all three
-combined. It warns when a selected run can exceed a 20K plan.
+Recommended workflow
+====================
+1. Deploy v0.10.3.
+2. Open Backtest Lab -> Historical Data Builder.
+3. Confirm 2023, 2024, and 2025 each show roughly a full season of distinct
+   game dates, and total dates are around the expected multi-season range.
+4. Confirm Moneyline credit estimate.
+5. Only then activate the paid Historical Odds plan.
+6. Start with Moneyline only.
 
-Safeguards retained
-===================
-- explicit paid-credit confirmation
-- hard credit cap
-- cached dates skipped
-- successful snapshots saved immediately
-- downloadable Historical Market CSV
-- downloadable Cache ZIP
-- API key is never displayed in errors
-
-UI
-==
-Dark-mode/mobile label readability has been improved.
-
-Methodology
-===========
-The snapshot remains fixed at 15:00 UTC as a consistent pregame baseline.
-It is NOT described as a verified closing line.
+Historical snapshot remains 15:00 UTC and is a consistent pregame baseline,
+not a verified closing line.
