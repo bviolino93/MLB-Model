@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.1.1-PITCHER-AUDIT-UI-FIX"
+APP_VERSION = "0.12.1.2-PITCHER-AUDIT-RESULTS-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -4724,7 +4724,11 @@ if mode == "Backtest Lab":
                     progress.progress(100, text="Pitcher leakage audit complete.")
                     st.session_state["pitcher_audit_result"] = result
                     st.session_state["pitcher_audit_pending"] = False
-                    st.success("Audit complete — results are below.")
+                    st.session_state["pitcher_audit_just_completed"] = True
+                    # Force a clean render pass after the long synchronous calculation.
+                    # This is especially important on Streamlit mobile, where widgets below
+                    # a completed long-running callback can fail to paint until the next rerun.
+                    st.rerun()
                 except Exception as audit_ex:
                     st.session_state["pitcher_audit_pending"] = False
                     st.error(f"Pitcher audit failed: {audit_ex}")
@@ -4732,30 +4736,108 @@ if mode == "Backtest Lab":
             st.error(f"Could not prepare pitcher audit: {ex}")
 
     if "pitcher_audit_result" in st.session_state:
-        ar=st.session_state["pitcher_audit_result"]
-        at=ar["table"].copy()
-        if not at.empty:
-            show=at.copy()
-            for c in ["Model_Weight","Market_Brier_2025","Model_Brier_2025","Cal_Brier_2025","Brier_Improvement","ROI","Units"]:
-                if c in show.columns: show[c]=pd.to_numeric(show[c],errors="coerce")
+        ar = st.session_state.get("pitcher_audit_result") or {}
+        at = ar.get("table", pd.DataFrame())
+        results_map = ar.get("results", {}) or {}
+
+        if st.session_state.pop("pitcher_audit_just_completed", False):
+            st.success("Audit complete — results are ready below.")
+        else:
+            st.success("Pitcher leakage audit results loaded.")
+
+        if at is None or at.empty:
+            st.error(
+                "The audit finished but produced no stress-test rows. "
+                "This usually means no games met the starter-history / time-window rules."
+            )
+            pit_rows = len(ar.get("pit", [])) if ar.get("pit") is not None else 0
+            st.caption(f"PIT feature rows built: {pit_rows:,} • Stress-test rows: 0")
+            if results_map:
+                with st.expander("Audit diagnostics", expanded=True):
+                    st.write(results_map)
+        else:
+            show = at.copy()
+            numeric_cols = [
+                "Model_Weight","Market_Brier_2025","Model_Brier_2025",
+                "Cal_Brier_2025","Brier_Improvement","ROI","Units",
+                "Games_2023","Games_2024","Games_2025","Bets","Wins","Losses"
+            ]
+            for c in numeric_cols:
+                if c in show.columns:
+                    show[c] = pd.to_numeric(show[c], errors="coerce")
+
+            # Add an explicit audit verdict so the user does not have to interpret raw columns.
+            def _audit_status(row):
+                imp = float(row.get("Brier_Improvement", 0) or 0)
+                wt = float(row.get("Model_Weight", 0) or 0)
+                roi = float(row.get("ROI", 0) or 0)
+                n = float(row.get("Games_2025", 0) or 0)
+                if n < 250:
+                    return "WARNING — small sample"
+                if imp > 0 and wt > 0 and roi > 0:
+                    return "PASS"
+                if imp > 0 and wt > 0:
+                    return "WARNING — predictive only"
+                return "FAIL"
+
+            show.insert(1, "Audit_Status", show.apply(_audit_status, axis=1))
+
             st.markdown("**2025 stress-test ladder**")
-            st.dataframe(show.round({"Model_Weight":2,"Market_Brier_2025":4,"Model_Brier_2025":4,"Cal_Brier_2025":4,"Brier_Improvement":4,"ROI":4,"Units":2}),use_container_width=True,hide_index=True)
-            strict=ar["results"].get("No DH • ≤3h") or ar["results"].get("No DH • ≤6h")
+            st.dataframe(
+                show.round({
+                    "Model_Weight":2,"Market_Brier_2025":4,"Model_Brier_2025":4,
+                    "Cal_Brier_2025":4,"Brier_Improvement":4,"ROI":4,"Units":2
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            strict = results_map.get("No DH • ≤3h") or results_map.get("No DH • ≤6h")
             if strict and not strict.get("Error"):
-                imp=float(strict.get("Brier_Improvement",0))
-                roi=float(strict.get("ROI",0))
-                wt=float(strict.get("Model_Weight",0))
-                if imp>0 and wt>0:
-                    st.success(f"Strict-window signal survived: Brier improvement {imp:+.4f}, validation model weight {wt*100:.0f}%, betting ROI {roi*100:+.1f}%.")
+                imp = float(strict.get("Brier_Improvement", 0) or 0)
+                roi = float(strict.get("ROI", 0) or 0)
+                wt = float(strict.get("Model_Weight", 0) or 0)
+                games = int(strict.get("Games_2025", 0) or 0)
+                bets = int(strict.get("Bets", 0) or 0)
+                units = float(strict.get("Units", 0) or 0)
+                if imp > 0 and wt > 0:
+                    st.success(
+                        f"Strict-window signal survived: {games:,} 2025 games • "
+                        f"Brier improvement {imp:+.4f} • validation model weight {wt*100:.0f}% • "
+                        f"{bets:,} bets • {units:+.2f}u • ROI {roi*100:+.1f}%."
+                    )
                 else:
-                    st.warning("The strict-window test did not preserve the original signal. Do not promote the pitcher model to production yet.")
-            with st.expander("Download audit outputs",expanded=False):
-                st.download_button("Download Audit Summary",at.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_audit_summary.csv",mime="text/csv",key="dl_pitcher_audit_summary")
-                for label,r in ar["results"].items():
-                    if isinstance(r,dict) and "hold25" in r:
-                        safe=re.sub(r"[^a-z0-9]+","_",label.lower()).strip("_")
-                        st.download_button(f"Download {label} Holdout",r["hold25"].to_csv(index=False).encode("utf-8"),file_name=f"mlb_pit_pitcher_audit_{safe}_2025.csv",mime="text/csv",key=f"dl_{safe}")
-            st.caption("Pass condition is not a fixed ROI target. We want positive out-of-sample Brier improvement that persists as the odds snapshot moves closer to first pitch, without tuning on 2025.")
+                    st.warning(
+                        "The strict-window test did not preserve the original predictive signal. "
+                        "Do not promote the pitcher model to production yet."
+                    )
+            else:
+                st.warning("No usable ≤3h/≤6h strict-window result was produced. Review the ladder above.")
+
+            st.download_button(
+                "Download Audit Summary CSV",
+                at.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_pit_pitcher_audit_summary.csv",
+                mime="text/csv",
+                key="dl_pitcher_audit_summary_main"
+            )
+
+            with st.expander("Download individual holdouts", expanded=False):
+                for label, r in results_map.items():
+                    if isinstance(r, dict) and "hold25" in r:
+                        safe = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+                        st.download_button(
+                            f"Download {label} Holdout",
+                            r["hold25"].to_csv(index=False).encode("utf-8"),
+                            file_name=f"mlb_pit_pitcher_audit_{safe}_2025.csv",
+                            mime="text/csv",
+                            key=f"dl_holdout_{safe}"
+                        )
+
+            st.caption(
+                "Audit rule: we want positive out-of-sample Brier improvement that persists as the odds snapshot "
+                "moves closer to first pitch, without tuning thresholds on 2025."
+            )
 
     st.divider()
     uploaded_bt = st.file_uploader(
