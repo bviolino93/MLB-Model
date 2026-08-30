@@ -13,6 +13,7 @@ from statistics import median
 import requests
 
 import numpy as np
+from scipy.optimize import minimize
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps, ImageFilter
@@ -28,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.11.0-POINT-IN-TIME"
+APP_VERSION = "0.11.1-SCIPY-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
