@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.1-PITCHER-AUDIT"
+APP_VERSION = "0.12.1.1-PITCHER-AUDIT-UI-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -4703,13 +4703,33 @@ if mode == "Backtest Lab":
                 audit_team=st.slider("Audit prior team games",5,25,12,1,key="audit_team")
             with ac2:
                 audit_starts=st.slider("Audit prior starter starts",1,8,3,1,key="audit_starts")
+            # Two-phase launch: on mobile, immediately acknowledge the tap and rerun before
+            # starting the long MLB Stats API / PIT calculation. This prevents the button from
+            # appearing to do nothing while the synchronous audit is starting.
             if st.button("Run Pitcher Leakage Audit",type="primary",key="run_pitcher_audit"):
-                with st.spinner("Running hostile pitcher audit across stricter pregame windows…"):
-                    st.session_state["pitcher_audit_result"]=run_pitcher_audit(
-                        audit_master,min_prior_games=audit_team,min_pitcher_starts=audit_starts
+                st.session_state["pitcher_audit_pending"] = True
+                st.session_state["pitcher_audit_params"] = (int(audit_team), int(audit_starts))
+                st.session_state.pop("pitcher_audit_result", None)
+                st.rerun()
+
+            if st.session_state.get("pitcher_audit_pending", False):
+                run_team, run_starts = st.session_state.get("pitcher_audit_params", (audit_team, audit_starts))
+                st.info("Audit started. Keep this page open — the first run can take several minutes while MLB pitcher data is fetched/cached.")
+                progress = st.progress(5, text="Starting pitcher leakage audit…")
+                try:
+                    progress.progress(15, text="Building point-in-time pitcher features…")
+                    result = run_pitcher_audit(
+                        audit_master, min_prior_games=int(run_team), min_pitcher_starts=int(run_starts)
                     )
+                    progress.progress(100, text="Pitcher leakage audit complete.")
+                    st.session_state["pitcher_audit_result"] = result
+                    st.session_state["pitcher_audit_pending"] = False
+                    st.success("Audit complete — results are below.")
+                except Exception as audit_ex:
+                    st.session_state["pitcher_audit_pending"] = False
+                    st.error(f"Pitcher audit failed: {audit_ex}")
         except Exception as ex:
-            st.error(f"Could not run pitcher audit: {ex}")
+            st.error(f"Could not prepare pitcher audit: {ex}")
 
     if "pitcher_audit_result" in st.session_state:
         ar=st.session_state["pitcher_audit_result"]
