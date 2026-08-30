@@ -1,6 +1,9 @@
 import re
 import math
 import time
+import html
+import statistics
+import math
 from statistics import median
 
 import requests
@@ -20,7 +23,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.8.2-ODDS-KEY-HOTFIX"
+APP_VERSION = "0.9.1-MARKET-CLEANUP"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -77,6 +80,71 @@ div[data-testid="stMetricValue"] {font-size: 1.65rem;}
     .slate-grid {grid-template-columns:repeat(2,minmax(0,1fr));}
     .mlb-title {font-size:1.45rem;}
 }
+
+/* ===== v0.9 production betting UI ===== */
+.app-head{
+  display:flex;justify-content:space-between;align-items:flex-end;gap:12px;
+  padding:14px 15px;margin:2px 0 15px;border-radius:18px;
+  background:linear-gradient(145deg,rgba(13,31,52,.99),rgba(7,18,32,.99));
+  border:1px solid rgba(73,188,255,.15);box-shadow:0 14px 36px rgba(0,0,0,.20);
+}
+.app-eyebrow{font-size:.59rem;font-weight:950;letter-spacing:.16em;color:#67d1ff}
+.app-head-title{font-size:1.35rem;font-weight:950;color:#f8fafc;letter-spacing:-.035em;margin-top:2px}
+.app-head-sub{font-size:.67rem;color:#748da7;margin-top:3px}
+.app-live{font-size:.58rem;font-weight:900;color:#98aec5;white-space:nowrap}
+.section-kicker{
+  margin:15px 0 8px;font-size:.66rem;font-weight:950;letter-spacing:.13em;
+  color:#75ccee;text-transform:uppercase;
+}
+.topbet-card{
+  display:grid;grid-template-columns:34px 38px 1fr 42px;gap:9px;align-items:start;
+  padding:12px;margin:8px 0;border-radius:16px;
+  background:linear-gradient(180deg,rgba(14,29,49,.97),rgba(9,21,37,.98));
+  border:1px solid rgba(148,163,184,.10);
+}
+.topbet-card.a{border-color:rgba(34,197,94,.34)}
+.topbet-card.b{border-color:rgba(56,189,248,.30)}
+.topbet-card.c{border-color:rgba(250,204,21,.22)}
+.topbet-rank{font-size:.82rem;font-weight:950;color:#7890aa;padding-top:3px}
+.topbet-game{font-size:.60rem;font-weight:850;letter-spacing:.05em;color:#71869f;text-transform:uppercase}
+.topbet-pick{font-size:1.00rem;font-weight:950;color:#f7f9fc;margin-top:3px}
+.topbet-note{font-size:.66rem;color:#7890aa;margin-top:3px}
+.topbet-grade{
+  width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:.96rem;font-weight:950;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+}
+.topbet-grade.a{border-color:rgba(34,197,94,.34)}
+.topbet-grade.b{border-color:rgba(56,189,248,.30)}
+.topbet-grade.c{border-color:rgba(250,204,21,.23)}
+.topbet-metrics{grid-column:3 / 5;display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.topbet-metrics div{padding:6px 8px;border-radius:9px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.045)}
+.topbet-metrics span{display:block;font-size:.53rem;font-weight:850;letter-spacing:.06em;color:#61768f;text-transform:uppercase}
+.topbet-metrics b{display:block;font-size:.74rem;color:#dfe8f2;margin-top:2px}
+.team-logo{object-fit:contain;border-radius:50%;background:#fff;padding:2px;box-shadow:0 2px 10px rgba(0,0,0,.20)}
+.team-logo-fallback{border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.10);color:#b7c7d8;font-size:.58rem;font-weight:950}
+.game-market-row{display:grid;grid-template-columns:28px 30px 1fr;gap:8px;align-items:center;padding:9px 2px;border-bottom:1px solid rgba(148,163,184,.07)}
+.game-market-row:last-child{border-bottom:none}
+.game-market-rank{font-size:.66rem;font-weight:850;color:#657b93}
+.game-market-grade{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);font-size:.74rem;font-weight:900;color:#e8eef6}
+.game-market-pick{font-size:.84rem;font-weight:850;color:#e7eef7}
+.game-market-meta{font-size:.64rem;color:#71869f;margin-top:2px}
+.game-head{
+  display:grid;grid-template-columns:1fr 25px 1fr;gap:8px;align-items:center;
+  padding:10px 11px;margin:1px 0 10px;border-radius:13px;
+  background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.055);
+}
+.game-team{display:flex;gap:9px;align-items:center;min-width:0}
+.game-team.home{justify-content:flex-end;text-align:right}
+.game-team span{display:block;font-size:.50rem;font-weight:850;letter-spacing:.07em;text-transform:uppercase;color:#667e97}
+.game-team b{display:block;font-size:.76rem;font-weight:900;color:#ecf2f8}
+.game-at{text-align:center;font-size:.70rem;font-weight:900;color:#58718b}
+div[data-testid="stExpander"]{border-radius:14px !important;border:1px solid rgba(148,163,184,.09) !important;background:rgba(7,18,32,.50) !important}
+@media(max-width:720px){
+  .topbet-card{grid-template-columns:28px 34px 1fr 38px}
+  .topbet-metrics{grid-column:1 / 5}
+  .app-head-title{font-size:1.16rem}
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -121,9 +189,15 @@ def fetch_general_mlb_odds(api_key):
     """
     Current general MLB market from The Odds API.
     One US-region request returns moneyline, run line and total markets.
+    Never surface a raw requests exception because it can include the secret key.
     """
     if not api_key:
-        return {"events": [], "error": "ODDS_API_KEY is not configured.", "quota": {}}
+        return {
+            "events": [],
+            "error": "ODDS_API_KEY is not configured.",
+            "error_code": "missing_key",
+            "quota": {},
+        }
 
     try:
         r = requests.get(
@@ -137,15 +211,61 @@ def fetch_general_mlb_odds(api_key):
             },
             timeout=25,
         )
-        quota = {
-            "remaining": r.headers.get("x-requests-remaining"),
-            "used": r.headers.get("x-requests-used"),
-            "last": r.headers.get("x-requests-last"),
+    except requests.RequestException:
+        return {
+            "events": [],
+            "error": "Could not reach The Odds API.",
+            "error_code": "network",
+            "quota": {},
         }
-        r.raise_for_status()
-        return {"events": r.json(), "error": "", "quota": quota}
-    except Exception as e:
-        return {"events": [], "error": str(e), "quota": {}}
+
+    quota = {
+        "remaining": r.headers.get("x-requests-remaining"),
+        "used": r.headers.get("x-requests-used"),
+        "last": r.headers.get("x-requests-last"),
+    }
+
+    if r.status_code == 401:
+        return {
+            "events": [],
+            "error": "The Odds API rejected ODDS_API_KEY (401 Unauthorized). The configured key is invalid, expired, revoked, or was not updated in this Streamlit app.",
+            "error_code": "unauthorized",
+            "quota": quota,
+        }
+
+    if r.status_code == 429:
+        return {
+            "events": [],
+            "error": "The Odds API request/credit limit was reached (429).",
+            "error_code": "rate_limit",
+            "quota": quota,
+        }
+
+    if r.status_code >= 400:
+        return {
+            "events": [],
+            "error": f"The Odds API returned HTTP {r.status_code}.",
+            "error_code": f"http_{r.status_code}",
+            "quota": quota,
+        }
+
+    try:
+        events = r.json()
+    except Exception:
+        return {
+            "events": [],
+            "error": "The Odds API returned an unreadable response.",
+            "error_code": "bad_json",
+            "quota": quota,
+        }
+
+    return {
+        "events": events if isinstance(events, list) else [],
+        "error": "",
+        "error_code": "",
+        "quota": quota,
+    }
+
 
 def _event_match_score(event, game):
     if _team_key(event.get("away_team")) != _team_key(game.get("Away")):
@@ -271,11 +391,86 @@ def consensus_from_event(event):
 
     return out
 
-def market_for_game(games, events, game_pk):
+def _market_for_game_raw(games, events, game_pk):
     game = next((g for g in games if g["GamePk"] == game_pk), None)
     if not game:
         return None
     return consensus_from_event(match_odds_event(events, game))
+
+
+def _clean_consensus_market(market):
+    """
+    Sanitize a parsed market and never manufacture invalid odds.
+    Expected optional source arrays can be used when present; otherwise
+    the existing consensus values are sanitized in place.
+    """
+    if not market:
+        return market
+
+    m = dict(market)
+
+    # Sanitize already-aggregated values.
+    for key in ["away_ml", "home_ml", "away_rl_odds", "home_rl_odds", "over_odds", "under_odds"]:
+        if key in m:
+            m[key] = sanitize_market_price(m.get(key))
+
+    # If book-level arrays exist, recompute robust median and best prices.
+    array_map = {
+        "away_ml_prices": "away_ml",
+        "home_ml_prices": "home_ml",
+        "away_rl_odds_prices": "away_rl_odds",
+        "home_rl_odds_prices": "home_rl_odds",
+        "over_odds_prices": "over_odds",
+        "under_odds_prices": "under_odds",
+    }
+    for arr_key, out_key in array_map.items():
+        if arr_key in m and isinstance(m.get(arr_key), (list, tuple)):
+            med = median_valid(m.get(arr_key))
+            if med is not None:
+                m[out_key] = med
+            m[out_key + "_best"] = best_price_for_bettor(m.get(arr_key))
+
+    # Book counts, if parser didn't already supply them.
+    if not m.get("ml_books_count"):
+        ml_arrays = []
+        for k in ["away_ml_prices", "home_ml_prices"]:
+            if isinstance(m.get(k), (list, tuple)):
+                ml_arrays.extend([sanitize_market_price(v) for v in m[k]])
+        if ml_arrays:
+            m["ml_books_count"] = max(1, len([v for v in ml_arrays if v is not None]) // 2)
+
+    if not m.get("rl_books_count"):
+        rl_arrays = []
+        for k in ["away_rl_odds_prices", "home_rl_odds_prices"]:
+            if isinstance(m.get(k), (list, tuple)):
+                rl_arrays.extend([sanitize_market_price(v) for v in m[k]])
+        if rl_arrays:
+            m["rl_books_count"] = max(1, len([v for v in rl_arrays if v is not None]) // 2)
+
+    if not m.get("total_books_count"):
+        t_arrays = []
+        for k in ["over_odds_prices", "under_odds_prices"]:
+            if isinstance(m.get(k), (list, tuple)):
+                t_arrays.extend([sanitize_market_price(v) for v in m[k]])
+        if t_arrays:
+            m["total_books_count"] = max(1, len([v for v in t_arrays if v is not None]) // 2)
+
+    # Explicitly invalidate impossible pair states instead of fabricating zero.
+    if m.get("away_ml") is None and m.get("home_ml") is None:
+        m["away_ml"] = None
+        m["home_ml"] = None
+    if m.get("away_rl_odds") is None and m.get("home_rl_odds") is None:
+        m["away_rl_odds"] = None
+        m["home_rl_odds"] = None
+    if m.get("over_odds") is None and m.get("under_odds") is None:
+        m["over_odds"] = None
+        m["under_odds"] = None
+
+    return m
+
+
+def market_for_game(games, events, game_pk):
+    return _clean_consensus_market(_market_for_game_raw(games, events, game_pk))
 
 def _verdict_rank(v):
     return {"STRONG BET": 4, "BET": 3, "LEAN": 2, "PASS": 1, "NO LINE": 0}.get(str(v), 0)
@@ -1049,6 +1244,325 @@ def bet_grade(model_prob, odds, confidence):
     return verdict, edge, ev, imp
 
 
+
+DECISION_VERSION = "0.9.0"
+
+def valid_american_odds(value):
+    """Return a valid American price as int, else None."""
+    try:
+        if value is None:
+            return None
+        x = float(value)
+        if not math.isfinite(x):
+            return None
+        # American odds should not be 0 or inside (-100, +100).
+        if abs(x) < 100:
+            return None
+        return int(round(x))
+    except Exception:
+        return None
+
+
+def sanitize_market_price(value):
+    """Normalize incoming/manual/API prices and reject placeholders."""
+    return valid_american_odds(value)
+
+
+def median_valid(values):
+    vals = [sanitize_market_price(v) for v in values]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None
+    return int(round(statistics.median(vals)))
+
+
+def best_price_for_bettor(values):
+    """
+    For American odds, the numerically larger price is always better for the bettor:
+    +120 > +110 and -105 > -115.
+    """
+    vals = [sanitize_market_price(v) for v in values]
+    vals = [v for v in vals if v is not None]
+    return max(vals) if vals else None
+
+
+def market_source_summary(market):
+    """Human-readable per-market book counts."""
+    if not market:
+        return ""
+    parts = []
+    for label, key in [("ML", "ml_books_count"), ("RL", "rl_books_count"), ("Total", "total_books_count")]:
+        c = market.get(key)
+        if c:
+            parts.append(f"{label}: {int(c)} book{'s' if int(c) != 1 else ''}")
+    return " • ".join(parts)
+
+
+
+def no_vig_pair(odds_a, odds_b):
+    """Normalize two-way implied probabilities so they sum to 1."""
+    oa = sanitize_market_price(odds_a)
+    ob = sanitize_market_price(odds_b)
+    if oa is None or ob is None:
+        return None, None
+    try:
+        pa = implied_prob(float(oa))
+        pb = implied_prob(float(ob))
+        s = pa + pb
+        if s <= 0:
+            return None, None
+        return pa / s, pb / s
+    except Exception:
+        return None, None
+
+
+def calibration_alpha(market_type, confidence):
+    """
+    Conservative market-aware shrinkage.
+    MLB projection remains the signal; current consensus is the stabilizing prior.
+    Lower-confidence and experimental markets get more shrinkage.
+    """
+    try:
+        c = max(0.0, min(100.0, float(confidence)))
+    except Exception:
+        c = 70.0
+    q = max(0.0, min(1.0, (c - 60.0) / 35.0))
+
+    if market_type == "moneyline":
+        return 0.35 + 0.25 * q      # ~35%-60% model
+    if market_type == "runline":
+        return 0.25 + 0.20 * q      # ~25%-45% model
+    if market_type == "total":
+        return 0.20 + 0.20 * q      # ~20%-40% model
+    return 0.35
+
+
+def calibrated_probability(raw_prob, market_prob, market_type, confidence):
+    a = calibration_alpha(market_type, confidence)
+    raw = max(0.001, min(0.999, float(raw_prob)))
+    market = max(0.001, min(0.999, float(market_prob)))
+    return max(0.001, min(0.999, market + a * (raw - market)))
+
+
+def decision_thresholds(market_type, odds):
+    """
+    A/B thresholds for the production betting layer.
+    Totals and run lines are intentionally stricter because their probability
+    models are less proven than MLB moneyline probabilities.
+    """
+    odds = float(odds)
+
+    if market_type == "moneyline":
+        b_edge, b_ev, a_edge, a_ev = .025, .045, .045, .075
+    elif market_type == "runline":
+        b_edge, b_ev, a_edge, a_ev = .035, .060, .060, .100
+    else:  # total
+        b_edge, b_ev, a_edge, a_ev = .040, .070, .065, .110
+
+    # Extra protection for expensive favorites.
+    if odds <= -200:
+        b_edge += .010
+        b_ev += .010
+        a_edge += .010
+        a_ev += .015
+
+    # Longshot ML tail protection.
+    if market_type == "moneyline" and odds >= 300:
+        b_edge += .015
+        b_ev += .025
+        a_edge += .020
+        a_ev += .035
+
+    return {
+        "b_edge": b_edge, "b_ev": b_ev,
+        "a_edge": a_edge, "a_ev": a_ev,
+    }
+
+
+def decision_grade(prob, odds, confidence, market_type):
+    imp = implied_prob(odds)
+    edge = float(prob) - imp
+    ev = expected_value(float(prob), odds)
+    t = decision_thresholds(market_type, odds)
+
+    # Extreme MLB longshots are not allowed onto the official card.
+    if market_type == "moneyline" and float(odds) >= 500:
+        verdict = "PASS"
+    elif confidence >= 78 and edge >= t["a_edge"] and ev >= t["a_ev"]:
+        verdict = "STRONG BET"
+    elif confidence >= 65 and edge >= t["b_edge"] and ev >= t["b_ev"]:
+        verdict = "BET"
+    elif edge >= .010 and ev >= .015:
+        verdict = "LEAN"
+    else:
+        verdict = "PASS"
+
+    # +300 to +499 can never be an A/B official play.
+    if market_type == "moneyline" and float(odds) >= 300 and verdict in {"STRONG BET", "BET"}:
+        verdict = "LEAN"
+
+    return verdict, edge, ev, imp
+
+
+def grade_meta(verdict):
+    return {
+        "STRONG BET": ("A", 4, "BEST BET"),
+        "BET": ("B", 3, "BET"),
+        "LEAN": ("C", 2, "LEAN"),
+        "PASS": ("D", 1, "PASS"),
+        "NO LINE": ("D", 0, "NO LINE"),
+    }.get(str(verdict), ("D", 0, "PASS"))
+
+
+def market_rank_score(candidate, confidence):
+    """Practical ranking: grade first, then win chance, edge, EV and confidence."""
+    _, grank, _ = grade_meta(candidate.get("verdict"))
+    p = float(candidate.get("calibrated_prob", 0.5))
+    e = float(candidate.get("edge", 0.0))
+    v = float(candidate.get("ev", 0.0))
+    c = float(confidence)
+
+    # Small reliability haircut for lower-confidence games.
+    p_adj = max(0.0, p - max(0.0, 75.0 - c) * .0015)
+    return grank * 100.0 + p_adj * 45.0 + e * 32.0 + v * 12.0 + c * .08
+
+
+def evaluate_game_markets(r, market):
+    """Build and rank all six full-game markets for one MLB matchup."""
+    conf = int(r["Model_Confidence"])
+    rows = []
+
+    if not market:
+        return rows
+
+    # ---------- Moneyline ----------
+    if market.get("away_ml") is not None and market.get("home_ml") is not None:
+        away_mkt, home_mkt = no_vig_pair(market["away_ml"], market["home_ml"])
+        if away_mkt is None or home_mkt is None:
+            away_mkt, home_mkt = None, None
+        if away_mkt is not None and home_mkt is not None:
+            for side, raw_prob, odds, mkt_prob, team in [
+                ("away", float(r["Away_WinProb"]), int(market["away_ml"]), away_mkt, r["Away"]),
+                ("home", float(r["Home_WinProb"]), int(market["home_ml"]), home_mkt, r["Home"]),
+            ]:
+                cal = calibrated_probability(raw_prob, mkt_prob, "moneyline", conf)
+                verdict, edge, ev, imp = decision_grade(cal, odds, conf, "moneyline")
+                rows.append({
+                    "verdict": verdict,
+                    "market": f"{team} ML",
+                    "market_type": "MONEYLINE",
+                    "odds": odds,
+                    "raw_prob": raw_prob,
+                    "market_prob": mkt_prob,
+                    "calibrated_prob": cal,
+                    "implied_prob": imp,
+                    "edge": edge,
+                    "ev": ev,
+                    "fair": fair_ml(cal),
+                })
+
+    # ---------- Run line ----------
+    if (
+        market.get("away_rl") is not None and market.get("away_rl_odds") is not None
+        and market.get("home_rl") is not None and market.get("home_rl_odds") is not None
+        and abs(abs(float(market["away_rl"])) - 1.5) < 1e-8
+        and abs(abs(float(market["home_rl"])) - 1.5) < 1e-8
+    ):
+        away_mkt, home_mkt = no_vig_pair(market["away_rl_odds"], market["home_rl_odds"])
+        for side, point, odds, mkt_prob in [
+            ("away", float(market["away_rl"]), int(market["away_rl_odds"]), away_mkt),
+            ("home", float(market["home_rl"]), int(market["home_rl_odds"]), home_mkt),
+        ]:
+            prefix = "Away" if side == "away" else "Home"
+            team = r["Away"] if side == "away" else r["Home"]
+            prob_col = f"{prefix}_{'+' if point > 0 else '-'}1.5_Prob"
+            if prob_col in r.index:
+                raw_prob = float(r[prob_col])
+                cal = calibrated_probability(raw_prob, mkt_prob, "runline", conf)
+                verdict, edge, ev, imp = decision_grade(cal, odds, conf, "runline")
+                rows.append({
+                    "verdict": verdict,
+                    "market": f"{team} {point:+g}",
+                    "market_type": "RUN LINE",
+                    "odds": odds,
+                    "raw_prob": raw_prob,
+                    "market_prob": mkt_prob,
+                    "calibrated_prob": cal,
+                    "implied_prob": imp,
+                    "edge": edge,
+                    "ev": ev,
+                    "fair": fair_ml(cal),
+                })
+
+    # ---------- Total ----------
+    if (
+        market.get("total") is not None
+        and market.get("over_odds") is not None
+        and market.get("under_odds") is not None
+    ):
+        total_line = float(market["total"])
+        over_mkt, under_mkt = no_vig_pair(market["over_odds"], market["under_odds"])
+
+        for side, odds, mkt_prob in [
+            ("Over", int(market["over_odds"]), over_mkt),
+            ("Under", int(market["under_odds"]), under_mkt),
+        ]:
+            probs = total_market_probs(float(r["Model_Total"]), total_line, side)
+            decisive = probs["win"] + probs["loss"]
+            raw_prob = probs["win"] / decisive if decisive > 0 else 0.5
+            cal = calibrated_probability(raw_prob, mkt_prob, "total", conf)
+            verdict, edge, ev, imp = decision_grade(cal, odds, conf, "total")
+            rows.append({
+                "verdict": verdict,
+                "market": f"{side} {total_line:g}",
+                "market_type": "TOTAL",
+                "odds": odds,
+                "raw_prob": raw_prob,
+                "market_prob": mkt_prob,
+                "calibrated_prob": cal,
+                "implied_prob": imp,
+                "edge": edge,
+                "ev": ev,
+                "fair": fair_ml(cal),
+                "push_prob": probs.get("push", 0.0),
+            })
+
+    for x in rows:
+        x["rank_score"] = market_rank_score(x, conf)
+
+    return sorted(
+        rows,
+        key=lambda x: (grade_meta(x["verdict"])[1], x["rank_score"]),
+        reverse=True,
+    )
+
+
+def mlb_team_logo(team_name):
+    """Stable MLB team logo URLs; falls back to initials if a mapping is unavailable."""
+    ids = {
+        "Arizona Diamondbacks": 109, "Atlanta Braves": 144, "Baltimore Orioles": 110,
+        "Boston Red Sox": 111, "Chicago Cubs": 112, "Chicago White Sox": 145,
+        "Cincinnati Reds": 113, "Cleveland Guardians": 114, "Colorado Rockies": 115,
+        "Detroit Tigers": 116, "Houston Astros": 117, "Kansas City Royals": 118,
+        "Los Angeles Angels": 108, "Los Angeles Dodgers": 119, "Miami Marlins": 146,
+        "Milwaukee Brewers": 158, "Minnesota Twins": 142, "New York Mets": 121,
+        "New York Yankees": 147, "Athletics": 133, "Oakland Athletics": 133,
+        "Philadelphia Phillies": 143, "Pittsburgh Pirates": 134, "San Diego Padres": 135,
+        "San Francisco Giants": 137, "Seattle Mariners": 136, "St. Louis Cardinals": 138,
+        "Tampa Bay Rays": 139, "Texas Rangers": 140, "Toronto Blue Jays": 141,
+        "Washington Nationals": 120,
+    }
+    tid = ids.get(str(team_name))
+    return f"https://www.mlbstatic.com/team-logos/{tid}.svg" if tid else ""
+
+
+def logo_html(team, size=32):
+    url = mlb_team_logo(team)
+    initials = "".join(x[0] for x in str(team).split()[:2]).upper()
+    if url:
+        return f'<img class="team-logo" src="{html.escape(url)}" alt="{html.escape(str(team))}" style="width:{size}px;height:{size}px;">'
+    return f'<div class="team-logo-fallback" style="width:{size}px;height:{size}px;">{html.escape(initials)}</div>'
+
 def icon(v):
     return "🟢" if v in ["BET", "STRONG BET"] else "🟡" if v == "LEAN" else "⚪"
 
@@ -1120,7 +1634,7 @@ st.markdown(
     <div class="mlb-hero">
       <div class="mlb-kicker">MLB EDGE</div>
       <div class="mlb-title">Daily MLB Betting Model</div>
-      <div class="mlb-sub">App {APP_VERSION} • Engine {MODEL_VERSION} • General market consensus across available US books</div>
+      <div class="mlb-sub">App {APP_VERSION} • Engine {MODEL_VERSION} • Decision {DECISION_VERSION} • Calibrated current-market betting layer</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1212,11 +1726,22 @@ if "last_results" in st.session_state:
             st.caption('Streamlit Secrets format: ODDS_API_KEY = "your_new_key_here"')
         elif market_error:
             safe_market_error = str(market_error)
-            # Never expose the secret if a requests exception includes the full URL.
             if odds_api_key:
                 safe_market_error = safe_market_error.replace(str(odds_api_key), "[REDACTED]")
             safe_market_error = re.sub(r"apiKey=[^&\s]+", "apiKey=[REDACTED]", safe_market_error, flags=re.I)
-            st.warning(f"General market feed error: {safe_market_error}")
+
+            error_code = payload.get("error_code", "")
+            st.warning(f"General market unavailable: {safe_market_error}")
+
+            if error_code == "unauthorized":
+                st.info(
+                    "Fix: create/confirm a valid The Odds API key, then open Streamlit → Manage app → Settings → Secrets "
+                    'and replace ODDS_API_KEY. Save the secret and reboot/redeploy the app.'
+                )
+            elif error_code == "missing_key":
+                st.info(
+                    'Add this exact secret name in Streamlit: ODDS_API_KEY = "your_valid_key"'
+                )
         elif not current_market:
             st.warning(
                 "No current consensus market matched this game. "
@@ -1303,6 +1828,16 @@ if "last_results" in st.session_state:
             if update_text:
                 st.caption(f"Market last update: {update_text}")
 
+        auto_market_ok = bool(current_market) and not bool(market_error)
+        use_manual_fallback = False
+        if not auto_market_ok:
+            use_manual_fallback = st.checkbox(
+                "Use manual odds fallback",
+                value=False,
+                help="Turn this on only if you want to enter real sportsbook odds manually while the automatic feed is unavailable.",
+                key=f"manual_market_fallback_{row['GamePk']}",
+            )
+
         # Safe defaults if a market is unavailable.
         defaults = {
             f"away_ml_{row['GamePk']}": 100,
@@ -1319,10 +1854,23 @@ if "last_results" in st.session_state:
             if k not in st.session_state:
                 st.session_state[k] = v
 
-        with st.expander("Edit market manually", expanded=False):
-            st.caption(
-                "The automatic consensus is loaded above. Edit only if you want to test a different sportsbook price."
-            )
+        manual_expander_enabled = auto_market_ok or use_manual_fallback
+        with st.expander(
+            "Edit market manually" if auto_market_ok else "Enter manual market odds",
+            expanded=bool(use_manual_fallback and not auto_market_ok),
+        ):
+            if auto_market_ok:
+                st.caption(
+                    "The automatic consensus is loaded above. Edit only if you want to test a different sportsbook price."
+                )
+            elif use_manual_fallback:
+                st.caption(
+                    "Automatic odds are unavailable. Enter actual sportsbook prices before grading."
+                )
+            else:
+                st.caption(
+                    "Automatic odds are unavailable. Enable 'Use manual odds fallback' above before entering or grading odds."
+                )
 
             ml1, ml2 = st.columns(2)
             away_ml = ml1.number_input(f"{away} ML", step=5, key=f"away_ml_{row['GamePk']}")
@@ -1368,7 +1916,13 @@ if "last_results" in st.session_state:
         over_odds = st.session_state[f"over_odds_{row['GamePk']}"]
         under_odds = st.session_state[f"under_odds_{row['GamePk']}"]
 
-        if st.button("✅ Grade Current Market", type="primary"):
+        grade_allowed = auto_market_ok or use_manual_fallback
+        if st.button(
+            "✅ Grade Current Market",
+            type="primary",
+            disabled=not grade_allowed,
+            help=None if grade_allowed else "Fix the automatic odds feed or enable manual odds fallback first.",
+        ):
             markets = []
             add_market(markets, f"{away} ML", row["Away_WinProb"], away_ml, conf)
             add_market(markets, f"{home} ML", row["Home_WinProb"], home_ml, conf)
@@ -1458,305 +2012,293 @@ if "last_results" in st.session_state:
 
     else:
         st.divider()
-        st.subheader("Full Slate • Ranked Market Board")
 
         payload = st.session_state.get("general_odds_payload") or {}
         events = payload.get("events", [])
         market_error = payload.get("error", "")
         quota = payload.get("quota", {})
 
+        st.markdown(
+            f"""
+            <div class="app-head">
+              <div>
+                <div class="app-eyebrow">MLB EDGE</div>
+                <div class="app-head-title">Today's Betting Card</div>
+                <div class="app-head-sub">Decision {DECISION_VERSION} • ML • Run Line • Totals • Market-calibrated probabilities</div>
+              </div>
+              <div class="app-live">● MODEL LIVE</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         if not odds_api_key:
-            st.warning("General market feed is not configured. Add ODDS_API_KEY to Streamlit Secrets.")
+            st.warning("Automatic market feed is not configured. Add ODDS_API_KEY to Streamlit Secrets.")
         elif market_error:
-            st.warning(f"General market feed error: {market_error}")
+            st.warning(f"General market unavailable: {market_error}")
         else:
             remaining = quota.get("remaining")
-            provider_games = len(events)
             cap = f" • API credits remaining: {remaining}" if remaining not in [None, ""] else ""
-            st.caption(f"General market feed loaded for {provider_games} MLB event(s){cap}. Consensus = median across available US books.")
+            st.caption(
+                f"Consensus market loaded for {len(events)} MLB event(s){cap}. "
+                "Lines are median current snapshots across available US books."
+            )
 
-        slate_rows = []
+        game_rows = []
+        all_market_rows = []
+
         for _, r in df.iterrows():
             game_pk = int(r["GamePk"])
             market = market_for_game(games, events, game_pk)
-            conf = int(r["Model_Confidence"])
+            candidates = evaluate_game_markets(r, market)
 
-            candidates = []
-
-            if market:
-                if market.get("away_ml") is not None:
-                    verdict, edge, ev, imp = bet_grade(float(r["Away_WinProb"]), int(market["away_ml"]), conf)
-                    candidates.append({
-                        "verdict": verdict,
-                        "market": f"{r['Away']} ML",
-                        "odds": int(market["away_ml"]),
-                        "edge": edge,
-                        "ev": ev,
-                        "model_prob": float(r["Away_WinProb"]),
-                        "implied_prob": imp,
-                    })
-                if market.get("home_ml") is not None:
-                    verdict, edge, ev, imp = bet_grade(float(r["Home_WinProb"]), int(market["home_ml"]), conf)
-                    candidates.append({
-                        "verdict": verdict,
-                        "market": f"{r['Home']} ML",
-                        "odds": int(market["home_ml"]),
-                        "edge": edge,
-                        "ev": ev,
-                        "model_prob": float(r["Home_WinProb"]),
-                        "implied_prob": imp,
-                    })
-
-                # Current engine only models standard +/-1.5 run lines.
-                for side, point_key, odds_key in [
-                    ("away", "away_rl", "away_rl_odds"),
-                    ("home", "home_rl", "home_rl_odds"),
-                ]:
-                    point = market.get(point_key)
-                    odds = market.get(odds_key)
-                    if point is None or odds is None or abs(abs(float(point)) - 1.5) > 1e-8:
-                        continue
-
-                    team = r["Away"] if side == "away" else r["Home"]
-                    prefix = "Away" if side == "away" else "Home"
-                    prob_col = f"{prefix}_{float(point):+g}_Prob"
-                    # Columns are stored as Away_+1.5_Prob / Away_-1.5_Prob.
-                    prob_col = f"{prefix}_{'+' if float(point) > 0 else '-'}1.5_Prob"
-                    if prob_col in r.index:
-                        prob = float(r[prob_col])
-                        verdict, edge, ev, imp = bet_grade(prob, int(odds), conf)
-                        candidates.append({
-                            "verdict": verdict,
-                            "market": f"{team} {float(point):+g}",
-                            "odds": int(odds),
-                            "edge": edge,
-                            "ev": ev,
-                            "model_prob": prob,
-                            "implied_prob": imp,
-                        })
-
-                if market.get("total") is not None:
-                    total_line = float(market["total"])
-                    if market.get("over_odds") is not None:
-                        verdict, edge, ev, imp, prob, probs = total_bet_grade(
-                            float(r["Model_Total"]), total_line, "Over", int(market["over_odds"]), conf
-                        )
-                        candidates.append({
-                            "verdict": verdict,
-                            "market": f"Over {total_line:g}",
-                            "odds": int(market["over_odds"]),
-                            "edge": edge,
-                            "ev": ev,
-                            "model_prob": prob,
-                            "implied_prob": imp,
-                        })
-                    if market.get("under_odds") is not None:
-                        verdict, edge, ev, imp, prob, probs = total_bet_grade(
-                            float(r["Model_Total"]), total_line, "Under", int(market["under_odds"]), conf
-                        )
-                        candidates.append({
-                            "verdict": verdict,
-                            "market": f"Under {total_line:g}",
-                            "odds": int(market["under_odds"]),
-                            "edge": edge,
-                            "ev": ev,
-                            "model_prob": prob,
-                            "implied_prob": imp,
-                        })
-
-            candidates = sorted(
-                candidates,
-                key=lambda x: (_verdict_rank(x["verdict"]), x["edge"], x["ev"]),
-                reverse=True,
-            )
+            meta = next((g for g in games if int(g["GamePk"]) == game_pk), {})
+            kickoff = meta.get("TimeLabel", "")
+            game_date = meta.get("GameDate", "")
 
             if candidates:
                 best = candidates[0]
                 best_verdict = best["verdict"]
                 best_market = best["market"]
-                best_odds = best["odds"]
-                best_edge = best["edge"]
-                best_ev = best["ev"]
             else:
+                best = None
                 best_verdict = "NO LINE"
-                best_market = "No general line"
-                best_odds = None
-                best_edge = None
-                best_ev = None
+                best_market = "No current market"
 
-            game_meta = next((g for g in games if int(g["GamePk"]) == game_pk), {})
-            slate_rows.append({
+            row_obj = {
                 "game_pk": game_pk,
-                "kickoff_et": game_meta.get("TimeLabel", ""),
-                "away": r["Away"],
-                "home": r["Home"],
+                "kickoff_et": kickoff,
+                "game_date": game_date,
+                "away": str(r["Away"]),
+                "home": str(r["Home"]),
                 "away_proj": float(r["Away_Proj_Runs"]),
                 "home_proj": float(r["Home_Proj_Runs"]),
                 "model_total": float(r["Model_Total"]),
-                "away_fair": int(r["Away_FairML"]),
-                "home_fair": int(r["Home_FairML"]),
-                "confidence": conf,
+                "confidence": int(r["Model_Confidence"]),
+                "data_status": str(r.get("Data_Status", "")),
+                "market": market,
+                "candidates": candidates,
+                "best": best,
                 "best_verdict": best_verdict,
                 "best_market": best_market,
-                "best_odds": best_odds,
-                "best_edge": best_edge,
-                "best_ev": best_ev,
-                "market": market,
-                "market_grades": candidates,
-            })
+            }
+            game_rows.append(row_obj)
 
-        slate_rows = sorted(
-            slate_rows,
-            key=lambda x: (
-                _verdict_rank(x["best_verdict"]),
-                x["best_edge"] if x["best_edge"] is not None else -999,
-                x["best_ev"] if x["best_ev"] is not None else -999,
-            ),
+            for c in candidates:
+                all_market_rows.append({
+                    "GamePk": game_pk,
+                    "Game": f"{r['Away']} @ {r['Home']}",
+                    "Kickoff_ET": kickoff,
+                    "Market": c["market"],
+                    "Market_Type": c["market_type"],
+                    "Odds": c["odds"],
+                    "Grade": grade_meta(c["verdict"])[0],
+                    "Verdict": c["verdict"],
+                    "Raw_Model_Prob": c["raw_prob"],
+                    "Market_NoVig_Prob": c["market_prob"],
+                    "Calibrated_Prob": c["calibrated_prob"],
+                    "Edge": c["edge"],
+                    "EV": c["ev"],
+                    "Fair_Odds": c["fair"],
+                    "Confidence": int(r["Model_Confidence"]),
+                    "Rank_Score": c["rank_score"],
+                })
+
+        # One official bet per game for the quick card.
+        official_games = [
+            g for g in game_rows
+            if g["best"] is not None and g["best"]["verdict"] in {"STRONG BET", "BET"}
+        ]
+        official_games.sort(
+            key=lambda g: g["best"]["rank_score"],
             reverse=True,
         )
 
-        bets = [x for x in slate_rows if x["best_verdict"] in ["STRONG BET", "BET"]]
-        leans = [x for x in slate_rows if x["best_verdict"] == "LEAN"]
-        passes = [x for x in slate_rows if x["best_verdict"] in ["PASS", "NO LINE"]]
+        lean_games = [
+            g for g in game_rows
+            if g["best"] is not None and g["best"]["verdict"] == "LEAN"
+        ]
+        lean_games.sort(key=lambda g: g["best"]["rank_score"], reverse=True)
 
-        a, b, c = st.columns(3)
-        a.metric("Games", len(slate_rows))
-        b.metric("Bet Signals", len(bets))
-        c.metric("Leans", len(leans))
+        top_n = st.radio(
+            "Card size",
+            [5, 10],
+            horizontal=True,
+            index=0,
+            format_func=lambda n: f"Top {n}",
+            label_visibility="collapsed",
+            key="mlb_top_n",
+        )
+        show_n = int(top_n or 5)
 
-        def render_game_card(item, rank_num=None):
-            market = item["market"] or {}
-            verdict = item["best_verdict"]
-            rank_text = f"#{rank_num} • " if rank_num is not None else ""
-            best_odds_txt = f" {int(item['best_odds']):+d}" if item["best_odds"] is not None else ""
-            edge_txt = f"{item['best_edge']*100:+.1f}%" if item["best_edge"] is not None else "—"
-            ev_txt = f"{item['best_ev']*100:+.1f}%" if item["best_ev"] is not None else "—"
+        st.markdown('<div class="section-kicker">BEST BETS</div>', unsafe_allow_html=True)
+        st.caption(
+            "One best bet per game. A/B plays only. Ranking favors practical win chance, edge, EV and data confidence—not raw EV alone."
+        )
 
-            away_ml_txt = f"{int(market['away_ml']):+d}" if market.get("away_ml") is not None else "—"
-            home_ml_txt = f"{int(market['home_ml']):+d}" if market.get("home_ml") is not None else "—"
-            total_txt = f"{float(market['total']):g}" if market.get("total") is not None else "—"
-            provider_txt = f"{int(market.get('provider_count', 0))} books" if market else "No line"
+        def render_top_bet(g, rank):
+            b = g["best"]
+            grade, _, label = grade_meta(b["verdict"])
+            cls = grade.lower()
+            odds_txt = f"{int(b['odds']):+d}"
+            logo_team = g["away"] if b["market"].startswith(g["away"]) else g["home"]
+            if b["market_type"] == "TOTAL":
+                logo = (
+                    '<div style="display:flex;gap:2px">'
+                    + logo_html(g["away"], 30)
+                    + logo_html(g["home"], 30)
+                    + '</div>'
+                )
+            else:
+                logo = logo_html(logo_team, 32)
 
             st.markdown(
                 f"""
-                <div class="slate-card">
-                  <div class="slate-card-top">
-                    <div>
-                      <div class="slate-time">{rank_text}{item['kickoff_et']} ET • {provider_txt}</div>
-                      <div class="slate-matchup">{item['away']} <span>@</span> {item['home']}</div>
-                    </div>
-                    <div class="slate-badge {_verdict_class(verdict)}">{verdict}</div>
+                <div class="topbet-card {cls}">
+                  <div class="topbet-rank">#{rank}</div>
+                  <div>{logo}</div>
+                  <div>
+                    <div class="topbet-game">{html.escape(g['kickoff_et'])} ET • {html.escape(g['away'])} @ {html.escape(g['home'])}</div>
+                    <div class="topbet-pick">{html.escape(b['market'])} {odds_txt}</div>
+                    <div class="topbet-note">{label} • {b['market_type']} • Confidence {g['confidence']}/100</div>
                   </div>
-
-                  <div class="slate-reco">
-                    <div class="slate-reco-label">Top Model Call</div>
-                    <div class="slate-reco-value">{item['best_market']}{best_odds_txt}</div>
-                    <div class="slate-reco-meta">Edge {edge_txt} &nbsp;•&nbsp; EV {ev_txt}</div>
-                  </div>
-
-                  <div class="slate-grid">
-                    <div class="slate-box">
-                      <div class="slate-box-label">Projected Score</div>
-                      <div class="slate-box-value">{item['away_proj']:.1f} – {item['home_proj']:.1f}</div>
-                    </div>
-                    <div class="slate-box">
-                      <div class="slate-box-label">Model / Market Total</div>
-                      <div class="slate-box-value">{item['model_total']:.1f} / {total_txt}</div>
-                    </div>
-                    <div class="slate-box">
-                      <div class="slate-box-label">Away Fair / Market</div>
-                      <div class="slate-box-value">{item['away_fair']:+d} / {away_ml_txt}</div>
-                    </div>
-                    <div class="slate-box">
-                      <div class="slate-box-label">Home Fair / Market</div>
-                      <div class="slate-box-value">{item['home_fair']:+d} / {home_ml_txt}</div>
-                    </div>
-                  </div>
-
-                  <div class="slate-footer">
-                    Confidence {item['confidence']}/100
-                    <span>•</span>
-                    Market updated {market.get('last_update') or '—'}
+                  <div class="topbet-grade {cls}">{grade}</div>
+                  <div class="topbet-metrics">
+                    <div><span>Win Chance</span><b>{b['calibrated_prob']*100:.1f}%</b></div>
+                    <div><span>Edge</span><b>{b['edge']*100:+.1f}%</b></div>
+                    <div><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
                   </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            with st.expander(f"All Markets • {item['away']} @ {item['home']}", expanded=False):
-                if not item["market_grades"]:
-                    st.caption("No current general market was matched to this game.")
+        if official_games:
+            selected = official_games[:show_n]
+            for i, g in enumerate(selected, 1):
+                render_top_bet(g, i)
+            if len(selected) < show_n:
+                st.caption(
+                    f"Only {len(selected)} A/B game(s) qualify today. The card is not padded with weaker leans."
+                )
+        else:
+            st.info("No A/B bets currently qualify. The model will not manufacture a Top 5.")
+
+        if lean_games:
+            with st.expander(f"Next Best Leans • {min(show_n, len(lean_games))}", expanded=False):
+                for i, g in enumerate(lean_games[:show_n], 1):
+                    render_top_bet(g, i)
+
+        # Chronological game navigation.
+        st.markdown('<div class="section-kicker">ALL GAMES</div>', unsafe_allow_html=True)
+        st.caption(
+            "Games are in start-time order. Open a matchup to see the best market first, then every ML, run line and total ranked underneath."
+        )
+
+        def game_sort_key(g):
+            try:
+                x = pd.to_datetime(g.get("game_date"), utc=True, errors="coerce")
+                if pd.isna(x):
+                    return pd.Timestamp.max.tz_localize("UTC")
+                return x
+            except Exception:
+                return pd.Timestamp.max.tz_localize("UTC")
+
+        for g in sorted(game_rows, key=game_sort_key):
+            best_grade = grade_meta(g["best_verdict"])[0]
+            with st.expander(
+                f"{g['kickoff_et']} • {g['away']} @ {g['home']}",
+                expanded=False,
+            ):
+                st.markdown(
+                    f"""
+                    <div class="game-head">
+                      <div class="game-team">
+                        {logo_html(g['away'], 34)}
+                        <div><span>Away</span><b>{html.escape(g['away'])}</b></div>
+                      </div>
+                      <div class="game-at">@</div>
+                      <div class="game-team home">
+                        <div><span>Home</span><b>{html.escape(g['home'])}</b></div>
+                        {logo_html(g['home'], 34)}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.caption(
+                    f"Projected score {g['away_proj']:.1f}–{g['home_proj']:.1f} • "
+                    f"Model total {g['model_total']:.1f} • Confidence {g['confidence']}/100"
+                )
+
+                source_summary = market_source_summary(g["market"])
+                if source_summary:
+                    st.caption(source_summary)
+
+                if not g["candidates"]:
+                    st.info("No current consensus market matched this game.")
                 else:
-                    for m in item["market_grades"]:
-                        odds_txt = f"{int(m['odds']):+d}"
+                    for i, c in enumerate(g["candidates"], 1):
+                        grade, _, label = grade_meta(c["verdict"])
                         st.markdown(
                             f"""
-                            <div class="market-row">
-                              <div class="market-row-title">{icon(m['verdict'])} {m['verdict']} · {m['market']} {odds_txt}</div>
-                              <div class="market-row-sub">
-                                Model {m['model_prob']*100:.1f}% • Implied {m['implied_prob']*100:.1f}% •
-                                Edge {m['edge']*100:+.1f}% • EV {m['ev']*100:+.1f}%
+                            <div class="game-market-row">
+                              <div class="game-market-rank">#{i}</div>
+                              <div class="game-market-grade">{grade}</div>
+                              <div>
+                                <div class="game-market-pick">{html.escape(c['market'])} {int(c['odds']):+d}</div>
+                                <div class="game-market-meta">
+                                  {label} • {c['market_type']} • Win {c['calibrated_prob']*100:.1f}% •
+                                  Edge {c['edge']*100:+.1f}% • EV {c['ev']*100:+.1f}% • Fair {int(c['fair']):+d}
+                                </div>
                               </div>
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
 
-        if bets:
-            st.markdown("### Top Bets")
-            for i, item in enumerate(bets, 1):
-                render_game_card(item, i)
-        else:
-            st.info("No current full-slate markets clear the model's BET threshold.")
+                    with st.expander("Model vs Market detail", expanded=False):
+                        detail = pd.DataFrame([
+                            {
+                                "Market": c["market"],
+                                "Type": c["market_type"],
+                                "Raw Model %": round(c["raw_prob"]*100, 1),
+                                "Market No-Vig %": round(c["market_prob"]*100, 1),
+                                "Calibrated %": round(c["calibrated_prob"]*100, 1),
+                                "Edge %": round(c["edge"]*100, 1),
+                                "EV %": round(c["ev"]*100, 1),
+                                "Verdict": c["verdict"],
+                            }
+                            for c in g["candidates"]
+                        ])
+                        st.dataframe(detail, use_container_width=True, hide_index=True)
 
-        with st.expander(f"Leans ({len(leans)})", expanded=False):
-            for item in leans:
-                render_game_card(item)
+        with st.expander("Export / Audit", expanded=False):
+            if all_market_rows:
+                market_level_df = pd.DataFrame(all_market_rows).sort_values(
+                    ["Grade", "Rank_Score"], ascending=[True, False]
+                )
+                st.dataframe(market_level_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Download Ranked Market CSV",
+                    data=market_level_df.to_csv(index=False).encode("utf-8"),
+                    file_name="mlb_model_v090_ranked_markets.csv",
+                    mime="text/csv",
+                )
 
-        with st.expander(f"Passes / No Line ({len(passes)})", expanded=False):
-            for item in passes:
-                render_game_card(item)
+            st.download_button(
+                "⬇️ Download Projection CSV",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_model_v090_projections.csv",
+                mime="text/csv",
+            )
 
-        # Merge consensus market snapshot into the downloadable audit export.
-        export_df = df.copy()
-        market_export = []
-        for _, rr in export_df.iterrows():
-            m = market_for_game(games, events, int(rr["GamePk"])) or {}
-            market_export.append(m)
-
-        export_df["Market_Source"] = "The Odds API general US consensus"
-        export_df["Market_Event_ID"] = [m.get("event_id") for m in market_export]
-        export_df["Market_Provider_Count"] = [m.get("provider_count") for m in market_export]
-        export_df["Market_Last_Update"] = [m.get("last_update") for m in market_export]
-        export_df["Market_Away_ML"] = [m.get("away_ml") for m in market_export]
-        export_df["Market_Home_ML"] = [m.get("home_ml") for m in market_export]
-        export_df["Market_Away_RL"] = [m.get("away_rl") for m in market_export]
-        export_df["Market_Away_RL_Odds"] = [m.get("away_rl_odds") for m in market_export]
-        export_df["Market_Home_RL"] = [m.get("home_rl") for m in market_export]
-        export_df["Market_Home_RL_Odds"] = [m.get("home_rl_odds") for m in market_export]
-        export_df["Market_Total"] = [m.get("total") for m in market_export]
-        export_df["Market_Over_Odds"] = [m.get("over_odds") for m in market_export]
-        export_df["Market_Under_Odds"] = [m.get("under_odds") for m in market_export]
-        export_df["Market_Snapshot_UTC"] = pd.Timestamp.utcnow().isoformat()
-
-        st.download_button(
-            "⬇️ Download Full Slate + Market CSV",
-            data=export_df.to_csv(index=False).encode("utf-8"),
-            file_name="mlb_model_v080_full_slate_market.csv",
-            mime="text/csv",
+        st.caption(
+            "Decision layer v0.9 uses conservative market-aware probability shrinkage. "
+            "The current consensus is a stabilizing prior, not a closing line. "
+            "Run-line and total probabilities remain less proven than moneyline probabilities."
         )
 
-        with st.expander("Raw Slate Audit Table", expanded=False):
-            audit_cols = [
-                "Game", "Away_Proj_Runs", "Home_Proj_Runs", "Model_Total",
-                "Away_WinProb", "Home_WinProb", "Away_FairML", "Home_FairML",
-                "Model_Confidence", "Confidence_Grade",
-                "Market_Away_ML", "Market_Home_ML", "Market_Away_RL",
-                "Market_Away_RL_Odds", "Market_Home_RL", "Market_Home_RL_Odds",
-                "Market_Total", "Market_Over_Odds", "Market_Under_Odds",
-                "Market_Provider_Count", "Market_Last_Update",
-            ]
-            st.dataframe(export_df[audit_cols], hide_index=True, use_container_width=True)
-
 st.divider()
-st.caption("General market lines are median consensus snapshots across available US books. Screenshot reading remains available for 734/manual overrides. Run-line and total probabilities are experimental. Model outputs are analytical estimates, not guarantees.")
+st.caption("General market lines are median current consensus snapshots across available US books. Decision v0.9 shrinks raw model probabilities toward the no-vig market before grading. Model outputs are analytical estimates, not guarantees.")

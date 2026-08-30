@@ -14,7 +14,7 @@ from scipy.stats import skellam
 
 warnings.filterwarnings("ignore")
 
-MODEL_VERSION = "0.5.2-LITE-RL-UI"
+MODEL_VERSION = "0.5.4-LITE-MARKET-SAFE"
 APP_VERSION = "0.6.0-WEB"
 MLB_API = "https://statsapi.mlb.com/api"
 
@@ -130,9 +130,11 @@ def fair_ml(prob):
 
 def implied_prob(odds):
     odds = float(odds)
-    if odds < 0:
-        return (-odds) / ((-odds) + 100.0)
-    return 100.0 / (odds + 100.0)
+    if odds == 0 or abs(odds) < 100:
+        raise ValueError(f"Invalid American odds: {odds}")
+    if odds > 0:
+        return 100.0 / (odds + 100.0)
+    return abs(odds) / (abs(odds) + 100.0)
 
 def expected_value(prob, odds):
     odds = float(odds)
