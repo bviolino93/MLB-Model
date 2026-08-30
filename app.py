@@ -22,7 +22,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.9.2-CFB-UI"
+APP_VERSION = "0.9.3-CLEAN-UX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -351,6 +351,172 @@ div[data-testid="stExpander"] summary{min-height:49px}
   .result-metrics{grid-template-columns:repeat(3,1fr)}
   .market-card{padding:11px 12px}
   .market-pick{font-size:.94rem}
+}
+
+
+/* ===== v0.9.3 CLEAN UX ===== */
+.bet-pill{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:74px;padding:6px 10px;border-radius:999px;
+  font-size:.62rem;font-weight:950;letter-spacing:.08em;
+  border:1px solid rgba(148,163,184,.12);
+  background:rgba(255,255,255,.035);color:#cbd5e1;
+}
+.bet-pill.best{
+  color:#bbf7d0;background:rgba(34,197,94,.10);border-color:rgba(34,197,94,.30);
+}
+.bet-pill.bet{
+  color:#bae6fd;background:rgba(56,189,248,.10);border-color:rgba(56,189,248,.28);
+}
+.bet-pill.lean{
+  color:#fde68a;background:rgba(250,204,21,.08);border-color:rgba(250,204,21,.20);
+}
+.bet-pill.pass{
+  color:#94a3b8;background:rgba(148,163,184,.05);border-color:rgba(148,163,184,.11);
+}
+
+/* Single-game top play: much tighter and no logo collision */
+.clean-top-card{
+  padding:14px 14px 13px;margin:7px 0 12px;border-radius:17px;
+  background:linear-gradient(145deg,rgba(13,29,49,.98),rgba(8,20,34,.98));
+  border:1px solid rgba(148,163,184,.10);
+}
+.clean-top-card.best{border-color:rgba(34,197,94,.30)}
+.clean-top-card.bet{border-color:rgba(56,189,248,.28)}
+.clean-top-card.lean{border-color:rgba(250,204,21,.20)}
+.clean-top-head{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+}
+.clean-matchup{
+  display:flex;align-items:center;gap:8px;min-width:0;
+  color:#8297af;font-size:.66rem;font-weight:850;letter-spacing:.06em;text-transform:uppercase
+}
+.clean-matchup-logos{display:flex;align-items:center;gap:3px;flex:0 0 auto}
+.clean-top-pick{
+  margin-top:9px;color:#f8fafc;font-size:1.16rem;font-weight:950;letter-spacing:-.025em
+}
+.clean-top-sub{
+  margin-top:3px;color:#7890a8;font-size:.66rem
+}
+.clean-top-metrics{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:11px
+}
+.clean-top-metrics div{
+  padding:7px 8px;border-radius:9px;background:rgba(255,255,255,.022);
+  border:1px solid rgba(255,255,255,.04)
+}
+.clean-top-metrics span{
+  display:block;font-size:.50rem;color:#61778e;font-weight:850;
+  letter-spacing:.06em;text-transform:uppercase
+}
+.clean-top-metrics b{
+  display:block;margin-top:2px;color:#e2e8f0;font-size:.76rem;font-weight:900
+}
+
+/* Actionable market rows */
+.action-row{
+  display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:10px 2px;border-bottom:1px solid rgba(148,163,184,.07)
+}
+.action-row:last-child{border-bottom:none}
+.action-main{min-width:0}
+.action-pick{
+  color:#eef5fb;font-size:.90rem;font-weight:900;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+}
+.action-meta{
+  margin-top:2px;color:#71869f;font-size:.63rem
+}
+.action-type{
+  color:#71869f;font-size:.56rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase
+}
+
+/* Pass rows are intentionally subdued */
+.pass-row{
+  display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;
+  padding:9px 1px;border-bottom:1px solid rgba(148,163,184,.055)
+}
+.pass-row:last-child{border-bottom:none}
+.pass-pick{font-size:.82rem;font-weight:800;color:#b5c2d1}
+.pass-meta{margin-top:2px;font-size:.60rem;color:#61758c}
+.pass-type{
+  font-size:.54rem;font-weight:900;letter-spacing:.08em;color:#5f7389;text-transform:uppercase
+}
+
+/* Make manual tools visually secondary */
+.advanced-note{
+  color:#6f8398;font-size:.63rem;margin:5px 0 2px
+}
+div[data-testid="stExpander"] details summary p{
+  font-weight:800;
+}
+
+/* Slate cards: replace grade box emphasis with verdict chip emphasis */
+.topbet-card{
+  grid-template-columns:30px 36px 1fr auto !important;
+  padding:11px 12px !important;
+}
+.topbet-grade{
+  width:auto !important;height:auto !important;min-width:68px !important;
+  padding:6px 9px !important;border-radius:999px !important;
+  font-size:.58rem !important;letter-spacing:.07em !important;
+}
+.topbet-grade.best{
+  color:#bbf7d0;background:rgba(34,197,94,.09);border-color:rgba(34,197,94,.28)
+}
+.topbet-grade.bet{
+  color:#bae6fd;background:rgba(56,189,248,.09);border-color:rgba(56,189,248,.27)
+}
+.topbet-grade.lean{
+  color:#fde68a;background:rgba(250,204,21,.07);border-color:rgba(250,204,21,.20)
+}
+.topbet-grade.pass{
+  color:#94a3b8;background:rgba(148,163,184,.05);border-color:rgba(148,163,184,.11)
+}
+.topbet-metrics{
+  grid-column:3 / 5 !important;
+}
+.game-market-grade{
+  width:auto !important;height:auto !important;min-width:62px !important;
+  padding:5px 8px !important;border-radius:999px !important;
+  font-size:.55rem !important;letter-spacing:.06em !important
+}
+.game-market-grade.best{
+  color:#bbf7d0;border-color:rgba(34,197,94,.28);background:rgba(34,197,94,.08)
+}
+.game-market-grade.bet{
+  color:#bae6fd;border-color:rgba(56,189,248,.27);background:rgba(56,189,248,.08)
+}
+.game-market-grade.lean{
+  color:#fde68a;border-color:rgba(250,204,21,.20);background:rgba(250,204,21,.06)
+}
+.game-market-grade.pass{
+  color:#94a3b8;border-color:rgba(148,163,184,.11);background:rgba(148,163,184,.04)
+}
+.game-market-row{
+  grid-template-columns:26px auto 1fr !important;
+  padding:8px 2px !important
+}
+
+/* Reduce vertical bulk */
+.section-kicker{
+  margin-top:18px !important;
+}
+.app-head{
+  padding:12px 14px !important;
+  margin-bottom:11px !important
+}
+.proj-grid{
+  margin-bottom:10px !important
+}
+
+@media(max-width:700px){
+  .clean-top-pick{font-size:1.08rem}
+  .clean-top-metrics{grid-template-columns:repeat(3,1fr)}
+  .action-row{grid-template-columns:auto 1fr}
+  .action-type{grid-column:2}
+  .topbet-card{grid-template-columns:26px 32px 1fr auto !important}
+  .topbet-metrics{grid-column:1 / 5 !important}
 }
 
 </style>
@@ -1622,6 +1788,38 @@ def grade_meta(verdict):
     }.get(str(verdict), ("D", 0, "PASS"))
 
 
+
+def user_verdict(verdict):
+    """User-facing betting label. Letter grades stay internal only."""
+    return {
+        "STRONG BET": "BEST BET",
+        "BET": "BET",
+        "LEAN": "LEAN",
+        "PASS": "PASS",
+        "NO LINE": "NO LINE",
+    }.get(str(verdict), "PASS")
+
+
+def verdict_class(verdict):
+    return {
+        "STRONG BET": "best",
+        "BET": "bet",
+        "LEAN": "lean",
+        "PASS": "pass",
+        "NO LINE": "pass",
+    }.get(str(verdict), "pass")
+
+
+def verdict_rank(verdict):
+    return {
+        "STRONG BET": 4,
+        "BET": 3,
+        "LEAN": 2,
+        "PASS": 1,
+        "NO LINE": 0,
+    }.get(str(verdict), 0)
+
+
 def market_rank_score(candidate, confidence):
     """Practical ranking: grade first, then win chance, edge, EV and confidence."""
     _, grank, _ = grade_meta(candidate.get("verdict"))
@@ -1847,7 +2045,7 @@ st.markdown(
     </div>
     <div class="status-strip">
       <div class="status-live"><span class="status-dot"></span> Live model ready</div>
-      <div>A = Best Bet &nbsp;•&nbsp; B = Bet &nbsp;•&nbsp; C = Lean &nbsp;•&nbsp; D = Pass</div>
+      <div>Best Bet &nbsp;•&nbsp; Bet &nbsp;•&nbsp; Lean &nbsp;•&nbsp; Pass</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -2058,37 +2256,37 @@ if "last_results" in st.session_state:
 
         auto_market_ok = bool(current_market) and not bool(market_error)
 
-        # CFB-style automatic betting board: current market is graded immediately
-        # through the same calibrated v0.9 decision layer used by Full Slate.
+        # Clean automatic betting board.
+        # User-facing labels are verbal; internal A/B/C/D rank logic is preserved.
         if auto_market_ok:
             auto_candidates = evaluate_game_markets(row, current_market)
+
             if auto_candidates:
                 best_auto = auto_candidates[0]
-                grade, _, label = grade_meta(best_auto["verdict"])
-                cls = grade.lower()
+                top_label = user_verdict(best_auto["verdict"])
+                top_cls = verdict_class(best_auto["verdict"])
 
-                pick_team = away if best_auto["market"].startswith(str(away)) else home
-                if best_auto["market_type"] == "TOTAL":
-                    pick_logo = (
-                        '<div style="display:flex;gap:2px">'
-                        + logo_html(away, 34) + logo_html(home, 34) + '</div>'
-                    )
-                else:
-                    pick_logo = logo_html(pick_team, 38)
+                # Keep matchup identity separate from the pick so logos never collide with text.
+                matchup_logo_html = (
+                    '<div class="clean-matchup-logos">'
+                    + logo_html(away, 27)
+                    + logo_html(home, 27)
+                    + '</div>'
+                )
 
                 st.markdown(
                     f"""
-                    <div class="result-hero {cls}">
-                      <div class="result-kicker">TOP MARKET</div>
-                      <div class="result-row">
-                        <div>{pick_logo}</div>
-                        <div>
-                          <div class="result-pick">{html.escape(best_auto['market'])} {int(best_auto['odds']):+d}</div>
-                          <div class="result-sub">{label} • {best_auto['market_type']} • Market-calibrated probability</div>
+                    <div class="clean-top-card {top_cls}">
+                      <div class="clean-top-head">
+                        <div class="clean-matchup">
+                          {matchup_logo_html}
+                          <span>{html.escape(str(away))} @ {html.escape(str(home))}</span>
                         </div>
-                        <div class="result-grade">{grade}</div>
+                        <div class="bet-pill {top_cls}">{top_label}</div>
                       </div>
-                      <div class="result-metrics">
+                      <div class="clean-top-pick">{html.escape(best_auto['market'])} {int(best_auto['odds']):+d}</div>
+                      <div class="clean-top-sub">{best_auto['market_type']} • Market-calibrated probability</div>
+                      <div class="clean-top-metrics">
                         <div><span>Win Chance</span><b>{best_auto['calibrated_prob']*100:.1f}%</b></div>
                         <div><span>Edge</span><b>{best_auto['edge']*100:+.1f}%</b></div>
                         <div><span>EV</span><b>{best_auto['ev']*100:+.1f}%</b></div>
@@ -2098,28 +2296,54 @@ if "last_results" in st.session_state:
                     unsafe_allow_html=True,
                 )
 
+                actionable = [
+                    c for c in auto_candidates
+                    if c["verdict"] in {"STRONG BET", "BET", "LEAN"}
+                ]
+                passes = [c for c in auto_candidates if c["verdict"] == "PASS"]
+
                 st.markdown('<div class="section-kicker">RANKED MARKETS</div>', unsafe_allow_html=True)
-                st.markdown('<div class="market-board">', unsafe_allow_html=True)
-                for c in auto_candidates:
-                    g, _, lab = grade_meta(c["verdict"])
-                    gc = g.lower()
-                    st.markdown(
-                        f"""
-                        <div class="market-card">
-                          <div class="market-grade {gc}">{g}</div>
-                          <div class="market-main">
-                            <div class="market-pick">{html.escape(c['market'])} {int(c['odds']):+d}</div>
-                            <div class="market-sub">
-                              Win {c['calibrated_prob']*100:.1f}% • Edge {c['edge']*100:+.1f}% •
-                              EV {c['ev']*100:+.1f}% • Fair {int(c['fair']):+d}
+
+                if actionable:
+                    for c in actionable:
+                        label = user_verdict(c["verdict"])
+                        cls = verdict_class(c["verdict"])
+                        st.markdown(
+                            f"""
+                            <div class="action-row">
+                              <div class="bet-pill {cls}">{label}</div>
+                              <div class="action-main">
+                                <div class="action-pick">{html.escape(c['market'])} {int(c['odds']):+d}</div>
+                                <div class="action-meta">
+                                  Win {c['calibrated_prob']*100:.1f}% • Edge {c['edge']*100:+.1f}% •
+                                  EV {c['ev']*100:+.1f}% • Fair {int(c['fair']):+d}
+                                </div>
+                              </div>
+                              <div class="action-type">{html.escape(c['market_type'])}</div>
                             </div>
-                          </div>
-                          <div class="market-tag">{html.escape(c['market_type'])}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                st.markdown('</div>', unsafe_allow_html=True)
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("No Bet or Lean qualifies in the current market.")
+
+                if passes:
+                    with st.expander(f"Show all markets • {len(passes)} pass{'es' if len(passes) != 1 else ''}", expanded=False):
+                        for c in passes:
+                            st.markdown(
+                                f"""
+                                <div class="pass-row">
+                                  <div>
+                                    <div class="pass-pick">{html.escape(c['market'])} {int(c['odds']):+d}</div>
+                                    <div class="pass-meta">
+                                      Win {c['calibrated_prob']*100:.1f}% • Edge {c['edge']*100:+.1f}% • EV {c['ev']*100:+.1f}%
+                                    </div>
+                                  </div>
+                                  <div class="pass-type">{html.escape(c['market_type'])}</div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
 
         use_manual_fallback = False
         if not auto_market_ok:
@@ -2210,7 +2434,7 @@ if "last_results" in st.session_state:
 
         grade_allowed = auto_market_ok or use_manual_fallback
         if st.button(
-            "Grade Custom Market",
+            "Grade Edited Market",
             disabled=not grade_allowed,
             help=None if grade_allowed else "Fix the automatic odds feed or enable manual odds fallback first.",
         ):
@@ -2383,8 +2607,8 @@ if "last_results" in st.session_state:
                     "Market": c["market"],
                     "Market_Type": c["market_type"],
                     "Odds": c["odds"],
-                    "Grade": grade_meta(c["verdict"])[0],
-                    "Verdict": c["verdict"],
+                    "Internal_Grade": grade_meta(c["verdict"])[0],
+                    "Verdict": user_verdict(c["verdict"]),
                     "Raw_Model_Prob": c["raw_prob"],
                     "Market_NoVig_Prob": c["market_prob"],
                     "Calibrated_Prob": c["calibrated_prob"],
@@ -2424,13 +2648,13 @@ if "last_results" in st.session_state:
 
         st.markdown('<div class="section-kicker">SLATE BETTING CARD</div>', unsafe_allow_html=True)
         st.caption(
-            "Top Bets ranks official A/B plays by the best combination of win probability, edge, EV and model confidence. Moneylines, run lines and totals all compete for the same list."
+            "Top Bets shows only official Best Bet / Bet plays. Moneylines, run lines and totals all compete, ranked by win probability, edge, EV and model confidence."
         )
 
         def render_top_bet(g, rank):
             b = g["best"]
-            grade, _, label = grade_meta(b["verdict"])
-            cls = grade.lower()
+            label = user_verdict(b["verdict"])
+            cls = verdict_class(b["verdict"])
             odds_txt = f"{int(b['odds']):+d}"
             logo_team = g["away"] if b["market"].startswith(g["away"]) else g["home"]
             if b["market_type"] == "TOTAL":
@@ -2451,9 +2675,9 @@ if "last_results" in st.session_state:
                   <div>
                     <div class="topbet-game">{html.escape(g['kickoff_et'])} ET • {html.escape(g['away'])} @ {html.escape(g['home'])}</div>
                     <div class="topbet-pick">{html.escape(b['market'])} {odds_txt}</div>
-                    <div class="topbet-note">{label} • {b['market_type']} • Confidence {g['confidence']}/100</div>
+                    <div class="topbet-note">{b['market_type']} • Confidence {g['confidence']}/100</div>
                   </div>
-                  <div class="topbet-grade {cls}">{grade}</div>
+                  <div class="topbet-grade {cls}">{label}</div>
                   <div class="topbet-metrics">
                     <div><span>Win Chance</span><b>{b['calibrated_prob']*100:.1f}%</b></div>
                     <div><span>Edge</span><b>{b['edge']*100:+.1f}%</b></div>
@@ -2470,20 +2694,20 @@ if "last_results" in st.session_state:
                 render_top_bet(g, i)
             if len(selected) < show_n:
                 st.caption(
-                    f"Only {len(selected)} A/B game(s) qualify today. The card is not padded with weaker leans."
+                    f"Only {len(selected)} official bet(s) qualify today. The card is not padded with weaker leans."
                 )
         else:
-            st.info("No A/B bets currently qualify. The model will not manufacture a Top 5.")
+            st.info("No official bets currently qualify. The model will not manufacture a Top 5.")
 
         if lean_games:
             with st.expander(f"Next Best Leans • {min(show_n, len(lean_games))}", expanded=False):
                 for i, g in enumerate(lean_games[:show_n], 1):
                     render_top_bet(g, i)
 
-        a_n = sum(1 for g in game_rows if g["best"] is not None and grade_meta(g["best"]["verdict"])[0] == "A")
-        b_n = sum(1 for g in game_rows if g["best"] is not None and grade_meta(g["best"]["verdict"])[0] == "B")
-        c_n = sum(1 for g in game_rows if g["best"] is not None and grade_meta(g["best"]["verdict"])[0] == "C")
-        st.caption(f"Slate pool: {a_n} A • {b_n} B • {c_n} C")
+        best_n = sum(1 for g in game_rows if g["best"] is not None and g["best"]["verdict"] == "STRONG BET")
+        bet_n = sum(1 for g in game_rows if g["best"] is not None and g["best"]["verdict"] == "BET")
+        lean_n = sum(1 for g in game_rows if g["best"] is not None and g["best"]["verdict"] == "LEAN")
+        st.caption(f"Slate pool: {best_n} Best Bet • {bet_n} Bet • {lean_n} Lean")
 
         # Chronological game navigation.
         st.markdown('<div class="section-kicker">ALL GAMES</div>', unsafe_allow_html=True)
@@ -2536,16 +2760,17 @@ if "last_results" in st.session_state:
                     st.info("No current consensus market matched this game.")
                 else:
                     for i, c in enumerate(g["candidates"], 1):
-                        grade, _, label = grade_meta(c["verdict"])
+                        label = user_verdict(c["verdict"])
+                        cls = verdict_class(c["verdict"])
                         st.markdown(
                             f"""
                             <div class="game-market-row">
                               <div class="game-market-rank">#{i}</div>
-                              <div class="game-market-grade {grade.lower()}">{grade}</div>
+                              <div class="game-market-grade {cls}">{label}</div>
                               <div>
                                 <div class="game-market-pick">{html.escape(c['market'])} {int(c['odds']):+d}</div>
                                 <div class="game-market-meta">
-                                  {label} • {c['market_type']} • Win {c['calibrated_prob']*100:.1f}% •
+                                  {c['market_type']} • Win {c['calibrated_prob']*100:.1f}% •
                                   Edge {c['edge']*100:+.1f}% • EV {c['ev']*100:+.1f}% • Fair {int(c['fair']):+d}
                                 </div>
                               </div>
@@ -2564,7 +2789,7 @@ if "last_results" in st.session_state:
                                 "Calibrated %": round(c["calibrated_prob"]*100, 1),
                                 "Edge %": round(c["edge"]*100, 1),
                                 "EV %": round(c["ev"]*100, 1),
-                                "Verdict": c["verdict"],
+                                "Verdict": user_verdict(c["verdict"]),
                             }
                             for c in g["candidates"]
                         ])
@@ -2573,7 +2798,7 @@ if "last_results" in st.session_state:
         with st.expander("Export / Audit", expanded=False):
             if all_market_rows:
                 market_level_df = pd.DataFrame(all_market_rows).sort_values(
-                    ["Grade", "Rank_Score"], ascending=[True, False]
+                    ["Rank_Score"], ascending=[False]
                 )
                 st.dataframe(market_level_df, use_container_width=True, hide_index=True)
                 st.download_button(
@@ -2591,7 +2816,7 @@ if "last_results" in st.session_state:
             )
 
         st.caption(
-            "Decision layer v0.9 uses conservative market-aware probability shrinkage. "
+            "Decision layer v0.9 uses conservative market-aware probability shrinkage. User-facing grades are Best Bet / Bet / Lean / Pass. "
             "The current consensus is a stabilizing prior, not a closing line. "
             "Run-line and total probabilities remain less proven than moneyline probabilities."
         )
