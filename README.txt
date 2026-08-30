@@ -1,15 +1,49 @@
-MLB Edge v0.9.4-STREAMLINED
+MLB Edge v0.10.0-BACKTEST-LAB
 
-Mobile UX cleanup
+Adds a third app mode: Backtest Lab.
+
+API CREDIT SAFETY
 =================
-- Removed the repetitive second betting board from Custom Market Results.
-- Removed the large disabled Grade Edited Market button when the live API market is already available.
-- The live-market Top Pick + Ranked Markets is now the single primary recommendation.
-- PASS markets remain collapsed under Show all markets.
-- Manual/custom pricing is clearly secondary.
-- If manual grading is needed because the live feed is unavailable, it returns only one compact best-result summary.
-- Dark-mode button colors were hardened so disabled buttons no longer appear as unreadable white boxes.
+Backtest Lab makes ZERO Odds API calls.
+It operates entirely on a historical CSV uploaded by the user.
 
-Model changes
-=============
-None. Projection, calibration, thresholds, market sanitation, and ranking are unchanged.
+Required historical CSV columns
+===============================
+Date
+Game
+Market_Type
+Bet
+Odds
+Result
+Raw_Model_Prob
+Market_NoVig_Prob
+Calibrated_Prob
+Edge
+EV
+Verdict
+Confidence
+
+Result must be WIN, LOSS, or PUSH.
+
+Included analysis
+=================
+- Record / hit rate / units / ROI
+- Average odds
+- Max drawdown
+- Season-by-season stability
+- Market breakdown
+- Verdict breakdown
+- Edge buckets
+- Odds buckets
+- Top 5 daily simulation
+- Top 10 daily simulation
+- Raw-model probability calibration
+- v0.9 calibrated probability calibration
+- Brier-score comparison
+- Filtered audit CSV export
+
+Methodology
+===========
+The app does not fabricate historical odds and does not label historical
+prices as closing lines unless the supplied dataset actually contains verified
+closing lines. Point-in-time quality of the source dataset remains critical.

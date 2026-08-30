@@ -22,7 +22,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.9.4-STREAMLINED"
+APP_VERSION = "0.10.0-BACKTEST-LAB"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -542,6 +542,30 @@ div[data-testid="stExpander"] details summary p{
 .custom-result-summary span{
   display:block;margin-top:3px;color:#758ba2;font-size:.63rem;line-height:1.45
 }
+
+
+/* ===== v0.10 BACKTEST LAB ===== */
+.bt-note{
+  padding:10px 12px;border-radius:12px;margin:5px 0 12px;
+  background:rgba(56,189,248,.055);border:1px solid rgba(56,189,248,.13);
+  color:#9fb5ca;font-size:.68rem;line-height:1.5
+}
+.bt-note b{color:#d8edf8}
+.bt-metrics{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:8px 0 13px
+}
+.bt-metric{
+  padding:9px;border-radius:11px;background:rgba(255,255,255,.025);
+  border:1px solid rgba(148,163,184,.07)
+}
+.bt-metric span{
+  display:block;color:#657b92;font-size:.52rem;font-weight:850;
+  text-transform:uppercase;letter-spacing:.06em
+}
+.bt-metric b{display:block;margin-top:3px;color:#edf4fb;font-size:.88rem;font-weight:900}
+.bt-good{color:#86efac !important}
+.bt-bad{color:#fca5a5 !important}
+@media(max-width:700px){.bt-metrics{grid-template-columns:repeat(2,1fr)}}
 
 </style>
 """, unsafe_allow_html=True)
@@ -1813,6 +1837,189 @@ def grade_meta(verdict):
 
 
 
+
+def american_profit_per_unit(odds):
+    odds = float(odds)
+    if odds == 0 or abs(odds) < 100:
+        return None
+    return odds / 100.0 if odds > 0 else 100.0 / abs(odds)
+
+
+def settle_binary_bet(won, odds, push=False):
+    if push:
+        return 0.0
+    p = american_profit_per_unit(odds)
+    if p is None:
+        return None
+    return p if bool(won) else -1.0
+
+
+def max_drawdown_from_units(units):
+    equity = peak = max_dd = 0.0
+    for u in units:
+        equity += float(u)
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+    return max_dd
+
+
+def calibration_bucket(prob):
+    p = float(prob)
+    if p < .50: return "<50%"
+    if p < .55: return "50–55%"
+    if p < .60: return "55–60%"
+    if p < .65: return "60–65%"
+    if p < .70: return "65–70%"
+    return "70%+"
+
+
+def edge_bucket(edge):
+    e = float(edge)
+    if e < 0: return "<0%"
+    if e < .02: return "0–2%"
+    if e < .04: return "2–4%"
+    if e < .06: return "4–6%"
+    if e < .08: return "6–8%"
+    return "8%+"
+
+
+def odds_bucket(odds):
+    o = int(odds)
+    if o <= -200: return "≤ -200"
+    if o <= -150: return "-199 to -150"
+    if o < 100: return "-149 to -100"
+    if o < 150: return "+100 to +149"
+    if o < 200: return "+150 to +199"
+    if o < 300: return "+200 to +299"
+    return "+300+"
+
+
+def normalize_backtest_columns(df):
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    aliases = {
+        "GameDate":"Date", "game_date":"Date", "market_type":"Market_Type",
+        "Market":"Bet", "Pick":"Bet", "raw_model_prob":"Raw_Model_Prob",
+        "market_prob":"Market_NoVig_Prob", "calibrated_prob":"Calibrated_Prob",
+        "edge":"Edge", "ev":"EV", "confidence":"Confidence",
+        "verdict":"Verdict", "result":"Result", "odds":"Odds",
+    }
+    out = out.rename(columns={k:v for k,v in aliases.items() if k in out.columns})
+    required = [
+        "Date","Game","Market_Type","Bet","Odds","Result","Raw_Model_Prob",
+        "Market_NoVig_Prob","Calibrated_Prob","Edge","EV","Verdict","Confidence"
+    ]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        return None, missing
+
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Odds"] = pd.to_numeric(out["Odds"], errors="coerce")
+    for c in ["Raw_Model_Prob","Market_NoVig_Prob","Calibrated_Prob","Edge","EV","Confidence"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["Result"] = out["Result"].astype(str).str.upper().str.strip()
+    out["Market_Type"] = out["Market_Type"].astype(str).str.upper().str.strip()
+    out["Verdict"] = out["Verdict"].astype(str).str.upper().str.strip().replace({
+        "BEST BET":"STRONG BET", "A":"STRONG BET", "B":"BET", "C":"LEAN", "D":"PASS"
+    })
+
+    out = out.dropna(subset=["Date","Odds","Calibrated_Prob","Edge","EV"])
+    out = out[out["Result"].isin(["WIN","LOSS","PUSH"])]
+    out = out[out["Odds"].apply(lambda x: valid_american_odds(x) is not None)]
+    return out, []
+
+
+def attach_backtest_pnl(df):
+    out = df.copy()
+    out["Won"] = out["Result"].eq("WIN")
+    out["Push"] = out["Result"].eq("PUSH")
+    out["Units"] = [
+        settle_binary_bet(w, o, p)
+        for w, o, p in zip(out["Won"], out["Odds"], out["Push"])
+    ]
+    out = out.dropna(subset=["Units"])
+    out["Win"] = out["Won"].astype(int)
+    out["Loss"] = out["Result"].eq("LOSS").astype(int)
+    out["Season"] = out["Date"].dt.year
+    out["Edge_Bucket"] = out["Edge"].apply(edge_bucket)
+    out["Odds_Bucket"] = out["Odds"].apply(odds_bucket)
+    return out
+
+
+def summarize_bets(df):
+    if df is None or df.empty:
+        return {"Bets":0,"Wins":0,"Losses":0,"Pushes":0,"Hit_Rate":0.0,"Units":0.0,
+                "ROI":0.0,"Avg_Odds":None,"Max_Drawdown":0.0}
+    wins = int((df["Result"]=="WIN").sum())
+    losses = int((df["Result"]=="LOSS").sum())
+    pushes = int((df["Result"]=="PUSH").sum())
+    bets = wins + losses
+    units = float(df["Units"].sum())
+    return {
+        "Bets":bets, "Wins":wins, "Losses":losses, "Pushes":pushes,
+        "Hit_Rate":wins/bets if bets else 0.0,
+        "Units":units, "ROI":units/bets if bets else 0.0,
+        "Avg_Odds":float(df["Odds"].mean()) if len(df) else None,
+        "Max_Drawdown":max_drawdown_from_units(df.sort_values("Date")["Units"].tolist()),
+    }
+
+
+def grouped_backtest_summary(df, group_col):
+    rows = []
+    for key, grp in df.groupby(group_col, dropna=False):
+        s = summarize_bets(grp)
+        rows.append({
+            group_col:key,
+            "Bets":s["Bets"],
+            "Record":f'{s["Wins"]}-{s["Losses"]}-{s["Pushes"]}',
+            "Hit %":round(s["Hit_Rate"]*100,1),
+            "Units":round(s["Units"],2),
+            "ROI %":round(s["ROI"]*100,1),
+            "Avg Odds":round(s["Avg_Odds"],1) if s["Avg_Odds"] is not None else None,
+            "Max DD":round(s["Max_Drawdown"],2),
+        })
+    return pd.DataFrame(rows)
+
+
+def daily_top_card(df, n=5):
+    x = df[df["Verdict"].isin(["STRONG BET","BET"])].copy()
+    if x.empty:
+        return x
+    grade_score = x["Verdict"].map({"STRONG BET":2,"BET":1}).fillna(0)
+    x["_rank_score"] = (
+        grade_score*100 + x["Calibrated_Prob"]*45 + x["Edge"]*32
+        + x["EV"].clip(upper=.30)*12 + x["Confidence"]*.08
+    )
+    x = x.sort_values(["Date","Game","_rank_score"], ascending=[True,True,False])
+    x = x.drop_duplicates(["Date","Game"], keep="first")
+    x = x.sort_values(["Date","_rank_score"], ascending=[True,False])
+    x = x.groupby("Date", group_keys=False).head(int(n))
+    return x.drop(columns=["_rank_score"], errors="ignore")
+
+
+def calibration_table(df, prob_col):
+    tmp = df[~df["Push"]].copy()
+    if tmp.empty:
+        return pd.DataFrame()
+    tmp["Probability Bucket"] = tmp[prob_col].apply(calibration_bucket)
+    rows = []
+    order = ["<50%","50–55%","55–60%","60–65%","65–70%","70%+"]
+    for bucket in order:
+        grp = tmp[tmp["Probability Bucket"] == bucket]
+        if grp.empty:
+            continue
+        pred = float(grp[prob_col].mean())
+        actual = float(grp["Won"].mean())
+        rows.append({
+            "Probability Bucket":bucket,
+            "Bets":len(grp),
+            "Avg Predicted %":round(pred*100,1),
+            "Actual Win %":round(actual*100,1),
+            "Calibration Error":round(abs(pred-actual)*100,1),
+        })
+    return pd.DataFrame(rows)
+
+
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -2104,7 +2311,208 @@ for g in games:
     time_text = f" — {g['TimeLabel']} ET" if g["TimeLabel"] else ""
     labels[f"{g['Away']} @ {g['Home']}{time_text} | {away_sp} vs {home_sp}"] = g["GamePk"]
 
-mode = st.radio("Betting Board", ["Single Game", "Full Slate"], horizontal=True, label_visibility="collapsed")
+mode = st.radio("Betting Board", ["Single Game", "Full Slate", "Backtest Lab"], horizontal=True, label_visibility="collapsed")
+
+if mode == "Backtest Lab":
+    st.markdown(
+        """
+        <div class="app-head">
+          <div>
+            <div class="app-eyebrow">MLB EDGE</div>
+            <div class="app-head-title">Backtest Lab</div>
+            <div class="app-head-sub">Test the production betting logic without consuming live Odds API credits.</div>
+          </div>
+          <div class="app-live">LOCAL TEST</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="bt-note">
+          <b>Backtest Lab makes zero Odds API calls.</b>
+          Upload a saved historical betting CSV and all filtering, ROI calculations,
+          calibration analysis and Top 5 / Top 10 simulations run from that file only.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Historical CSV format", expanded=False):
+        st.caption(
+            "Required: Date, Game, Market_Type, Bet, Odds, Result, Raw_Model_Prob, "
+            "Market_NoVig_Prob, Calibrated_Prob, Edge, EV, Verdict, Confidence."
+        )
+        sample = pd.DataFrame([{
+            "Date":"2025-08-01",
+            "Game":"Away Team @ Home Team",
+            "Market_Type":"MONEYLINE",
+            "Bet":"Home Team ML",
+            "Odds":-120,
+            "Result":"WIN",
+            "Raw_Model_Prob":0.57,
+            "Market_NoVig_Prob":0.54,
+            "Calibrated_Prob":0.55,
+            "Edge":0.045,
+            "EV":0.083,
+            "Verdict":"BET",
+            "Confidence":76,
+        }])
+        st.dataframe(sample, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download CSV template",
+            sample.to_csv(index=False).encode("utf-8"),
+            file_name="mlb_backtest_template.csv",
+            mime="text/csv",
+        )
+
+    uploaded_bt = st.file_uploader(
+        "Upload historical betting dataset",
+        type=["csv"],
+        key="mlb_backtest_csv",
+        help="Processed locally in Streamlit. This does not use The Odds API.",
+    )
+
+    if uploaded_bt is None:
+        st.info("Upload a historical CSV to run the backtest.")
+    else:
+        try:
+            raw_bt = pd.read_csv(uploaded_bt)
+            bt, missing = normalize_backtest_columns(raw_bt)
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            elif bt is None or bt.empty:
+                st.error("No valid historical betting rows were found.")
+            else:
+                bt = attach_backtest_pnl(bt)
+
+                st.markdown('<div class="section-kicker">FILTERS</div>', unsafe_allow_html=True)
+                min_date = bt["Date"].min().date()
+                max_date = bt["Date"].max().date()
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    start_date = st.date_input("Start date", min_date, min_value=min_date, max_value=max_date)
+                with c2:
+                    end_date = st.date_input("End date", max_date, min_value=min_date, max_value=max_date)
+
+                market_opts = sorted(bt["Market_Type"].dropna().unique().tolist())
+                selected_markets = st.multiselect("Markets", market_opts, default=market_opts)
+
+                verdict_opts = ["STRONG BET","BET","LEAN","PASS"]
+                selected_verdicts = st.multiselect(
+                    "Verdicts",
+                    verdict_opts,
+                    default=["STRONG BET","BET"],
+                    format_func=user_verdict,
+                )
+
+                filt = bt[
+                    (bt["Date"].dt.date >= start_date)
+                    & (bt["Date"].dt.date <= end_date)
+                    & (bt["Market_Type"].isin(selected_markets))
+                    & (bt["Verdict"].isin(selected_verdicts))
+                ].copy()
+
+                if filt.empty:
+                    st.warning("No rows match the current filters.")
+                else:
+                    s = summarize_bets(filt)
+                    units_cls = "bt-good" if s["Units"] > 0 else ("bt-bad" if s["Units"] < 0 else "")
+                    roi_cls = "bt-good" if s["ROI"] > 0 else ("bt-bad" if s["ROI"] < 0 else "")
+                    avg_odds = f'{s["Avg_Odds"]:+.0f}' if s["Avg_Odds"] is not None else "—"
+
+                    st.markdown('<div class="section-kicker">RESULTS</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div class="bt-metrics">
+                          <div class="bt-metric"><span>Record</span><b>{s['Wins']}-{s['Losses']}-{s['Pushes']}</b></div>
+                          <div class="bt-metric"><span>Hit Rate</span><b>{s['Hit_Rate']*100:.1f}%</b></div>
+                          <div class="bt-metric"><span>Units</span><b class="{units_cls}">{s['Units']:+.2f}u</b></div>
+                          <div class="bt-metric"><span>ROI</span><b class="{roi_cls}">{s['ROI']*100:+.1f}%</b></div>
+                          <div class="bt-metric"><span>Bets</span><b>{s['Bets']}</b></div>
+                          <div class="bt-metric"><span>Avg Odds</span><b>{avg_odds}</b></div>
+                          <div class="bt-metric"><span>Max Drawdown</span><b>{s['Max_Drawdown']:.2f}u</b></div>
+                          <div class="bt-metric"><span>Seasons</span><b>{filt['Season'].nunique()}</b></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    st.markdown('<div class="section-kicker">PRODUCTION CARD SIMULATION</div>', unsafe_allow_html=True)
+                    c5, c10 = st.columns(2)
+                    for col, n in [(c5,5),(c10,10)]:
+                        card = daily_top_card(filt, n=n)
+                        cs = summarize_bets(card)
+                        with col:
+                            st.markdown(f"**Top {n} daily**")
+                            st.metric("ROI", f"{cs['ROI']*100:+.1f}%")
+                            st.caption(f"{cs['Wins']}-{cs['Losses']}-{cs['Pushes']} • {cs['Units']:+.2f}u • {cs['Bets']} bets")
+
+                    st.markdown('<div class="section-kicker">SEASON STABILITY</div>', unsafe_allow_html=True)
+                    st.dataframe(grouped_backtest_summary(filt, "Season"), use_container_width=True, hide_index=True)
+
+                    st.markdown('<div class="section-kicker">BREAKDOWNS</div>', unsafe_allow_html=True)
+                    breakdown_col = st.selectbox(
+                        "Breakdown",
+                        ["Market_Type","Verdict","Edge_Bucket","Odds_Bucket"],
+                        format_func=lambda x: {
+                            "Market_Type":"By market",
+                            "Verdict":"By verdict",
+                            "Edge_Bucket":"By edge bucket",
+                            "Odds_Bucket":"By odds bucket",
+                        }[x],
+                    )
+                    breakdown = grouped_backtest_summary(filt, breakdown_col)
+                    if breakdown_col == "Verdict" and not breakdown.empty:
+                        breakdown["Verdict"] = breakdown["Verdict"].map(user_verdict)
+                    st.dataframe(breakdown, use_container_width=True, hide_index=True)
+
+                    st.markdown('<div class="section-kicker">CALIBRATION</div>', unsafe_allow_html=True)
+                    prob_source = st.radio(
+                        "Probability source",
+                        ["Calibrated_Prob","Raw_Model_Prob"],
+                        horizontal=True,
+                        format_func=lambda x: "Calibrated v0.9" if x == "Calibrated_Prob" else "Raw model",
+                    )
+                    st.dataframe(calibration_table(filt, prob_source), use_container_width=True, hide_index=True)
+
+                    decided = filt[~filt["Push"]].copy()
+                    if not decided.empty:
+                        raw_brier = ((decided["Raw_Model_Prob"] - decided["Won"].astype(float))**2).mean()
+                        cal_brier = ((decided["Calibrated_Prob"] - decided["Won"].astype(float))**2).mean()
+                        winner = "Calibrated v0.9" if cal_brier < raw_brier else "Raw model"
+                        st.caption(
+                            f"Brier score — Raw {raw_brier:.4f} • Calibrated {cal_brier:.4f} • "
+                            f"Lower is better → {winner}"
+                        )
+
+                    with st.expander("Audit / Export", expanded=False):
+                        cols = [
+                            "Date","Game","Market_Type","Bet","Odds","Result","Units",
+                            "Raw_Model_Prob","Market_NoVig_Prob","Calibrated_Prob",
+                            "Edge","EV","Verdict","Confidence"
+                        ]
+                        audit = filt[cols].sort_values("Date")
+                        st.dataframe(audit, use_container_width=True, hide_index=True)
+                        st.download_button(
+                            "Download filtered backtest",
+                            audit.to_csv(index=False).encode("utf-8"),
+                            file_name="mlb_backtest_filtered.csv",
+                            mime="text/csv",
+                        )
+        except Exception as e:
+            st.error(f"Could not read the historical CSV: {e}")
+
+    st.divider()
+    st.caption(
+        "Backtest Lab uses only the uploaded historical file. It does not call The Odds API. "
+        "Results are only as trustworthy as the historical prices and point-in-time inputs in that file."
+    )
+    st.stop()
+
 selected_game = None
 if mode == "Single Game":
     selected_label = st.selectbox("Game", list(labels.keys()))
