@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.11.2-ARRAY-FIX"
+APP_VERSION = "0.12.0-PIT-PITCHER"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3046,6 +3046,477 @@ def run_point_in_time_backtest(master_df, min_prior_games=12):
         "hold_cal_summary":summarize_sim_bets(hold_bets_cal),
         "feature_cols":fcols,
     }
+
+PITCHER_CACHE_DIR = Path(".mlb_pitcher_cache")
+
+
+def _pitcher_schedule_cache_file(season):
+    PITCHER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return PITCHER_CACHE_DIR / f"mlb_schedule_pitchers_{int(season)}.json"
+
+
+def _pitcher_gamelog_cache_file(season, pitcher_id):
+    PITCHER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return PITCHER_CACHE_DIR / f"pitcher_{int(pitcher_id)}_{int(season)}_gamelog.json"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_season_schedule_with_pitchers(season):
+    """
+    Free MLB Stats API. Pull final regular-season schedule with probable/starter IDs.
+    Zero Odds API credits.
+    """
+    cache_file = _pitcher_schedule_cache_file(season)
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text()), None, True
+        except Exception:
+            pass
+
+    url = "https://statsapi.mlb.com/api/v1/schedule"
+    params = {
+        "sportId": 1,
+        "gameType": "R",
+        "season": int(season),
+        "startDate": f"{int(season)}-03-20",
+        "endDate": f"{int(season)}-10-10",
+        "hydrate": "probablePitcher",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=40)
+    except requests.RequestException:
+        return None, f"Could not reach MLB schedule service for {season}.", False
+
+    if resp.status_code != 200:
+        return None, f"MLB schedule service returned HTTP {resp.status_code} for {season}.", False
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return None, f"MLB schedule response for {season} was not valid JSON.", False
+
+    try:
+        cache_file.write_text(json.dumps(payload))
+    except Exception:
+        pass
+
+    return payload, None, False
+
+
+def flatten_schedule_pitchers(payload):
+    rows = []
+    if not isinstance(payload, dict):
+        return rows
+
+    for day in payload.get("dates", []) or []:
+        for game in day.get("games", []) or []:
+            teams = game.get("teams") or {}
+            away = teams.get("away") or {}
+            home = teams.get("home") or {}
+            away_team = ((away.get("team") or {}).get("name"))
+            home_team = ((home.get("team") or {}).get("name"))
+            away_pp = away.get("probablePitcher") or {}
+            home_pp = home.get("probablePitcher") or {}
+
+            rows.append({
+                "MLB_GamePk": game.get("gamePk"),
+                "Pitcher_GameDate": game.get("gameDate"),
+                "Away_Team_Pitcher": away_team,
+                "Home_Team_Pitcher": home_team,
+                "Away_Starter_ID": away_pp.get("id"),
+                "Away_Starter_Name": away_pp.get("fullName"),
+                "Home_Starter_ID": home_pp.get("id"),
+                "Home_Starter_Name": home_pp.get("fullName"),
+            })
+    return rows
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_pitcher_season_gamelog(season, pitcher_id):
+    """
+    One free MLB Stats API call per pitcher-season, cached on disk.
+    Game logs are later filtered strictly to appearances BEFORE the target game.
+    """
+    cache_file = _pitcher_gamelog_cache_file(season, pitcher_id)
+    if cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text()), None, True
+        except Exception:
+            pass
+
+    url = f"https://statsapi.mlb.com/api/v1/people/{int(pitcher_id)}/stats"
+    params = {
+        "stats": "gameLog",
+        "group": "pitching",
+        "season": int(season),
+        "gameType": "R",
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+    except requests.RequestException:
+        return None, f"Could not fetch pitcher {pitcher_id} game log.", False
+
+    if resp.status_code != 200:
+        return None, f"Pitcher {pitcher_id} game log returned HTTP {resp.status_code}.", False
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return None, f"Pitcher {pitcher_id} game log was not valid JSON.", False
+
+    try:
+        cache_file.write_text(json.dumps(payload))
+    except Exception:
+        pass
+
+    return payload, None, False
+
+
+def parse_pitcher_gamelog(payload):
+    """
+    Parse MLB gameLog stats into dated appearances.
+    """
+    rows = []
+    for block in (payload or {}).get("stats", []) or []:
+        for split in block.get("splits", []) or []:
+            stat = split.get("stat") or {}
+            game = split.get("game") or {}
+            raw_date = split.get("date")
+            if not raw_date:
+                continue
+            try:
+                d = pd.to_datetime(raw_date, utc=True)
+            except Exception:
+                continue
+
+            def num(key, default=np.nan):
+                try:
+                    return float(stat.get(key))
+                except Exception:
+                    return default
+
+            innings = stat.get("inningsPitched")
+            try:
+                ip = float(innings)
+            except Exception:
+                ip = np.nan
+
+            rows.append({
+                "date": d,
+                "gamePk": game.get("gamePk"),
+                "gamesStarted": num("gamesStarted", 0.0),
+                "inningsPitched": ip,
+                "era": num("era"),
+                "whip": num("whip"),
+                "strikeOuts": num("strikeOuts", 0.0),
+                "baseOnBalls": num("baseOnBalls", 0.0),
+                "hits": num("hits", 0.0),
+                "homeRuns": num("homeRuns", 0.0),
+                "earnedRuns": num("earnedRuns", 0.0),
+                "battersFaced": num("battersFaced", 0.0),
+            })
+    return pd.DataFrame(rows)
+
+
+def summarize_pitcher_before_game(gamelog_df, game_time, min_starts=3):
+    """
+    Point-in-time pitcher form using only prior starts before game_time.
+    """
+    if gamelog_df is None or gamelog_df.empty:
+        return None
+
+    g = gamelog_df.copy()
+    g = g[g["date"] < game_time].copy()
+    if "gamesStarted" in g.columns:
+        g = g[g["gamesStarted"] >= 1].copy()
+    if len(g) < int(min_starts):
+        return None
+
+    last5 = g.sort_values("date").tail(5)
+    season = g.sort_values("date")
+
+    ip = pd.to_numeric(season["inningsPitched"], errors="coerce").sum()
+    er = pd.to_numeric(season["earnedRuns"], errors="coerce").sum()
+    so = pd.to_numeric(season["strikeOuts"], errors="coerce").sum()
+    bb = pd.to_numeric(season["baseOnBalls"], errors="coerce").sum()
+    hr = pd.to_numeric(season["homeRuns"], errors="coerce").sum()
+    h = pd.to_numeric(season["hits"], errors="coerce").sum()
+
+    l5_ip = pd.to_numeric(last5["inningsPitched"], errors="coerce").sum()
+    l5_er = pd.to_numeric(last5["earnedRuns"], errors="coerce").sum()
+    l5_so = pd.to_numeric(last5["strikeOuts"], errors="coerce").sum()
+    l5_bb = pd.to_numeric(last5["baseOnBalls"], errors="coerce").sum()
+
+    if ip <= 0 or l5_ip <= 0:
+        return None
+
+    return {
+        "Starts": int(len(season)),
+        "ERA": 9.0 * er / ip,
+        "K9": 9.0 * so / ip,
+        "BB9": 9.0 * bb / ip,
+        "HR9": 9.0 * hr / ip,
+        "WHIP_Approx": (h + bb) / ip,
+        "Last5_ERA": 9.0 * l5_er / l5_ip,
+        "Last5_K9": 9.0 * l5_so / l5_ip,
+        "Last5_BB9": 9.0 * l5_bb / l5_ip,
+    }
+
+
+def attach_pitchers_to_master(master_df, schedule_df):
+    m = master_df.copy()
+    s = schedule_df.copy()
+
+    m["Commence_Time"] = pd.to_datetime(m["Commence_Time"], errors="coerce", utc=True)
+    s["Pitcher_GameDate"] = pd.to_datetime(s["Pitcher_GameDate"], errors="coerce", utc=True)
+
+    # Prefer direct MLB_GamePk match from Moneyline Master.
+    if "MLB_GamePk" in m.columns:
+        merged = m.merge(
+            s,
+            on="MLB_GamePk",
+            how="left",
+            suffixes=("", "_sched")
+        )
+    else:
+        m["_away_key"] = m["Away_Team"].map(normalize_team_name_for_match)
+        m["_home_key"] = m["Home_Team"].map(normalize_team_name_for_match)
+        s["_away_key"] = s["Away_Team_Pitcher"].map(normalize_team_name_for_match)
+        s["_home_key"] = s["Home_Team_Pitcher"].map(normalize_team_name_for_match)
+        m["_day"] = m["Commence_Time"].dt.date.astype(str)
+        s["_day"] = s["Pitcher_GameDate"].dt.date.astype(str)
+        merged = m.merge(
+            s,
+            on=["_away_key","_home_key","_day"],
+            how="left",
+            suffixes=("", "_sched")
+        )
+    return merged
+
+
+def build_pitcher_feature_table(master_df, min_prior_team_games=12, min_pitcher_starts=3):
+    """
+    Enrich the existing PIT team-state table with point-in-time starter metrics.
+    """
+    pit_team = build_point_in_time_features(
+        master_df,
+        min_prior_games=min_prior_team_games
+    )
+    pit_team = pit_team[pit_team["PIT_Eligible"]].copy()
+
+    seasons = sorted(int(x) for x in pit_team["Season"].dropna().unique())
+    schedule_rows = []
+    schedule_errors = []
+
+    for season in seasons:
+        payload, err, _ = fetch_season_schedule_with_pitchers(season)
+        if err:
+            schedule_errors.append(err)
+            continue
+        schedule_rows.extend(flatten_schedule_pitchers(payload))
+
+    if schedule_errors and not schedule_rows:
+        raise ValueError("Could not retrieve historical starter identities.")
+
+    schedule_df = pd.DataFrame(schedule_rows)
+
+    # Match starters onto PIT rows using MLB game identifiers from the master file.
+    master_small = master_df.copy()
+    master_small["Commence_Time"] = pd.to_datetime(master_small["Commence_Time"], errors="coerce", utc=True)
+    pit_plus = pit_team.merge(
+        master_small[["Event_ID","MLB_GamePk"]].drop_duplicates("Event_ID"),
+        on="Event_ID",
+        how="left"
+    )
+    pit_plus = attach_pitchers_to_master(pit_plus, schedule_df)
+
+    pitcher_ids = set()
+    for col in ["Away_Starter_ID","Home_Starter_ID"]:
+        if col in pit_plus.columns:
+            for v in pit_plus[col].dropna().unique():
+                try:
+                    pitcher_ids.add(int(v))
+                except Exception:
+                    pass
+
+    # Load each pitcher-season game log once, cached.
+    logs = {}
+    total = len(pitcher_ids)
+    progress = st.progress(0) if total else None
+    status = st.empty() if total else None
+
+    # Determine seasons per pitcher from target rows to avoid unnecessary calls.
+    pitcher_seasons = set()
+    for _, r in pit_plus.iterrows():
+        season = int(r["Season"])
+        for c in ["Away_Starter_ID","Home_Starter_ID"]:
+            try:
+                pitcher_seasons.add((season, int(r[c])))
+            except Exception:
+                pass
+
+    for i, (season, pid) in enumerate(sorted(pitcher_seasons), start=1):
+        if status is not None:
+            status.caption(f"Loading free MLB pitcher history • {i:,} of {len(pitcher_seasons):,}")
+        payload, err, _ = fetch_pitcher_season_gamelog(season, pid)
+        if not err and payload:
+            logs[(season, pid)] = parse_pitcher_gamelog(payload)
+        if progress is not None:
+            progress.progress(i / max(1, len(pitcher_seasons)))
+
+    if progress is not None:
+        progress.empty()
+    if status is not None:
+        status.empty()
+
+    feat_rows = []
+    for _, r in pit_plus.iterrows():
+        season = int(r["Season"])
+        game_time = pd.to_datetime(r["Commence_Time"], utc=True)
+        try:
+            aid = int(r["Away_Starter_ID"])
+            hid = int(r["Home_Starter_ID"])
+        except Exception:
+            continue
+
+        a = summarize_pitcher_before_game(
+            logs.get((season, aid)), game_time, min_starts=min_pitcher_starts
+        )
+        h = summarize_pitcher_before_game(
+            logs.get((season, hid)), game_time, min_starts=min_pitcher_starts
+        )
+        if not a or not h:
+            continue
+
+        row = r.to_dict()
+        for k, v in a.items():
+            row[f"Away_SP_{k}"] = v
+        for k, v in h.items():
+            row[f"Home_SP_{k}"] = v
+        feat_rows.append(row)
+
+    return pd.DataFrame(feat_rows)
+
+
+def pitcher_feature_matrix(df):
+    x = pit_feature_matrix(df).copy()
+    x["SP_ERA_Diff"] = df["Away_SP_ERA"] - df["Home_SP_ERA"]
+    x["SP_K9_Diff"] = df["Home_SP_K9"] - df["Away_SP_K9"]
+    x["SP_BB9_Diff"] = df["Away_SP_BB9"] - df["Home_SP_BB9"]
+    x["SP_HR9_Diff"] = df["Away_SP_HR9"] - df["Home_SP_HR9"]
+    x["SP_WHIP_Diff"] = df["Away_SP_WHIP_Approx"] - df["Home_SP_WHIP_Approx"]
+    x["SP_Last5_ERA_Diff"] = df["Away_SP_Last5_ERA"] - df["Home_SP_Last5_ERA"]
+    x["SP_Last5_K9_Diff"] = df["Home_SP_Last5_K9"] - df["Away_SP_Last5_K9"]
+    x["SP_Last5_BB9_Diff"] = df["Away_SP_Last5_BB9"] - df["Home_SP_Last5_BB9"]
+    x["SP_Starts_Diff"] = df["Home_SP_Starts"] - df["Away_SP_Starts"]
+    return x
+
+
+def run_pitcher_point_in_time_backtest(master_df, min_prior_games=12, min_pitcher_starts=3):
+    pit = build_pitcher_feature_table(
+        master_df,
+        min_prior_team_games=min_prior_games,
+        min_pitcher_starts=min_pitcher_starts
+    )
+    if pit.empty:
+        raise ValueError("No PIT games had sufficient starter history.")
+
+    fmat = pitcher_feature_matrix(pit)
+    pit = pd.concat([pit.reset_index(drop=True), fmat.reset_index(drop=True)], axis=1)
+    fcols = list(fmat.columns)
+
+    train23 = pit[pit["Season"] == 2023].copy()
+    val24 = pit[pit["Season"] == 2024].copy()
+    hold25 = pit[pit["Season"] == 2025].copy()
+
+    if min(len(train23), len(val24), len(hold25)) < 400:
+        raise ValueError(
+            f"Insufficient PIT pitcher coverage: 2023={len(train23)}, "
+            f"2024={len(val24)}, 2025={len(hold25)}."
+        )
+
+    X23 = train23[fcols].to_numpy(float)
+    X24 = val24[fcols].to_numpy(float)
+    y23 = train23["Home_Win"].to_numpy(float)
+    y24 = val24["Home_Win"].to_numpy(float)
+
+    X23z, X24z, _, _ = _standardize_train_apply(X23, X24)
+    beta23 = fit_ridge_logit(X23z, y23, ridge=3.0)
+    raw24 = predict_logit(beta23, X24z)
+    val24["PIT_Pitcher_Raw_Prob"] = raw24
+
+    weights = [0.0,0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.0]
+    blend_rows = []
+    for w in weights:
+        p = blend_prob(raw24, val24["Home_Market_Prob"].to_numpy(float), w)
+        blend_rows.append({
+            "Model_Weight":w,
+            "Brier_2024":brier_score_binary(p, y24),
+            "LogLoss_2024":log_loss_binary(p, y24)
+        })
+    blend_table = pd.DataFrame(blend_rows).sort_values(["Brier_2024","LogLoss_2024"])
+    best_weight = float(blend_table.iloc[0]["Model_Weight"])
+
+    dev = pit[pit["Season"].isin([2023,2024])].copy()
+    Xdev = dev[fcols].to_numpy(float)
+    ydev = dev["Home_Win"].to_numpy(float)
+    X25 = hold25[fcols].to_numpy(float)
+    y25 = hold25["Home_Win"].to_numpy(float)
+
+    Xdevz, X25z, _, _ = _standardize_train_apply(Xdev, X25)
+    beta_dev = fit_ridge_logit(Xdevz, ydev, ridge=3.0)
+    raw25 = predict_logit(beta_dev, X25z)
+
+    hold25["PIT_Pitcher_Raw_Prob"] = raw25
+    hold25["PIT_Pitcher_Calibrated_Prob"] = blend_prob(
+        raw25, hold25["Home_Market_Prob"].to_numpy(float), best_weight
+    )
+
+    metrics = pd.DataFrame([
+        {
+            "Sample":"2024 validation",
+            "Games":len(val24),
+            "Market Brier":brier_score_binary(val24["Home_Market_Prob"], val24["Home_Win"]),
+            "Raw Pitcher PIT Brier":brier_score_binary(val24["PIT_Pitcher_Raw_Prob"], val24["Home_Win"]),
+            "Calibrated Brier":brier_score_binary(
+                blend_prob(val24["PIT_Pitcher_Raw_Prob"], val24["Home_Market_Prob"], best_weight),
+                val24["Home_Win"]
+            ),
+        },
+        {
+            "Sample":"2025 holdout",
+            "Games":len(hold25),
+            "Market Brier":brier_score_binary(hold25["Home_Market_Prob"], hold25["Home_Win"]),
+            "Raw Pitcher PIT Brier":brier_score_binary(hold25["PIT_Pitcher_Raw_Prob"], hold25["Home_Win"]),
+            "Calibrated Brier":brier_score_binary(
+                hold25["PIT_Pitcher_Calibrated_Prob"], hold25["Home_Win"]
+            ),
+        }
+    ])
+
+    raw_bets = simulate_ml_bets(
+        hold25.rename(columns={"PIT_Pitcher_Raw_Prob":"_P"}),
+        "_P"
+    )
+    cal_bets = simulate_ml_bets(
+        hold25.rename(columns={"PIT_Pitcher_Calibrated_Prob":"_P"}),
+        "_P"
+    )
+
+    return {
+        "pit":pit,
+        "val24":val24,
+        "hold25":hold25,
+        "metrics":metrics,
+        "blend_table":blend_table,
+        "best_weight":best_weight,
+        "raw_bets":raw_bets,
+        "cal_bets":cal_bets,
+        "raw_summary":summarize_sim_bets(raw_bets),
+        "cal_summary":summarize_sim_bets(cal_bets),
+        "feature_cols":fcols,
+    }
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -3976,6 +4447,122 @@ if mode == "Backtest Lab":
         st.caption(
             "Interpretation guard: this is a clean point-in-time validation model built from lagged team results. "
             "It is not yet a historical replay of every starter, lineup, bullpen, park, weather and travel input used by the live engine."
+        )
+
+    st.divider()
+
+    st.markdown('<div class="section-kicker">PIT STARTING PITCHER TEST</div>', unsafe_allow_html=True)
+    st.caption(
+        "Adds historical starting-pitcher quality to the point-in-time model using MLB's free Stats API. "
+        "Pitcher game logs are filtered strictly to starts before each target game. Zero Odds API credits."
+    )
+
+    pitcher_upload = st.file_uploader(
+        "Upload Moneyline Master CSV for Pitcher Test",
+        type=["csv"],
+        key="pit_pitcher_master_upload"
+    )
+
+    if pitcher_upload is not None:
+        try:
+            pitcher_master = pd.read_csv(pitcher_upload)
+
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                pitcher_min_team = st.slider(
+                    "Prior team games",
+                    min_value=5,
+                    max_value=25,
+                    value=12,
+                    step=1,
+                    key="pitcher_min_team"
+                )
+            with pc2:
+                pitcher_min_starts = st.slider(
+                    "Prior starter starts",
+                    min_value=1,
+                    max_value=8,
+                    value=3,
+                    step=1,
+                    key="pitcher_min_starts"
+                )
+
+            st.info(
+                "First run can take several minutes because the app builds and caches historical pitcher game logs. "
+                "Those requests use MLB's free API, not The Odds API."
+            )
+
+            if st.button(
+                "Run PIT Starting Pitcher Backtest",
+                type="primary",
+                key="run_pitcher_pit"
+            ):
+                with st.spinner(
+                    "Building historical starter identities and prior-start features…"
+                ):
+                    pitcher_result = run_pitcher_point_in_time_backtest(
+                        pitcher_master,
+                        min_prior_games=pitcher_min_team,
+                        min_pitcher_starts=pitcher_min_starts
+                    )
+                st.session_state["pitcher_pit_result"] = pitcher_result
+
+        except Exception as ex:
+            st.error(f"Could not run pitcher PIT backtest: {ex}")
+
+    if "pitcher_pit_result" in st.session_state:
+        pr = st.session_state["pitcher_pit_result"]
+        hold = pr["hold25"]
+        rs = pr["raw_summary"]
+        cs = pr["cal_summary"]
+
+        st.success(
+            f"Pitcher walk-forward complete. 2024 selected "
+            f"{pr['best_weight']*100:.0f}% pitcher model / "
+            f"{(1-pr['best_weight'])*100:.0f}% market."
+        )
+
+        st.markdown('<div class="section-kicker">2025 PITCHER HOLDOUT</div>', unsafe_allow_html=True)
+        pm = pr["metrics"].copy()
+        st.dataframe(pm.round(4), use_container_width=True, hide_index=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Raw pitcher PIT**")
+            st.metric("ROI", f"{rs['ROI']*100:+.1f}%")
+            st.caption(
+                f"{rs['Wins']}-{rs['Losses']} • {rs['Units']:+.2f}u • {rs['Bets']} bets"
+            )
+        with c2:
+            st.markdown("**Market-calibrated pitcher PIT**")
+            st.metric("ROI", f"{cs['ROI']*100:+.1f}%")
+            st.caption(
+                f"{cs['Wins']}-{cs['Losses']} • {cs['Units']:+.2f}u • {cs['Bets']} bets"
+            )
+
+        with st.expander("Pitcher feature set", expanded=False):
+            st.write(pr["feature_cols"])
+
+        with st.expander("Download pitcher PIT outputs", expanded=False):
+            st.download_button(
+                "Download 2025 Pitcher Holdout",
+                hold.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_pit_pitcher_holdout_2025.csv",
+                mime="text/csv",
+                key="download_pitcher_holdout"
+            )
+            if not pr["cal_bets"].empty:
+                st.download_button(
+                    "Download 2025 Pitcher Bet Ledger",
+                    pr["cal_bets"].to_csv(index=False).encode("utf-8"),
+                    file_name="mlb_pit_pitcher_bets_2025.csv",
+                    mime="text/csv",
+                    key="download_pitcher_bets"
+                )
+
+        st.caption(
+            "Interpretation guard: historical probable/starter identity coverage can be incomplete. "
+            "Only games with sufficient prior-start history for both starters enter this test."
         )
 
     st.divider()
