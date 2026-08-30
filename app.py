@@ -28,7 +28,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.10.5-NUMPY-FIX"
+APP_VERSION = "0.11.0-POINT-IN-TIME"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -2663,6 +2663,386 @@ def moneyline_market_brier(master_df):
     if x.empty:
         return None
     return float(((x["Home_Market_Prob"] - x["Home_Win"].astype(float))**2).mean())
+
+PIT_FEATURES = [
+    "Home_Season_WinPct",
+    "Away_Season_WinPct",
+    "Home_Season_RunDiffPG",
+    "Away_Season_RunDiffPG",
+    "Home_Last10_WinPct",
+    "Away_Last10_WinPct",
+    "Home_Last10_RunDiffPG",
+    "Away_Last10_RunDiffPG",
+    "Home_Rest_Days",
+    "Away_Rest_Days",
+]
+
+
+def _safe_mean(vals, default=np.nan):
+    vals = [float(v) for v in vals if pd.notna(v)]
+    return float(np.mean(vals)) if vals else default
+
+
+def build_point_in_time_features(master_df, min_prior_games=12):
+    """
+    Construct historical team-state features using ONLY games completed before
+    the current game's first pitch. No current-game result is used.
+
+    This is intentionally a separate PIT validation model, not a retroactive
+    claim that the live production engine had these exact historical inputs.
+    """
+    df = master_df.copy()
+    df["Commence_Time"] = pd.to_datetime(df["Commence_Time"], errors="coerce", utc=True)
+    df = df[df["Result_Matched"].astype(bool)].copy()
+    df = df.dropna(subset=[
+        "Commence_Time","Away_Team","Home_Team","Away_Score","Home_Score",
+        "Away_Market_Prob","Home_Market_Prob","Away_ML","Home_ML"
+    ])
+    df = df.sort_values(["Commence_Time","Event_ID"]).reset_index(drop=True)
+
+    team_hist = {}
+    rows = []
+
+    for _, r in df.iterrows():
+        away = r["Away_Team"]
+        home = r["Home_Team"]
+        game_time = r["Commence_Time"]
+
+        ah = team_hist.get(away, [])
+        hh = team_hist.get(home, [])
+
+        def summarize(hist):
+            if not hist:
+                return {
+                    "n":0,"winpct":np.nan,"rdpg":np.nan,
+                    "l10_winpct":np.nan,"l10_rdpg":np.nan,
+                    "rest":np.nan
+                }
+            wins = [x["win"] for x in hist]
+            rds = [x["rd"] for x in hist]
+            last10 = hist[-10:]
+            last_time = hist[-1]["time"]
+            rest = max(0.0, (game_time - last_time).total_seconds()/86400.0)
+            return {
+                "n":len(hist),
+                "winpct":_safe_mean(wins),
+                "rdpg":_safe_mean(rds),
+                "l10_winpct":_safe_mean([x["win"] for x in last10]),
+                "l10_rdpg":_safe_mean([x["rd"] for x in last10]),
+                "rest":rest,
+            }
+
+        a = summarize(ah)
+        h = summarize(hh)
+
+        rows.append({
+            "Event_ID": r["Event_ID"],
+            "Season": int(r["Season"]),
+            "Commence_Time": game_time,
+            "Away_Team": away,
+            "Home_Team": home,
+            "Away_ML": float(r["Away_ML"]),
+            "Home_ML": float(r["Home_ML"]),
+            "Away_Market_Prob": float(r["Away_Market_Prob"]),
+            "Home_Market_Prob": float(r["Home_Market_Prob"]),
+            "Home_Win": int(r["Home_Win"]),
+            "Away_Win": int(r["Away_Win"]),
+            "Home_Prior_Games": h["n"],
+            "Away_Prior_Games": a["n"],
+            "Home_Season_WinPct": h["winpct"],
+            "Away_Season_WinPct": a["winpct"],
+            "Home_Season_RunDiffPG": h["rdpg"],
+            "Away_Season_RunDiffPG": a["rdpg"],
+            "Home_Last10_WinPct": h["l10_winpct"],
+            "Away_Last10_WinPct": a["l10_winpct"],
+            "Home_Last10_RunDiffPG": h["l10_rdpg"],
+            "Away_Last10_RunDiffPG": a["l10_rdpg"],
+            "Home_Rest_Days": h["rest"],
+            "Away_Rest_Days": a["rest"],
+        })
+
+        # Only after feature capture do we append the current result.
+        away_score = float(r["Away_Score"])
+        home_score = float(r["Home_Score"])
+        team_hist.setdefault(away, []).append({
+            "time": game_time,
+            "win": int(away_score > home_score),
+            "rd": away_score - home_score,
+        })
+        team_hist.setdefault(home, []).append({
+            "time": game_time,
+            "win": int(home_score > away_score),
+            "rd": home_score - away_score,
+        })
+
+    out = pd.DataFrame(rows)
+    out["PIT_Eligible"] = (
+        (out["Home_Prior_Games"] >= int(min_prior_games))
+        & (out["Away_Prior_Games"] >= int(min_prior_games))
+    )
+    return out
+
+
+def _standardize_train_apply(train_x, apply_x):
+    mu = np.nanmean(train_x, axis=0)
+    sd = np.nanstd(train_x, axis=0)
+    sd = np.where(sd < 1e-8, 1.0, sd)
+    train_fill = np.where(np.isnan(train_x), mu, train_x)
+    apply_fill = np.where(np.isnan(apply_x), mu, apply_x)
+    return (train_fill-mu)/sd, (apply_fill-mu)/sd, mu, sd
+
+
+def _sigmoid(z):
+    z = np.clip(z, -30, 30)
+    return 1.0/(1.0+np.exp(-z))
+
+
+def fit_ridge_logit(x, y, ridge=1.0):
+    """
+    Small dependency-free ridge logistic regression using scipy.optimize.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x1 = np.column_stack([np.ones(len(x)), x])
+
+    def loss(beta):
+        p = _sigmoid(x1 @ beta)
+        eps = 1e-12
+        nll = -np.sum(y*np.log(p+eps) + (1-y)*np.log(1-p+eps))
+        penalty = float(ridge) * np.sum(beta[1:]**2)
+        return nll + penalty
+
+    res = minimize(loss, np.zeros(x1.shape[1]), method="L-BFGS-B")
+    return res.x
+
+
+def predict_logit(beta, x):
+    x = np.asarray(x, dtype=float)
+    x1 = np.column_stack([np.ones(len(x)), x])
+    return _sigmoid(x1 @ beta)
+
+
+def pit_feature_matrix(df):
+    x = pd.DataFrame(index=df.index)
+    # Differences encode home-minus-away team state.
+    x["Season_WinPct_Diff"] = df["Home_Season_WinPct"] - df["Away_Season_WinPct"]
+    x["Season_RunDiff_Diff"] = df["Home_Season_RunDiffPG"] - df["Away_Season_RunDiffPG"]
+    x["Last10_WinPct_Diff"] = df["Home_Last10_WinPct"] - df["Away_Last10_WinPct"]
+    x["Last10_RunDiff_Diff"] = df["Home_Last10_RunDiffPG"] - df["Away_Last10_RunDiffPG"]
+    x["Rest_Diff"] = df["Home_Rest_Days"] - df["Away_Rest_Days"]
+    return x
+
+
+def brier_score_binary(prob, y):
+    p = pd.to_numeric(prob, errors="coerce")
+    yy = pd.to_numeric(y, errors="coerce")
+    mask = p.notna() & yy.notna()
+    if not mask.any():
+        return np.nan
+    return float(np.mean((p[mask].astype(float)-yy[mask].astype(float))**2))
+
+
+def log_loss_binary(prob, y):
+    p = pd.to_numeric(prob, errors="coerce").clip(1e-6, 1-1e-6)
+    yy = pd.to_numeric(y, errors="coerce")
+    mask = p.notna() & yy.notna()
+    if not mask.any():
+        return np.nan
+    pp = p[mask].astype(float)
+    yy = yy[mask].astype(float)
+    return float(-np.mean(yy*np.log(pp) + (1-yy)*np.log(1-pp)))
+
+
+def blend_prob(model_prob, market_prob, model_weight):
+    w = float(model_weight)
+    return np.clip(w*np.asarray(model_prob) + (1-w)*np.asarray(market_prob), .01, .99)
+
+
+def american_unit_profit(odds, won):
+    o = valid_american_odds(odds)
+    if o is None:
+        return np.nan
+    o = float(o)
+    if bool(won):
+        return o/100.0 if o > 0 else 100.0/abs(o)
+    return -1.0
+
+
+def simulate_ml_bets(df, prob_col, min_edge=.025, min_ev=.045, max_dog=299):
+    """
+    Bet whichever side has positive model-vs-market edge and passes thresholds.
+    One bet max per game.
+    """
+    rows = []
+    for _, r in df.iterrows():
+        hp = float(r[prob_col])
+        ap = 1.0 - hp
+        hm = float(r["Home_Market_Prob"])
+        am = float(r["Away_Market_Prob"])
+
+        candidates = [
+            ("HOME", hp, hm, r["Home_ML"], int(r["Home_Win"])),
+            ("AWAY", ap, am, r["Away_ML"], int(r["Away_Win"])),
+        ]
+
+        best = None
+        for side, p, mp, odds, won in candidates:
+            edge = p-mp
+            try:
+                ev = expected_value(p, odds)
+            except Exception:
+                continue
+            o = float(odds)
+            if o >= 300 or edge < min_edge or ev < min_ev:
+                continue
+            rank = edge + 0.50*ev
+            if best is None or rank > best["rank"]:
+                best = {
+                    "Side":side,"Prob":p,"MarketProb":mp,"Odds":o,
+                    "Edge":edge,"EV":ev,"Won":won,"rank":rank
+                }
+
+        if best is not None:
+            rows.append({
+                "Event_ID":r["Event_ID"],
+                "Season":r["Season"],
+                "Commence_Time":r["Commence_Time"],
+                "Away_Team":r["Away_Team"],
+                "Home_Team":r["Home_Team"],
+                **best,
+                "Units":american_unit_profit(best["Odds"], best["Won"])
+            })
+
+    return pd.DataFrame(rows)
+
+
+def summarize_sim_bets(bets):
+    if bets is None or bets.empty:
+        return {"Bets":0,"Wins":0,"Losses":0,"Hit":0.0,"Units":0.0,"ROI":0.0}
+    wins = int(bets["Won"].sum())
+    losses = int(len(bets)-wins)
+    units = float(bets["Units"].sum())
+    return {
+        "Bets":len(bets),
+        "Wins":wins,
+        "Losses":losses,
+        "Hit":wins/len(bets) if len(bets) else 0.0,
+        "Units":units,
+        "ROI":units/len(bets) if len(bets) else 0.0,
+    }
+
+
+def run_point_in_time_backtest(master_df, min_prior_games=12):
+    """
+    Development:
+      Train on 2023 PIT-eligible games
+      Validate candidate market-blend weights on 2024
+
+    Holdout:
+      Refit on 2023+2024 PIT-eligible games
+      Freeze selected blend weight
+      Evaluate 2025 exactly once
+
+    The raw PIT model excludes current-game sportsbook price from its features.
+    """
+    pit = build_point_in_time_features(master_df, min_prior_games=min_prior_games)
+    pit = pit[pit["PIT_Eligible"]].copy()
+
+    fmat = pit_feature_matrix(pit)
+    pit = pd.concat([pit.reset_index(drop=True), fmat.reset_index(drop=True)], axis=1)
+    fcols = list(fmat.columns)
+
+    train23 = pit[pit["Season"] == 2023].copy()
+    val24 = pit[pit["Season"] == 2024].copy()
+    hold25 = pit[pit["Season"] == 2025].copy()
+
+    if len(train23) < 500 or len(val24) < 500 or len(hold25) < 500:
+        raise ValueError("Not enough PIT-eligible games in one or more seasons.")
+
+    X23 = train23[fcols].to_numpy(float)
+    X24 = val24[fcols].to_numpy(float)
+    X25 = hold25[fcols].to_numpy(float)
+    y23 = train23["Home_Win"].to_numpy(float)
+    y24 = val24["Home_Win"].to_numpy(float)
+    y25 = hold25["Home_Win"].to_numpy(float)
+
+    X23z, X24z, mu23, sd23 = _standardize_train_apply(X23, X24)
+    beta23 = fit_ridge_logit(X23z, y23, ridge=2.0)
+    raw24 = predict_logit(beta23, X24z)
+    val24["PIT_Raw_Prob"] = raw24
+
+    # Choose blend weight using 2024 Brier only; 2025 remains untouched.
+    weights = [0.0,0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.0]
+    blend_rows = []
+    for w in weights:
+        p = blend_prob(raw24, val24["Home_Market_Prob"].to_numpy(float), w)
+        blend_rows.append({
+            "Model_Weight":w,
+            "Brier_2024":brier_score_binary(p, y24),
+            "LogLoss_2024":log_loss_binary(p, y24)
+        })
+    blend_table = pd.DataFrame(blend_rows).sort_values(["Brier_2024","LogLoss_2024"])
+    best_weight = float(blend_table.iloc[0]["Model_Weight"])
+
+    # Refit on all 2023+2024, then score untouched 2025.
+    dev = pit[pit["Season"].isin([2023,2024])].copy()
+    Xdev = dev[fcols].to_numpy(float)
+    ydev = dev["Home_Win"].to_numpy(float)
+    Xdevz, X25z, mu, sd = _standardize_train_apply(Xdev, X25)
+    beta_dev = fit_ridge_logit(Xdevz, ydev, ridge=2.0)
+    raw25 = predict_logit(beta_dev, X25z)
+
+    # Also score dev for audit with same final fit (descriptive only, not OOS).
+    Xdevz2 = np.where(np.isnan(Xdev), mu, Xdev)
+    Xdevz2 = (Xdevz2-mu)/sd
+    rawdev = predict_logit(beta_dev, Xdevz2)
+
+    dev["PIT_Raw_Prob"] = rawdev
+    hold25["PIT_Raw_Prob"] = raw25
+    dev["PIT_Calibrated_Prob"] = blend_prob(
+        dev["PIT_Raw_Prob"], dev["Home_Market_Prob"], best_weight
+    )
+    hold25["PIT_Calibrated_Prob"] = blend_prob(
+        hold25["PIT_Raw_Prob"], hold25["Home_Market_Prob"], best_weight
+    )
+
+    metrics = []
+    for label, frame in [("2024 validation", val24), ("2025 holdout", hold25)]:
+        if label.startswith("2024"):
+            raw = frame["PIT_Raw_Prob"]
+            cal = blend_prob(raw, frame["Home_Market_Prob"], best_weight)
+        else:
+            raw = frame["PIT_Raw_Prob"]
+            cal = frame["PIT_Calibrated_Prob"]
+
+        metrics.append({
+            "Sample":label,
+            "Games":len(frame),
+            "Market Brier":brier_score_binary(frame["Home_Market_Prob"], frame["Home_Win"]),
+            "Raw PIT Brier":brier_score_binary(raw, frame["Home_Win"]),
+            "Calibrated Brier":brier_score_binary(cal, frame["Home_Win"]),
+            "Market Log Loss":log_loss_binary(frame["Home_Market_Prob"], frame["Home_Win"]),
+            "Raw PIT Log Loss":log_loss_binary(raw, frame["Home_Win"]),
+            "Calibrated Log Loss":log_loss_binary(cal, frame["Home_Win"]),
+        })
+
+    hold_bets_raw = simulate_ml_bets(hold25, "PIT_Raw_Prob")
+    hold_bets_cal = simulate_ml_bets(hold25, "PIT_Calibrated_Prob")
+
+    return {
+        "pit":pit,
+        "dev":dev,
+        "val24":val24,
+        "hold25":hold25,
+        "blend_table":blend_table,
+        "best_weight":best_weight,
+        "metrics":pd.DataFrame(metrics),
+        "hold_bets_raw":hold_bets_raw,
+        "hold_bets_cal":hold_bets_cal,
+        "hold_raw_summary":summarize_sim_bets(hold_bets_raw),
+        "hold_cal_summary":summarize_sim_bets(hold_bets_cal),
+        "feature_cols":fcols,
+    }
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -3445,6 +3825,155 @@ if mode == "Backtest Lab":
                 mime="text/csv",
                 key="download_moneyline_master"
             )
+
+    st.divider()
+
+    st.markdown('<div class="section-kicker">POINT-IN-TIME MONEYLINE TEST</div>', unsafe_allow_html=True)
+    st.caption(
+        "This test uses the Moneyline Master file and creates a separate historical PIT model from information "
+        "available before each game. It does not pretend the current live engine had identical historical inputs."
+    )
+
+    pit_upload = st.file_uploader(
+        "Upload Moneyline Master CSV",
+        type=["csv"],
+        key="pit_master_upload",
+        help="Use mlb_moneyline_master_2023_2025.csv from the previous step."
+    )
+
+    if pit_upload is not None:
+        try:
+            pit_master = pd.read_csv(pit_upload)
+            required = [
+                "Event_ID","Season","Commence_Time","Away_Team","Home_Team",
+                "Away_ML","Home_ML","Away_Market_Prob","Home_Market_Prob",
+                "Away_Score","Home_Score","Away_Win","Home_Win","Result_Matched"
+            ]
+            missing = [c for c in required if c not in pit_master.columns]
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            else:
+                matched_n = int(pit_master["Result_Matched"].astype(bool).sum())
+                st.info(
+                    f"Loaded {len(pit_master):,} master rows • {matched_n:,} matched final results."
+                )
+
+                min_prior = st.slider(
+                    "Minimum prior games per team",
+                    min_value=5,
+                    max_value=25,
+                    value=12,
+                    step=1,
+                    key="pit_min_prior",
+                    help="A game is eligible only after both teams have this many earlier games in the historical ledger."
+                )
+
+                if st.button(
+                    "Run Point-in-Time Moneyline Backtest",
+                    type="primary",
+                    key="run_pit_backtest"
+                ):
+                    with st.spinner("Building lagged team states, fitting 2023, validating 2024, and testing untouched 2025…"):
+                        pit_result = run_point_in_time_backtest(
+                            pit_master,
+                            min_prior_games=min_prior
+                        )
+                    st.session_state["pit_result"] = pit_result
+
+        except Exception as ex:
+            st.error(f"Could not run point-in-time backtest: {ex}")
+
+    if "pit_result" in st.session_state:
+        r = st.session_state["pit_result"]
+        metrics = r["metrics"].copy()
+        best_weight = r["best_weight"]
+        raw_sum = r["hold_raw_summary"]
+        cal_sum = r["hold_cal_summary"]
+
+        st.success(
+            f"Walk-forward test complete. 2024 selected a {best_weight*100:.0f}% PIT-model / "
+            f"{(1-best_weight)*100:.0f}% market blend. 2025 was not used to choose that weight."
+        )
+
+        st.markdown('<div class="section-kicker">2025 HOLDOUT</div>', unsafe_allow_html=True)
+
+        hold = r["hold25"]
+        market_brier = brier_score_binary(hold["Home_Market_Prob"], hold["Home_Win"])
+        raw_brier = brier_score_binary(hold["PIT_Raw_Prob"], hold["Home_Win"])
+        cal_brier = brier_score_binary(hold["PIT_Calibrated_Prob"], hold["Home_Win"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Holdout games", f"{len(hold):,}")
+        with c2:
+            st.metric("Market Brier", f"{market_brier:.4f}")
+        with c3:
+            st.metric("Raw PIT Brier", f"{raw_brier:.4f}",
+                      delta=f"{market_brier-raw_brier:+.4f} vs market")
+        with c4:
+            st.metric("Calibrated Brier", f"{cal_brier:.4f}",
+                      delta=f"{market_brier-cal_brier:+.4f} vs market")
+
+        st.dataframe(
+            metrics.round(4),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.markdown('<div class="section-kicker">2025 BET SIMULATION</div>', unsafe_allow_html=True)
+        st.caption(
+            "Default test thresholds: edge ≥2.5%, EV ≥4.5%, no +300 or longer dogs, one moneyline bet max per game."
+        )
+
+        b1, b2 = st.columns(2)
+        with b1:
+            st.markdown("**Raw PIT model**")
+            st.metric("ROI", f"{raw_sum['ROI']*100:+.1f}%")
+            st.caption(
+                f"{raw_sum['Wins']}-{raw_sum['Losses']} • "
+                f"{raw_sum['Units']:+.2f}u • {raw_sum['Bets']} bets"
+            )
+        with b2:
+            st.markdown("**Market-calibrated PIT model**")
+            st.metric("ROI", f"{cal_sum['ROI']*100:+.1f}%")
+            st.caption(
+                f"{cal_sum['Wins']}-{cal_sum['Losses']} • "
+                f"{cal_sum['Units']:+.2f}u • {cal_sum['Bets']} bets"
+            )
+
+        st.markdown('<div class="section-kicker">2024 BLEND SELECTION</div>', unsafe_allow_html=True)
+        blend_show = r["blend_table"].copy()
+        blend_show["Model Weight %"] = (blend_show["Model_Weight"]*100).round(0).astype(int)
+        blend_show = blend_show[["Model Weight %","Brier_2024","LogLoss_2024"]]
+        st.dataframe(
+            blend_show.round(4),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        with st.expander("Download point-in-time outputs", expanded=False):
+            hold_export = r["hold25"].copy()
+            st.download_button(
+                "Download 2025 Holdout Predictions",
+                hold_export.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_pit_holdout_2025.csv",
+                mime="text/csv",
+                key="download_pit_holdout"
+            )
+            if not r["hold_bets_cal"].empty:
+                st.download_button(
+                    "Download 2025 Calibrated Bet Ledger",
+                    r["hold_bets_cal"].to_csv(index=False).encode("utf-8"),
+                    file_name="mlb_pit_bets_2025.csv",
+                    mime="text/csv",
+                    key="download_pit_bets"
+                )
+
+        st.caption(
+            "Interpretation guard: this is a clean point-in-time validation model built from lagged team results. "
+            "It is not yet a historical replay of every starter, lineup, bullpen, park, weather and travel input used by the live engine."
+        )
 
     st.divider()
     uploaded_bt = st.file_uploader(
