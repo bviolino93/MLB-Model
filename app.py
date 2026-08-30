@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.2-PITCHER-INTEGRITY-TEST"
+APP_VERSION = "0.12.3-PITCHER-CAUSALITY-AUDIT"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3730,6 +3730,190 @@ def _integrity_fit_eval(d, mode="correct", seed=122, cap_probs=False, label="Cor
     return {"Test":label,"Games_2025":len(ho),"Model_Weight":bw,"Market_Brier":mb,"Raw_Model_Brier":rb,"Cal_Brier":cb,"Brier_Improvement":mb-cb,"Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],"hold25":ho,"bets":bets}
 
 
+
+def _causality_corrupt_holdout(raw_hold, mode="correct", seed=123):
+    """Corrupt starter identity ONLY at inference time.
+
+    Critical design point: the model is trained on the correct historical features.  A
+    placebo is then applied only to the 2025 holdout, so the regression cannot simply
+    relearn the inverse mapping (the flaw in a train+test swapped-starter placebo).
+    """
+    h = raw_hold.copy().reset_index(drop=True)
+    sp_cols = [c for c in h.columns if c.startswith("Away_SP_") or c.startswith("Home_SP_")]
+    if mode == "correct":
+        return h
+    if mode == "scramble":
+        rng = np.random.default_rng(seed)
+        # Shuffle complete starter matchup rows, preserving internally coherent pitcher lines.
+        perm = rng.permutation(len(h))
+        h.loc[:, sp_cols] = h.loc[perm, sp_cols].to_numpy()
+        return h
+    if mode == "swap":
+        metrics = sorted({c.replace("Away_SP_", "") for c in h.columns if c.startswith("Away_SP_")})
+        for m in metrics:
+            a, b = f"Away_SP_{m}", f"Home_SP_{m}"
+            if a in h.columns and b in h.columns:
+                av = h[a].copy()
+                h[a] = h[b].to_numpy()
+                h[b] = av.to_numpy()
+        return h
+    if mode == "lagged":
+        # Assign the preceding eligible game's starter feature row. This is knowingly
+        # wrong and should materially hurt a genuinely starter-driven signal.
+        order = pd.to_datetime(h["Commence_Time"], errors="coerce", utc=True).sort_values().index
+        ordered = h.loc[order, sp_cols].copy()
+        shifted = ordered.shift(1)
+        shifted.iloc[0] = ordered.iloc[-1].to_numpy()
+        h.loc[order, sp_cols] = shifted.to_numpy()
+        return h
+    raise ValueError(f"Unknown causality placebo mode: {mode}")
+
+
+def _fit_correct_model_and_eval_holdout(d, holdout_mode="correct", seed=123, label="Correct starters"):
+    """Train/validate on correct features; corrupt only the untouched 2025 inference rows."""
+    if d.empty:
+        return {"Test": label, "Type": "Inference placebo", "Error": "No eligible rows"}
+    raw = d.copy().reset_index(drop=True)
+    correct_f = pitcher_feature_matrix(raw).reset_index(drop=True)
+    work = pd.concat([raw, correct_f], axis=1)
+    fcols = list(correct_f.columns)
+    tr = work[work["Season"] == 2023].copy()
+    va = work[work["Season"] == 2024].copy()
+    ho_raw = raw[raw["Season"] == 2025].copy().reset_index(drop=True)
+    ho_meta = work[work["Season"] == 2025].copy().reset_index(drop=True)
+    if min(len(tr), len(va), len(ho_raw)) < 150:
+        return {"Test": label, "Type": "Inference placebo", "Error": f"Too little coverage: {len(tr)}/{len(va)}/{len(ho_raw)}"}
+
+    # Select blend using ONLY correct 2024 features.
+    Xtr, Xva = tr[fcols].to_numpy(float), va[fcols].to_numpy(float)
+    ytr, yva = tr["Home_Win"].to_numpy(float), va["Home_Win"].to_numpy(float)
+    Xtrz, Xvaz, _, _ = _standardize_train_apply(Xtr, Xva)
+    b23 = fit_ridge_logit(Xtrz, ytr, ridge=3.0)
+    raw24 = predict_logit(b23, Xvaz)
+    choices = []
+    for w in [0.0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.0]:
+        p = blend_prob(raw24, va["Home_Market_Prob"].to_numpy(float), w)
+        choices.append((w, brier_score_binary(p, yva), log_loss_binary(p, yva)))
+    bw = float(sorted(choices, key=lambda z:(z[1],z[2]))[0][0])
+
+    # Refit on 2023+2024 correct data.
+    dev = work[work["Season"].isin([2023, 2024])].copy()
+    Xdev = dev[fcols].to_numpy(float)
+    ydev = dev["Home_Win"].to_numpy(float)
+    Xdummy = ho_meta[fcols].to_numpy(float)
+    Xdevz, _, mu, sd = _standardize_train_apply(Xdev, Xdummy)
+    bd = fit_ridge_logit(Xdevz, ydev, ridge=3.0)
+
+    # Only now corrupt starter identity in 2025.
+    corrupted = _causality_corrupt_holdout(ho_raw, mode=holdout_mode, seed=seed)
+    hf = pitcher_feature_matrix(corrupted).reset_index(drop=True)
+    Xh = hf[fcols].to_numpy(float)
+    Xhfill = np.where(np.isnan(Xh), mu, Xh)
+    Xhz = (Xhfill - mu) / sd
+    raw25 = predict_logit(bd, Xhz)
+    y25 = ho_meta["Home_Win"].to_numpy(float)
+    mkt = ho_meta["Home_Market_Prob"].to_numpy(float)
+    cal25 = blend_prob(raw25, mkt, bw)
+
+    out = ho_meta.copy()
+    out["Causality_Raw_Prob"] = raw25
+    out["Causality_Prob"] = cal25
+    bets = simulate_ml_bets(out, "Causality_Prob")
+    bs = summarize_sim_bets(bets)
+    mb = brier_score_binary(mkt, y25)
+    rb = brier_score_binary(raw25, y25)
+    cb = brier_score_binary(cal25, y25)
+    return {
+        "Test": label, "Type": "Inference placebo" if holdout_mode != "correct" else "Baseline",
+        "Games_2025": len(out), "Model_Weight": bw, "Market_Brier": mb,
+        "Raw_Model_Brier": rb, "Cal_Brier": cb, "Brier_Improvement": mb-cb,
+        "Bets": bs["Bets"], "Wins": bs["Wins"], "Losses": bs["Losses"],
+        "Units": bs["Units"], "ROI": bs["ROI"], "hold25": out, "bets": bets,
+    }
+
+
+def _fit_eval_ablation(d, drop_cols, label):
+    """Retrain with selected derived features removed, preserving 2023→2024→2025 protocol."""
+    if d.empty:
+        return {"Test": label, "Type": "Feature ablation", "Error": "No eligible rows"}
+    raw = d.copy().reset_index(drop=True)
+    fmat = pitcher_feature_matrix(raw).reset_index(drop=True)
+    keep = [c for c in fmat.columns if c not in set(drop_cols)]
+    if not keep:
+        return {"Test": label, "Type": "Feature ablation", "Error": "No features left"}
+    work = pd.concat([raw, fmat], axis=1)
+    tr = work[work["Season"]==2023].copy(); va=work[work["Season"]==2024].copy(); ho=work[work["Season"]==2025].copy()
+    if min(len(tr),len(va),len(ho)) < 150:
+        return {"Test": label, "Type": "Feature ablation", "Error": f"Too little coverage: {len(tr)}/{len(va)}/{len(ho)}"}
+    Xtr,Xva=tr[keep].to_numpy(float),va[keep].to_numpy(float)
+    ytr,yva=tr["Home_Win"].to_numpy(float),va["Home_Win"].to_numpy(float)
+    Xtrz,Xvaz,_,_=_standardize_train_apply(Xtr,Xva)
+    b=fit_ridge_logit(Xtrz,ytr,ridge=3.0); rawva=predict_logit(b,Xvaz)
+    candidates=[]
+    for w in [0.0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.0]:
+        pp=blend_prob(rawva,va["Home_Market_Prob"].to_numpy(float),w)
+        candidates.append((w,brier_score_binary(pp,yva),log_loss_binary(pp,yva)))
+    bw=float(sorted(candidates,key=lambda z:(z[1],z[2]))[0][0])
+    dev=work[work["Season"].isin([2023,2024])].copy()
+    Xdev,X25=dev[keep].to_numpy(float),ho[keep].to_numpy(float)
+    ydev,y25=dev["Home_Win"].to_numpy(float),ho["Home_Win"].to_numpy(float)
+    Xdz,X25z,_,_=_standardize_train_apply(Xdev,X25)
+    bd=fit_ridge_logit(Xdz,ydev,ridge=3.0); raw25=predict_logit(bd,X25z)
+    cal25=blend_prob(raw25,ho["Home_Market_Prob"].to_numpy(float),bw)
+    out=ho.copy(); out["Causality_Prob"]=cal25
+    bets=simulate_ml_bets(out,"Causality_Prob"); bs=summarize_sim_bets(bets)
+    mb=brier_score_binary(ho["Home_Market_Prob"],ho["Home_Win"]); rb=brier_score_binary(raw25,y25); cb=brier_score_binary(cal25,y25)
+    return {"Test":label,"Type":"Feature ablation","Games_2025":len(ho),"Model_Weight":bw,"Market_Brier":mb,"Raw_Model_Brier":rb,"Cal_Brier":cb,"Brier_Improvement":mb-cb,"Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],"hold25":out,"bets":bets}
+
+
+def run_pitcher_causality_audit(master_df, min_prior_games=12, min_pitcher_starts=3):
+    pit = build_pitcher_feature_table(master_df, min_prior_team_games=min_prior_games, min_pitcher_starts=min_pitcher_starts)
+    if pit.empty:
+        raise ValueError("No PIT pitcher rows were built.")
+    strict = _integrity_prepare_subset(pit, max_hours=6, min_starts=min_pitcher_starts)
+    if strict.empty:
+        raise ValueError("No eligible ≤6h non-doubleheader rows were available.")
+
+    tests = []
+    # Inference-time placebos: model never gets to relearn the corrupted mapping.
+    for mode, label in [
+        ("correct", "Correct starters • ≤6h"),
+        ("scramble", "2025 scrambled starters • inference-only"),
+        ("swap", "2025 opponent starters • inference-only"),
+        ("lagged", "2025 lagged wrong starters • inference-only"),
+    ]:
+        tests.append(_fit_correct_model_and_eval_holdout(strict, holdout_mode=mode, seed=123, label=label))
+
+    # Feature-family ablations, each independently re-fit and validated.
+    groups = {
+        "Remove ERA": ["SP_ERA_Diff"],
+        "Remove K/9": ["SP_K9_Diff"],
+        "Remove BB/9": ["SP_BB9_Diff"],
+        "Remove HR/9": ["SP_HR9_Diff"],
+        "Remove WHIP": ["SP_WHIP_Diff"],
+        "Remove recent form": ["SP_Last5_ERA_Diff","SP_Last5_K9_Diff","SP_Last5_BB9_Diff"],
+        "Remove starter experience": ["SP_Starts_Diff"],
+        "Remove ALL pitcher features": [
+            "SP_ERA_Diff","SP_K9_Diff","SP_BB9_Diff","SP_HR9_Diff","SP_WHIP_Diff",
+            "SP_Last5_ERA_Diff","SP_Last5_K9_Diff","SP_Last5_BB9_Diff","SP_Starts_Diff"
+        ],
+    }
+    for name, cols in groups.items():
+        tests.append(_fit_eval_ablation(strict, cols, name))
+
+    table = pd.DataFrame([{k:v for k,v in r.items() if k not in ("hold25","bets")} for r in tests])
+    full = {r.get("Test"): r for r in tests}
+
+    # Robustness segments for the true-starter baseline.
+    seg=[]; base=full.get("Correct starters • ≤6h",{}); bets=base.get("bets") if isinstance(base,dict) else None
+    if bets is not None and not bets.empty:
+        x=bets.copy(); x["Commence_Time"]=pd.to_datetime(x["Commence_Time"],errors="coerce",utc=True); x["Month"]=x["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in x.groupby("Month"):
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",x[x["Odds"]<0]),("Underdogs",x[x["Odds"]>0])]:
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+    return {"pit":pit,"table":table,"results":full,"segments":pd.DataFrame(seg)}
+
 def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
     pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
     if pit.empty:
@@ -5029,6 +5213,65 @@ if mode == "Backtest Lab":
             st.download_button("Download Integrity Summary CSV",tab.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_integrity_summary.csv",mime="text/csv",key="dl_integrity_summary")
             if seg is not None and not seg.empty:
                 st.download_button("Download Integrity Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_integrity_segments.csv",mime="text/csv",key="dl_integrity_segments")
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.12.3 • PITCHER CAUSALITY AUDIT</div>', unsafe_allow_html=True)
+    st.caption("Inference-only corruption + feature ablation. The trained model does NOT get to relearn swapped/scrambled starters. Uses the same Moneyline Master and zero Odds API credits.")
+    st.info("Key test: correct 2025 starters should beat inference-only scrambled, opponent-starter, and lagged-wrong-starter controls. Feature ablations show which starter metrics actually matter.")
+    caus_upload=st.file_uploader("Upload Moneyline Master CSV for Causality Audit",type=["csv"],key="pitcher_causality_upload")
+    if caus_upload is not None:
+        try:
+            caus_master=pd.read_csv(caus_upload)
+            cc1,cc2=st.columns(2)
+            with cc1: caus_team=st.slider("Causality prior team games",5,25,12,1,key="caus_team")
+            with cc2: caus_starts=st.slider("Causality prior starter starts",1,8,3,1,key="caus_starts")
+            if st.button("Run Pitcher Causality Audit",type="primary",key="run_pitcher_causality"):
+                st.session_state["pitcher_causality_pending"]=True
+                st.session_state["pitcher_causality_params"]=(int(caus_team),int(caus_starts))
+                st.session_state.pop("pitcher_causality_result",None)
+                st.rerun()
+            if st.session_state.get("pitcher_causality_pending",False):
+                rt,rs=st.session_state.get("pitcher_causality_params",(caus_team,caus_starts))
+                st.info("Causality audit started. Keep this page open; cached MLB pitcher data will be reused.")
+                prog=st.progress(8,text="Building strict PIT pitcher table…")
+                try:
+                    out=run_pitcher_causality_audit(caus_master,min_prior_games=rt,min_pitcher_starts=rs)
+                    prog.progress(100,text="Pitcher causality audit complete.")
+                    st.session_state["pitcher_causality_result"]=out
+                    st.session_state["pitcher_causality_pending"]=False
+                    st.session_state["pitcher_causality_just_completed"]=True
+                    st.rerun()
+                except Exception as ex:
+                    st.session_state["pitcher_causality_pending"]=False
+                    st.error(f"Pitcher causality audit failed: {ex}")
+        except Exception as ex:
+            st.error(f"Could not prepare causality audit: {ex}")
+    if "pitcher_causality_result" in st.session_state:
+        cr=st.session_state["pitcher_causality_result"] or {}; ct=cr.get("table",pd.DataFrame())
+        if st.session_state.pop("pitcher_causality_just_completed",False):
+            st.success("Causality audit complete — results below.")
+        if ct is None or ct.empty:
+            st.error("Causality audit returned no rows.")
+        else:
+            st.markdown("**Causality ladder**")
+            st.dataframe(ct.round({"Model_Weight":2,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            rows={r.get("Test"):r for _,r in ct.iterrows()}
+            corr=rows.get("Correct starters • ≤6h")
+            bad=[rows.get("2025 scrambled starters • inference-only"),rows.get("2025 opponent starters • inference-only"),rows.get("2025 lagged wrong starters • inference-only")]
+            if corr is not None and pd.isna(corr.get("Error",np.nan)):
+                c_raw=float(corr.get("Raw_Model_Brier",np.nan)); mkt=float(corr.get("Market_Brier",np.nan))
+                placebo_raw=[float(r.get("Raw_Model_Brier",np.nan)) for r in bad if r is not None and pd.isna(r.get("Error",np.nan))]
+                deteriorated=[p > c_raw + 0.004 for p in placebo_raw if np.isfinite(p)]
+                if c_raw < mkt and len(deteriorated)>=2 and sum(deteriorated)>=2:
+                    st.success("PASS signal: correct starters beat market and at least two inference-only wrong-starter controls deteriorated materially.")
+                else:
+                    st.warning("WARNING: causality controls did not deteriorate enough. Do not promote the starter model yet.")
+            seg=cr.get("segments",pd.DataFrame())
+            if seg is not None and not seg.empty:
+                with st.expander("Correct-starter 2025 robustness splits",expanded=True):
+                    st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download Causality Summary CSV",ct.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_causality_summary.csv",mime="text/csv",key="dl_causality_summary")
+            if seg is not None and not seg.empty:
+                st.download_button("Download Causality Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_causality_segments.csv",mime="text/csv",key="dl_causality_segments")
     st.divider()
     uploaded_bt = st.file_uploader(
         "Upload completed backtest dataset",

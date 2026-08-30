@@ -1,20 +1,23 @@
-MLB Model v0.12.2 — Pitcher Integrity Test
+MLB Model v0.12.3 — Pitcher Causality Audit
 
-Purpose: attack the apparent starting-pitcher signal before production use.
+Purpose
+- Fixes the conceptual flaw in the old swapped-starter placebo: swapping train + validation + holdout lets the model simply relearn the inverse mapping.
+- v0.12.3 trains on correct 2023/2024 starter features, then corrupts ONLY the untouched 2025 inference rows.
+- Adds inference-only scrambled starters, opponent-starter swap, and lagged-wrong-starter controls.
+- Adds feature-family ablations for ERA, K/9, BB/9, HR/9, WHIP, recent form, starter experience, and all pitcher features.
+- Uses strict <=6h, no-doubleheader sample.
+- Keeps 2023 train -> 2024 validation -> 2025 holdout.
+- Uses free MLB Stats API and local cache; zero Odds API historical credits.
 
-New integrity tests use a strict <=6h pregame window and remove doubleheaders:
-- Correct starter model
-- Team-only placebo (removes all starter features)
-- Scrambled-starter placebo (starter feature blocks reassigned within season)
-- Swapped-starter placebo (away/home starter histories reversed)
-- Established-starter subset (>=5 prior starts)
-- Extreme starter-mismatch trim
-- Probability cap (20%-80%)
-- 2025 month and favorite/underdog robustness splits
+Run
+1. Deploy app.py/model.py/requirements.txt.
+2. Open Backtest Lab -> v0.12.3 Pitcher Causality Audit.
+3. Upload mlb_moneyline_master_2023_2025.csv.
+4. Leave defaults at 12 prior team games / 3 prior starter starts.
+5. Run the audit.
+6. Download mlb_pit_pitcher_causality_summary.csv and mlb_pit_pitcher_causality_segments.csv.
 
-Walk-forward remains fixed:
-2023 train -> 2024 selects market/model blend -> 2023+2024 refit -> 2025 holdout.
-No 2025 threshold optimization is performed.
-
-Run:
-Upload mlb_moneyline_master_2023_2025.csv in the v0.12.2 Pitcher Integrity Test section, leave 12 prior team games / 3 prior starter starts, run, then download both integrity CSVs.
+Interpretation
+- Correct starters should outperform the market.
+- Inference-only wrong-starter controls should materially worsen because the trained model cannot relearn the corruption.
+- Feature ablations identify which pitcher-stat families contribute incremental OOS information.
