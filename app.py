@@ -20,7 +20,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.8.0-GENERAL-MARKET"
+APP_VERSION = "0.8.1-AUTO-MARKET"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -1135,7 +1135,7 @@ if st.button("🔄 Refresh Today's Games + Market"):
         st.session_state.games = fetch_today_games()
         fetch_general_mlb_odds.clear()
         st.session_state.general_odds_payload = fetch_general_mlb_odds(get_odds_api_key())
-    for k in ["last_results", "parsed_lines", "ocr_raw"]:
+    for k in ["last_results"]:
         st.session_state.pop(k, None)
     st.rerun()
 
@@ -1196,169 +1196,181 @@ if "last_results" in st.session_state:
         st.caption(f"Confidence: {conf}/100 ({row['Confidence_Grade']}) • {row['Data_Status']}")
 
         st.divider()
-        st.subheader("📸 Upload 734 Lines Screenshots")
-        uploads = st.file_uploader(
-            "Upload 734 screenshots (Money Line and/or Spread)",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-        )
+        st.subheader("General Market")
 
-        if uploads:
-            st.caption(f"{len(uploads)} screenshot(s) selected — order does not matter; the app reads each 734 table cell separately.")
-            for i, uploaded in enumerate(uploads, start=1):
-                uploaded.seek(0)
-                image = Image.open(uploaded)
-                st.image(image, caption=f"Sportsbook screenshot {i}", use_container_width=True)
+        payload = st.session_state.get("general_odds_payload") or {}
+        events = payload.get("events", [])
+        market_error = payload.get("error", "")
+        quota = payload.get("quota", {})
 
-            if st.button("🔎 Read Lines From Screenshots"):
-                with st.spinner("Reading sportsbook lines from all screenshots..."):
-                    try:
-                        merged = {
-                            "away_ml": None,
-                            "home_ml": None,
-                            "away_rl_side": None,
-                            "away_rl_odds": None,
-                            "home_rl_side": None,
-                            "home_rl_odds": None,
-                            "total_line": None,
-                            "over_odds": None,
-                            "under_odds": None,
-                        }
-                        all_text = []
+        current_market = market_for_game(games, events, int(row["GamePk"]))
 
-                        for uploaded in uploads:
-                            uploaded.seek(0)
-                            image = Image.open(uploaded)
-                            shot_text = ocr_text(image)
-                            all_text.append(shot_text)
-                            shot_parsed = parse_734_image(image, away, home, shot_text)
+        if not odds_api_key:
+            st.warning(
+                "Automatic market feed is not configured. Add ODDS_API_KEY to Streamlit Secrets."
+            )
+        elif market_error:
+            st.warning(f"General market feed error: {market_error}")
+        elif not current_market:
+            st.warning(
+                "No current consensus market matched this game. "
+                "Use the manual line editor below if you still want to grade it."
+            )
+        else:
+            remaining = quota.get("remaining")
+            cap = f" • API credits remaining: {remaining}" if remaining not in [None, ""] else ""
+            st.success(
+                f"Current consensus loaded from {current_market.get('provider_count', 0)} US book(s){cap}."
+            )
+            st.caption(
+                "Consensus = median current line/price across available US sportsbooks. "
+                "This is a generic market snapshot, not a verified opener or closing line."
+            )
 
-                            for key, value in shot_parsed.items():
-                                if key.startswith("_"):
-                                    continue
-                                if value is not None:
-                                    merged[key] = value
+            # Load the current market directly into the editable widgets.
+            auto_values = {
+                f"away_ml_{row['GamePk']}": current_market.get("away_ml"),
+                f"home_ml_{row['GamePk']}": current_market.get("home_ml"),
+                f"away_rl_odds_{row['GamePk']}": current_market.get("away_rl_odds"),
+                f"home_rl_odds_{row['GamePk']}": current_market.get("home_rl_odds"),
+                f"total_line_{row['GamePk']}": current_market.get("total"),
+                f"over_odds_{row['GamePk']}": current_market.get("over_odds"),
+                f"under_odds_{row['GamePk']}": current_market.get("under_odds"),
+            }
+            if current_market.get("away_rl") is not None:
+                auto_values[f"away_rl_side_{row['GamePk']}"] = f"{float(current_market['away_rl']):+.1f}"
+            if current_market.get("home_rl") is not None:
+                auto_values[f"home_rl_side_{row['GamePk']}"] = f"{float(current_market['home_rl']):+.1f}"
 
-                            if shot_parsed.get("_debug"):
-                                all_text.append(
-                                    "\n===== FIXED CELL OCR =====\n"
-                                    + str(shot_parsed["_debug"])
-                                )
+            # Only overwrite on the first load for this exact market snapshot.
+            snapshot_key = (
+                current_market.get("event_id"),
+                current_market.get("last_update"),
+                current_market.get("away_ml"),
+                current_market.get("home_ml"),
+                current_market.get("away_rl"),
+                current_market.get("home_rl"),
+                current_market.get("total"),
+            )
+            state_snapshot_key = f"market_snapshot_{row['GamePk']}"
+            if st.session_state.get(state_snapshot_key) != snapshot_key:
+                for k, v in auto_values.items():
+                    if v is not None:
+                        st.session_state[k] = v
+                st.session_state[state_snapshot_key] = snapshot_key
 
-                        # If we have both RL prices but the ½ glyph was unreadable,
-                        # assign standard MLB +/-1.5 sides using the ML favorite.
-                        if (
-                            merged.get("away_rl_odds") is not None
-                            and merged.get("home_rl_odds") is not None
-                            and (
-                                merged.get("away_rl_side") is None
-                                or merged.get("home_rl_side") is None
-                            )
-                            and merged.get("away_ml") is not None
-                            and merged.get("home_ml") is not None
-                        ):
-                            if merged["away_ml"] < 0 and merged["home_ml"] > 0:
-                                merged["away_rl_side"] = "-1.5"
-                                merged["home_rl_side"] = "+1.5"
-                            elif merged["home_ml"] < 0 and merged["away_ml"] > 0:
-                                merged["away_rl_side"] = "+1.5"
-                                merged["home_rl_side"] = "-1.5"
-                            elif merged["away_ml"] < merged["home_ml"]:
-                                merged["away_rl_side"] = "-1.5"
-                                merged["home_rl_side"] = "+1.5"
-                            else:
-                                merged["away_rl_side"] = "+1.5"
-                                merged["home_rl_side"] = "-1.5"
+            market_cols = st.columns(3)
+            market_cols[0].metric(
+                "Moneyline",
+                f"{away} {int(current_market['away_ml']):+d}" if current_market.get("away_ml") is not None else "—",
+                f"{home} {int(current_market['home_ml']):+d}" if current_market.get("home_ml") is not None else None,
+            )
+            market_cols[1].metric(
+                "Run Line",
+                (
+                    f"{away} {float(current_market['away_rl']):+.1f} "
+                    f"{int(current_market['away_rl_odds']):+d}"
+                    if current_market.get("away_rl") is not None and current_market.get("away_rl_odds") is not None
+                    else "—"
+                ),
+                (
+                    f"{home} {float(current_market['home_rl']):+.1f} "
+                    f"{int(current_market['home_rl_odds']):+d}"
+                    if current_market.get("home_rl") is not None and current_market.get("home_rl_odds") is not None
+                    else None
+                ),
+            )
+            market_cols[2].metric(
+                "Total",
+                f"{float(current_market['total']):.1f}" if current_market.get("total") is not None else "—",
+                (
+                    f"O {int(current_market['over_odds']):+d} • U {int(current_market['under_odds']):+d}"
+                    if current_market.get("over_odds") is not None and current_market.get("under_odds") is not None
+                    else None
+                ),
+            )
 
-                        st.session_state.parsed_lines = merged
-                        st.session_state.ocr_raw = "\n\n===== NEXT SCREENSHOT =====\n\n".join(all_text)
-                        sync_parsed_to_widgets(merged, row["GamePk"])
-                        st.success("Screenshots read. Extracted values were loaded into the boxes below.")
-                        st.write(
-                            "**Detected:** "
-                            f"{away} ML {merged.get('away_ml')} | "
-                            f"{home} ML {merged.get('home_ml')} | "
-                            f"{away} RL {merged.get('away_rl_side')} {merged.get('away_rl_odds')} | "
-                            f"{home} RL {merged.get('home_rl_side')} {merged.get('home_rl_odds')} | "
-                            f"Total {merged.get('total_line')} | "
-                            f"Over {merged.get('over_odds')} | Under {merged.get('under_odds')}"
-                        )
-                    except Exception as e:
-                        st.error(f"Could not read screenshots: {e}")
+            provider_text = current_market.get("providers") or ""
+            update_text = current_market.get("last_update") or ""
+            if provider_text:
+                st.caption(f"Books: {provider_text}")
+            if update_text:
+                st.caption(f"Market last update: {update_text}")
 
-        if "ocr_raw" in st.session_state:
-            with st.expander("OCR text / troubleshooting"):
-                st.code(st.session_state.ocr_raw)
-
-        p = st.session_state.get("parsed_lines", {})
-
+        # Safe defaults if a market is unavailable.
         defaults = {
-            f"away_ml_{row['GamePk']}": int(p.get("away_ml") if p.get("away_ml") is not None else 100),
-            f"home_ml_{row['GamePk']}": int(p.get("home_ml") if p.get("home_ml") is not None else -110),
-            f"away_rl_side_{row['GamePk']}": p.get("away_rl_side", "+1.5"),
-            f"away_rl_odds_{row['GamePk']}": int(p.get("away_rl_odds") if p.get("away_rl_odds") is not None else -110),
-            f"home_rl_side_{row['GamePk']}": p.get("home_rl_side", "-1.5"),
-            f"home_rl_odds_{row['GamePk']}": int(p.get("home_rl_odds") if p.get("home_rl_odds") is not None else 100),
-            f"total_line_{row['GamePk']}": float(p.get("total_line") if p.get("total_line") is not None else 9.0),
-            f"over_odds_{row['GamePk']}": int(p.get("over_odds") if p.get("over_odds") is not None else -110),
-            f"under_odds_{row['GamePk']}": int(p.get("under_odds") if p.get("under_odds") is not None else -110),
+            f"away_ml_{row['GamePk']}": 100,
+            f"home_ml_{row['GamePk']}": -110,
+            f"away_rl_side_{row['GamePk']}": "+1.5",
+            f"away_rl_odds_{row['GamePk']}": -110,
+            f"home_rl_side_{row['GamePk']}": "-1.5",
+            f"home_rl_odds_{row['GamePk']}": 100,
+            f"total_line_{row['GamePk']}": 9.0,
+            f"over_odds_{row['GamePk']}": -110,
+            f"under_odds_{row['GamePk']}": -110,
         }
         for k, v in defaults.items():
             if k not in st.session_state:
                 st.session_state[k] = v
 
-        st.subheader("Sportsbook Lines")
-        st.caption("Confirm the extracted values. If OCR misses something, just edit the box manually.")
+        with st.expander("Edit market manually", expanded=False):
+            st.caption(
+                "The automatic consensus is loaded above. Edit only if you want to test a different sportsbook price."
+            )
 
-        ml1, ml2 = st.columns(2)
-        away_ml = ml1.number_input(f"{away} ML", step=5, key=f"away_ml_{row['GamePk']}")
-        home_ml = ml2.number_input(f"{home} ML", step=5, key=f"home_ml_{row['GamePk']}")
+            ml1, ml2 = st.columns(2)
+            away_ml = ml1.number_input(f"{away} ML", step=5, key=f"away_ml_{row['GamePk']}")
+            home_ml = ml2.number_input(f"{home} ML", step=5, key=f"home_ml_{row['GamePk']}")
 
-        rl1, rl2 = st.columns(2)
-        away_side0 = p.get("away_rl_side", "+1.5")
-        away_rl_side = rl1.selectbox(f"{away} run line", ["+1.5", "-1.5"], key=f"away_rl_side_{row['GamePk']}")
-        away_rl_odds = rl1.number_input(f"{away} RL odds", step=5, key=f"away_rl_odds_{row['GamePk']}")
-        home_side0 = p.get("home_rl_side", "-1.5")
-        home_rl_side = rl2.selectbox(f"{home} run line", ["-1.5", "+1.5"], key=f"home_rl_side_{row['GamePk']}")
-        home_rl_odds = rl2.number_input(f"{home} RL odds", step=5, key=f"home_rl_odds_{row['GamePk']}")
+            rl1, rl2 = st.columns(2)
+            away_rl_side = rl1.selectbox(
+                f"{away} run line",
+                ["+1.5", "-1.5"],
+                key=f"away_rl_side_{row['GamePk']}",
+            )
+            away_rl_odds = rl1.number_input(
+                f"{away} RL odds", step=5, key=f"away_rl_odds_{row['GamePk']}"
+            )
+            home_rl_side = rl2.selectbox(
+                f"{home} run line",
+                ["-1.5", "+1.5"],
+                key=f"home_rl_side_{row['GamePk']}",
+            )
+            home_rl_odds = rl2.number_input(
+                f"{home} RL odds", step=5, key=f"home_rl_odds_{row['GamePk']}"
+            )
 
-        t1, t2, t3 = st.columns(3)
-        total_line = t1.number_input("Total", step=0.5, key=f"total_line_{row['GamePk']}")
-        over_odds = t2.number_input("Over odds", step=5, key=f"over_odds_{row['GamePk']}")
-        under_odds = t3.number_input("Under odds", step=5, key=f"under_odds_{row['GamePk']}")
+            t1, t2, t3 = st.columns(3)
+            total_line = t1.number_input(
+                "Total", step=0.5, key=f"total_line_{row['GamePk']}"
+            )
+            over_odds = t2.number_input(
+                "Over odds", step=5, key=f"over_odds_{row['GamePk']}"
+            )
+            under_odds = t3.number_input(
+                "Under odds", step=5, key=f"under_odds_{row['GamePk']}"
+            )
 
-        if st.button("✅ Should I Bet?", type="primary"):
+        # Read active values whether or not the expander was opened.
+        away_ml = st.session_state[f"away_ml_{row['GamePk']}"]
+        home_ml = st.session_state[f"home_ml_{row['GamePk']}"]
+        away_rl_side = st.session_state[f"away_rl_side_{row['GamePk']}"]
+        away_rl_odds = st.session_state[f"away_rl_odds_{row['GamePk']}"]
+        home_rl_side = st.session_state[f"home_rl_side_{row['GamePk']}"]
+        home_rl_odds = st.session_state[f"home_rl_odds_{row['GamePk']}"]
+        total_line = st.session_state[f"total_line_{row['GamePk']}"]
+        over_odds = st.session_state[f"over_odds_{row['GamePk']}"]
+        under_odds = st.session_state[f"under_odds_{row['GamePk']}"]
+
+        if st.button("✅ Grade Current Market", type="primary"):
             markets = []
             add_market(markets, f"{away} ML", row["Away_WinProb"], away_ml, conf)
             add_market(markets, f"{home} ML", row["Home_WinProb"], home_ml, conf)
+
             away_rl_prob = row["Away_+1.5_Prob"] if away_rl_side == "+1.5" else row["Away_-1.5_Prob"]
             home_rl_prob = row["Home_+1.5_Prob"] if home_rl_side == "+1.5" else row["Home_-1.5_Prob"]
             add_market(markets, f"{away} {away_rl_side}", away_rl_prob, away_rl_odds, conf)
             add_market(markets, f"{home} {home_rl_side}", home_rl_prob, home_rl_odds, conf)
-
-            market_df = pd.DataFrame(markets)
-            rank = {"STRONG BET": 3, "BET": 2, "LEAN": 1, "PASS": 0}
-            market_df["_rank"] = market_df["Verdict"].map(rank)
-            market_df = market_df.sort_values(["_rank", "EV"], ascending=False).drop(columns="_rank")
-            best = market_df.iloc[0]
-
-            if best["Verdict"] in ["STRONG BET", "BET"]:
-                st.success(f"{icon(best['Verdict'])} **{best['Verdict']}: {best['Bet']} {int(best['Odds']):+d}**\n\nModel edge: **{best['Edge']*100:+.1f}%** • EV: **{best['EV']*100:+.1f}%**")
-            elif best["Verdict"] == "LEAN":
-                st.warning(f"🟡 **LEAN ONLY: {best['Bet']} {int(best['Odds']):+d}**\n\nPositive value, but it does **not** clear the bet threshold.")
-            else:
-                st.info("⚪ **NO BET / PASS** — none of the entered ML or run-line prices clear the model's bet threshold.")
-
-            st.markdown("#### Every market")
-            for _, m in market_df.iterrows():
-                st.markdown(
-                    f"""<div class="bet-card"><div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {int(m['Odds']):+d}</div>
-                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}% • Fair {int(m['Model Fair']):+d} • {juice_thresholds(int(m['Odds']))['tier']}</div>""",
-                    unsafe_allow_html=True,
-                )
-
-            gap = row["Model_Total"] - total_line
-            st.markdown("#### Total")
 
             over_verdict, over_edge, over_ev, over_imp, over_model_prob, over_probs = total_bet_grade(
                 row["Model_Total"], total_line, "Over", over_odds, conf
@@ -1367,70 +1379,72 @@ if "last_results" in st.session_state:
                 row["Model_Total"], total_line, "Under", under_odds, conf
             )
 
-            total_markets = [
+            markets.extend([
                 {
                     "Bet": f"Over {total_line:g}",
                     "Verdict": over_verdict,
                     "Odds": int(over_odds),
                     "Model Prob": over_model_prob,
-                    "Push Prob": over_probs["push"],
                     "Implied Prob": over_imp,
                     "Edge": over_edge,
                     "EV": over_ev,
+                    "Model Fair": fair_ml(over_model_prob),
+                    "Push Prob": over_probs["push"],
                 },
                 {
                     "Bet": f"Under {total_line:g}",
                     "Verdict": under_verdict,
                     "Odds": int(under_odds),
                     "Model Prob": under_model_prob,
-                    "Push Prob": under_probs["push"],
                     "Implied Prob": under_imp,
                     "Edge": under_edge,
                     "EV": under_ev,
+                    "Model Fair": fair_ml(under_model_prob),
+                    "Push Prob": under_probs["push"],
                 },
-            ]
+            ])
 
-            total_rank = {"STRONG BET": 3, "BET": 2, "LEAN": 1, "PASS": 0}
-            total_markets = sorted(
-                total_markets,
-                key=lambda x: (total_rank[x["Verdict"]], x["EV"]),
-                reverse=True,
-            )
-            best_total = total_markets[0]
+            market_df = pd.DataFrame(markets)
+            rank = {"STRONG BET": 3, "BET": 2, "LEAN": 1, "PASS": 0}
+            market_df["_rank"] = market_df["Verdict"].map(rank)
+            market_df = market_df.sort_values(
+                ["_rank", "EV", "Edge"], ascending=False
+            ).drop(columns="_rank")
 
-            if best_total["Verdict"] in ["STRONG BET", "BET"]:
+            best = market_df.iloc[0]
+            if best["Verdict"] in ["STRONG BET", "BET"]:
                 st.success(
-                    f"{icon(best_total['Verdict'])} **TOTAL {best_total['Verdict']}: "
-                    f"{best_total['Bet']} {best_total['Odds']:+d}**\n\n"
-                    f"Model edge: **{best_total['Edge']*100:+.1f}%** • EV: **{best_total['EV']*100:+.1f}%**"
+                    f"{icon(best['Verdict'])} **{best['Verdict']}: "
+                    f"{best['Bet']} {int(best['Odds']):+d}**\n\n"
+                    f"Model edge: **{best['Edge']*100:+.1f}%** • "
+                    f"EV: **{best['EV']*100:+.1f}%**"
                 )
-            elif best_total["Verdict"] == "LEAN":
+            elif best["Verdict"] == "LEAN":
                 st.warning(
-                    f"🟡 **TOTAL LEAN: {best_total['Bet']} {best_total['Odds']:+d}**\n\n"
-                    "Positive model value, but it does **not** clear the bet threshold."
+                    f"🟡 **LEAN ONLY: {best['Bet']} {int(best['Odds']):+d}**\n\n"
+                    "Positive model value, but it does not clear the bet threshold."
                 )
             else:
-                st.info("⚪ **TOTAL: PASS** — neither side clears the model's bet threshold.")
+                st.info("⚪ **NO BET / PASS** — no current market clears the threshold.")
 
-            st.write(
-                f"Model total **{row['Model_Total']:.2f}** vs market **{total_line:.1f}** "
-                f"→ projection gap **{gap:+.2f} runs**."
-            )
-
-            for m in total_markets:
-                push_text = f" • Push {m['Push Prob']*100:.1f}%" if m["Push Prob"] > 0 else ""
+            st.markdown("#### Ranked Markets")
+            for _, m in market_df.iterrows():
+                push_text = ""
+                if "Push Prob" in m and pd.notna(m.get("Push Prob")) and float(m.get("Push Prob", 0)) > 0:
+                    push_text = f" • Push {float(m['Push Prob'])*100:.1f}%"
                 st.markdown(
-                    f"""<div class="bet-card"><div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {m['Odds']:+d}</div>
-                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% • Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}%{push_text} • {juice_thresholds(int(m['Odds']))['tier']}</div>""",
+                    f"""<div class="bet-card">
+                    <div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {int(m['Odds']):+d}</div>
+                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% •
+                    Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}% •
+                    Fair {int(m['Model Fair']):+d}{push_text} • {juice_thresholds(int(m['Odds']))['tier']}
+                    </div>""",
                     unsafe_allow_html=True,
                 )
 
             st.caption(
-                "Bet thresholds are now JUICE-AWARE. Normal prices use the original thresholds "
-                "(BET: confidence ≥70, edge ≥2.5%, EV ≥5%). Prices from -150 to -179, -180 to -199, "
-                "-200 to -249, and -250 or worse require progressively larger edge and EV. "
-                "Positive value that does not clear the price-adjusted threshold is labeled LEAN. "
-                "Total probabilities remain EXPERIMENTAL and use a Poisson distribution centered on the model total."
+                "Single-game pricing is now pulled automatically from the same generic consensus market used by Full Slate. "
+                "Moneyline, run line and total are all graded together. Totals remain experimental."
             )
 
         csv = df.to_csv(index=False).encode("utf-8")
