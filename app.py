@@ -29,7 +29,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.12.1.3-PITCHER-AUDIT-RESULTS-FIX"
+APP_VERSION = "0.12.2-PITCHER-INTEGRITY-TEST"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -3668,6 +3668,97 @@ def run_pitcher_audit(master_df, min_prior_games=12, min_pitcher_starts=3):
     }
     return {"pit":pit,"table":table,"results":full,"timing_diagnostics":timing_diag}
 
+
+def _integrity_prepare_subset(pit, max_hours=6, min_starts=3, established_starts=None, trim_extremes=False):
+    d=_mark_doubleheaders(pit)
+    d["Hours_To_First_Pitch"]=pd.to_numeric(d.get("Hours_To_First_Pitch"),errors="coerce")
+    d=d[d["Hours_To_First_Pitch"].between(0,float(max_hours),inclusive="both")].copy()
+    d=d[~d["Audit_Doubleheader"]].copy()
+    need=int(established_starts if established_starts is not None else min_starts)
+    d=d[(pd.to_numeric(d["Away_SP_Starts"],errors="coerce")>=need)&(pd.to_numeric(d["Home_SP_Starts"],errors="coerce")>=need)].copy()
+    if trim_extremes and not d.empty:
+        era=(pd.to_numeric(d["Away_SP_ERA"],errors="coerce")-pd.to_numeric(d["Home_SP_ERA"],errors="coerce")).abs()
+        k9=(pd.to_numeric(d["Away_SP_K9"],errors="coerce")-pd.to_numeric(d["Home_SP_K9"],errors="coerce")).abs()
+        bb9=(pd.to_numeric(d["Away_SP_BB9"],errors="coerce")-pd.to_numeric(d["Home_SP_BB9"],errors="coerce")).abs()
+        d=d[(era<=5.0)&(k9<=8.0)&(bb9<=6.0)].copy()
+    return d
+
+
+def _integrity_fit_eval(d, mode="correct", seed=122, cap_probs=False, label="Correct starters"):
+    if d.empty:
+        return {"Test":label,"Error":"No eligible rows"}
+    work=d.copy().reset_index(drop=True)
+    sp_cols=[c for c in work.columns if c.startswith("Away_SP_") or c.startswith("Home_SP_")]
+    if mode=="scramble":
+        rng=np.random.default_rng(seed)
+        for season in sorted(work["Season"].dropna().unique()):
+            idx=work.index[work["Season"]==season].to_numpy()
+            perm=rng.permutation(idx)
+            work.loc[idx,sp_cols]=work.loc[perm,sp_cols].to_numpy()
+    elif mode=="swap":
+        metrics=sorted({c.replace("Away_SP_","") for c in work.columns if c.startswith("Away_SP_")})
+        for m in metrics:
+            a,h=f"Away_SP_{m}",f"Home_SP_{m}"
+            if a in work.columns and h in work.columns:
+                tmp=work[a].copy(); work[a]=work[h].to_numpy(); work[h]=tmp.to_numpy()
+    fmat=pit_feature_matrix(work).copy() if mode=="team_only" else pitcher_feature_matrix(work).copy()
+    work=pd.concat([work.reset_index(drop=True),fmat.reset_index(drop=True)],axis=1)
+    fcols=list(fmat.columns)
+    tr=work[work["Season"]==2023].copy(); va=work[work["Season"]==2024].copy(); ho=work[work["Season"]==2025].copy()
+    if min(len(tr),len(va),len(ho))<150:
+        return {"Test":label,"Error":f"Too little coverage: {len(tr)}/{len(va)}/{len(ho)}"}
+    Xtr,Xva=tr[fcols].to_numpy(float),va[fcols].to_numpy(float)
+    ytr,yva=tr["Home_Win"].to_numpy(float),va["Home_Win"].to_numpy(float)
+    Xtrz,Xvaz,_,_=_standardize_train_apply(Xtr,Xva)
+    b=fit_ridge_logit(Xtrz,ytr,ridge=3.0); rawva=predict_logit(b,Xvaz)
+    candidates=[]
+    for w in [0.0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.0]:
+        pp=blend_prob(rawva,va["Home_Market_Prob"].to_numpy(float),w)
+        candidates.append((w,brier_score_binary(pp,yva),log_loss_binary(pp,yva)))
+    bw=float(sorted(candidates,key=lambda z:(z[1],z[2]))[0][0])
+    dev=work[work["Season"].isin([2023,2024])].copy()
+    Xdev,X25=dev[fcols].to_numpy(float),ho[fcols].to_numpy(float)
+    ydev,y25=dev["Home_Win"].to_numpy(float),ho["Home_Win"].to_numpy(float)
+    Xdz,X25z,_,_=_standardize_train_apply(Xdev,X25)
+    bd=fit_ridge_logit(Xdz,ydev,ridge=3.0); raw25=predict_logit(bd,X25z)
+    if cap_probs:
+        raw25=np.clip(raw25,.20,.80)
+    cal25=blend_prob(raw25,ho["Home_Market_Prob"].to_numpy(float),bw)
+    ho=ho.copy(); ho["Integrity_Prob"]=cal25
+    bets=simulate_ml_bets(ho,"Integrity_Prob"); bs=summarize_sim_bets(bets)
+    mb=brier_score_binary(ho["Home_Market_Prob"],ho["Home_Win"]); rb=brier_score_binary(raw25,y25); cb=brier_score_binary(cal25,y25)
+    return {"Test":label,"Games_2025":len(ho),"Model_Weight":bw,"Market_Brier":mb,"Raw_Model_Brier":rb,"Cal_Brier":cb,"Brier_Improvement":mb-cb,"Bets":bs["Bets"],"Wins":bs["Wins"],"Losses":bs["Losses"],"Units":bs["Units"],"ROI":bs["ROI"],"hold25":ho,"bets":bets}
+
+
+def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
+    pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
+    if pit.empty:
+        raise ValueError("No PIT pitcher rows were built.")
+    strict=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts)
+    established=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts,established_starts=max(5,min_pitcher_starts))
+    trimmed=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts,trim_extremes=True)
+    specs=[
+        (strict,"correct",False,"Correct starters • ≤6h"),
+        (strict,"team_only",False,"Team-only placebo • ≤6h"),
+        (strict,"scramble",False,"Scrambled starters placebo • ≤6h"),
+        (strict,"swap",False,"Swapped starters placebo • ≤6h"),
+        (established,"correct",False,"Established starters ≥5 • ≤6h"),
+        (trimmed,"correct",False,"Trim extreme SP mismatches • ≤6h"),
+        (strict,"correct",True,"Probability cap 20–80% • ≤6h"),
+    ]
+    results=[]; full={}
+    for d,mode,cap,label in specs:
+        r=_integrity_fit_eval(d,mode=mode,seed=122,cap_probs=cap,label=label)
+        full[label]=r; results.append({k:v for k,v in r.items() if k not in ("hold25","bets")})
+    seg=[]; base=full.get("Correct starters • ≤6h",{}); bets=base.get("bets") if isinstance(base,dict) else None
+    if bets is not None and not bets.empty:
+        x=bets.copy(); x["Commence_Time"]=pd.to_datetime(x["Commence_Time"],errors="coerce",utc=True); x["Month"]=x["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in x.groupby("Month"):
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",x[x["Odds"]<0]),("Underdogs",x[x["Odds"]>0])]:
+            seg.append({"Segment":name,**summarize_sim_bets(g)})
+    return {"pit":pit,"table":pd.DataFrame(results),"results":full,"segments":pd.DataFrame(seg)}
+
 def user_verdict(verdict):
     """User-facing betting label. Letter grades stay internal only."""
     return {
@@ -4880,6 +4971,64 @@ if mode == "Backtest Lab":
                 "moves closer to first pitch, without tuning thresholds on 2025."
             )
 
+
+
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.12.2 • PITCHER INTEGRITY TEST</div>', unsafe_allow_html=True)
+    st.caption("Harder validation of the starter signal. Uses the same Moneyline Master and zero Odds API credits. The key question: does the edge collapse when the correct starter information is destroyed?")
+    st.info("PASS logic: correct starters should beat market; team-only should be weaker; scrambled/swapped starter placebos should materially deteriorate. If placebos stay strong, suspect leakage elsewhere.")
+    integrity_upload=st.file_uploader("Upload Moneyline Master CSV for Integrity Test",type=["csv"],key="pitcher_integrity_upload")
+    if integrity_upload is not None:
+        try:
+            integrity_master=pd.read_csv(integrity_upload)
+            ic1,ic2=st.columns(2)
+            with ic1: integ_team=st.slider("Integrity prior team games",5,25,12,1,key="integ_team")
+            with ic2: integ_starts=st.slider("Integrity prior starter starts",1,8,3,1,key="integ_starts")
+            if st.button("Run Pitcher Integrity Test",type="primary",key="run_pitcher_integrity"):
+                st.session_state["pitcher_integrity_pending"]=True
+                st.session_state["pitcher_integrity_params"]=(int(integ_team),int(integ_starts))
+                st.session_state.pop("pitcher_integrity_result",None)
+                st.rerun()
+            if st.session_state.get("pitcher_integrity_pending",False):
+                rt,rs=st.session_state.get("pitcher_integrity_params",(integ_team,integ_starts))
+                st.info("Integrity test started. Keep this page open; cached MLB pitcher data will be reused where available.")
+                prog=st.progress(8,text="Building PIT pitcher table…")
+                try:
+                    out=run_pitcher_integrity_test(integrity_master,min_prior_games=rt,min_pitcher_starts=rs)
+                    prog.progress(100,text="Pitcher integrity test complete.")
+                    st.session_state["pitcher_integrity_result"]=out
+                    st.session_state["pitcher_integrity_pending"]=False
+                    st.session_state["pitcher_integrity_just_completed"]=True
+                    st.rerun()
+                except Exception as ex:
+                    st.session_state["pitcher_integrity_pending"]=False
+                    st.error(f"Pitcher integrity test failed: {ex}")
+        except Exception as ex:
+            st.error(f"Could not prepare integrity test: {ex}")
+    if "pitcher_integrity_result" in st.session_state:
+        ir=st.session_state["pitcher_integrity_result"] or {}; tab=ir.get("table",pd.DataFrame())
+        if st.session_state.pop("pitcher_integrity_just_completed",False):
+            st.success("Integrity test complete — results below.")
+        if tab is None or tab.empty:
+            st.error("Integrity test returned no rows.")
+        else:
+            st.markdown("**Integrity ladder**")
+            st.dataframe(tab.round({"Model_Weight":2,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            rows={r.get("Test"):r for _,r in tab.iterrows()}
+            corr=rows.get("Correct starters • ≤6h"); scr=rows.get("Scrambled starters placebo • ≤6h")
+            if corr is not None and scr is not None and pd.isna(corr.get("Error",np.nan)) and pd.isna(scr.get("Error",np.nan)):
+                cimp=float(corr.get("Brier_Improvement",0) or 0); simp=float(scr.get("Brier_Improvement",0) or 0); cwt=float(corr.get("Model_Weight",0) or 0); swt=float(scr.get("Model_Weight",0) or 0)
+                if cimp>0 and cwt>0 and (simp<=0 or swt<cwt):
+                    st.success("PASS signal: correct starter information materially outperforms the scrambled-starter placebo.")
+                else:
+                    st.warning("WARNING: the placebo did not deteriorate enough. Do not move the pitcher model into production yet.")
+            seg=ir.get("segments",pd.DataFrame())
+            if seg is not None and not seg.empty:
+                with st.expander("Correct-starter 2025 robustness splits",expanded=True):
+                    st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download Integrity Summary CSV",tab.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_integrity_summary.csv",mime="text/csv",key="dl_integrity_summary")
+            if seg is not None and not seg.empty:
+                st.download_button("Download Integrity Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pit_pitcher_integrity_segments.csv",mime="text/csv",key="dl_integrity_segments")
     st.divider()
     uploaded_bt = st.file_uploader(
         "Upload completed backtest dataset",
