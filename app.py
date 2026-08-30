@@ -22,7 +22,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.9.3-CLEAN-UX"
+APP_VERSION = "0.9.4-STREAMLINED"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -517,6 +517,30 @@ div[data-testid="stExpander"] details summary p{
   .action-type{grid-column:2}
   .topbet-card{grid-template-columns:26px 32px 1fr auto !important}
   .topbet-metrics{grid-column:1 / 5 !important}
+}
+
+
+/* ===== v0.9.4 STREAMLINED ===== */
+.stButton > button{
+  background:rgba(15,29,47,.92) !important;
+  color:#d7e2ee !important;
+  border:1px solid rgba(148,163,184,.16) !important;
+  box-shadow:none !important;
+}
+.stButton > button:disabled{
+  background:rgba(15,29,47,.42) !important;
+  color:#607388 !important;
+  border-color:rgba(148,163,184,.08) !important;
+  opacity:1 !important;
+}
+.custom-result-summary{
+  margin-top:9px;padding:10px 12px;border-radius:12px;
+  background:rgba(255,255,255,.025);
+  border:1px solid rgba(148,163,184,.08);
+}
+.custom-result-summary b{color:#edf4fb;font-size:.84rem}
+.custom-result-summary span{
+  display:block;margin-top:3px;color:#758ba2;font-size:.63rem;line-height:1.45
 }
 
 </style>
@@ -2432,12 +2456,21 @@ if "last_results" in st.session_state:
         over_odds = st.session_state[f"over_odds_{row['GamePk']}"]
         under_odds = st.session_state[f"under_odds_{row['GamePk']}"]
 
+        # Custom-price testing is secondary. Do not repeat the live-market board.
         grade_allowed = auto_market_ok or use_manual_fallback
-        if st.button(
-            "Grade Edited Market",
-            disabled=not grade_allowed,
-            help=None if grade_allowed else "Fix the automatic odds feed or enable manual odds fallback first.",
-        ):
+        grade_clicked = False
+
+        # When the live API market is present, the primary recommendation is already above.
+        # Keep edited-price testing inside Advanced Tools only by requiring explicit manual fallback
+        # when the automatic feed is unavailable.
+        if not auto_market_ok:
+            grade_clicked = st.button(
+                "Grade Edited Market",
+                disabled=not grade_allowed,
+                help=None if grade_allowed else "Enable manual odds fallback first.",
+            )
+
+        if grade_clicked:
             markets = []
             add_market(markets, f"{away} ML", row["Away_WinProb"], away_ml, conf)
             add_market(markets, f"{home} ML", row["Home_WinProb"], home_ml, conf)
@@ -2464,7 +2497,6 @@ if "last_results" in st.session_state:
                     "Edge": over_edge,
                     "EV": over_ev,
                     "Model Fair": fair_ml(over_model_prob),
-                    "Push Prob": over_probs["push"],
                 },
                 {
                     "Bet": f"Under {total_line:g}",
@@ -2475,7 +2507,6 @@ if "last_results" in st.session_state:
                     "Edge": under_edge,
                     "EV": under_ev,
                     "Model Fair": fair_ml(under_model_prob),
-                    "Push Prob": under_probs["push"],
                 },
             ])
 
@@ -2487,40 +2518,19 @@ if "last_results" in st.session_state:
             ).drop(columns="_rank")
 
             best = market_df.iloc[0]
-            if best["Verdict"] in ["STRONG BET", "BET"]:
-                st.success(
-                    f"{icon(best['Verdict'])} **{best['Verdict']}: "
-                    f"{best['Bet']} {int(best['Odds']):+d}**\n\n"
-                    f"Model edge: **{best['Edge']*100:+.1f}%** • "
-                    f"EV: **{best['EV']*100:+.1f}%**"
-                )
-            elif best["Verdict"] == "LEAN":
-                st.warning(
-                    f"🟡 **LEAN ONLY: {best['Bet']} {int(best['Odds']):+d}**\n\n"
-                    "Positive model value, but it does not clear the bet threshold."
-                )
-            else:
-                st.info("⚪ **NO BET / PASS** — no current market clears the threshold.")
-
-            st.markdown("#### Custom Market Results")
-            for _, m in market_df.iterrows():
-                push_text = ""
-                if "Push Prob" in m and pd.notna(m.get("Push Prob")) and float(m.get("Push Prob", 0)) > 0:
-                    push_text = f" • Push {float(m['Push Prob'])*100:.1f}%"
-                st.markdown(
-                    f"""<div class="bet-card">
-                    <div class="bet-big">{icon(m['Verdict'])} {m['Verdict']} — {m['Bet']} {int(m['Odds']):+d}</div>
-                    Model {m['Model Prob']*100:.1f}% • Implied {m['Implied Prob']*100:.1f}% •
-                    Edge {m['Edge']*100:+.1f}% • EV {m['EV']*100:+.1f}% •
-                    Fair {int(m['Model Fair']):+d}{push_text} • {juice_thresholds(int(m['Odds']))['tier']}
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
-
-            st.caption(
-                "Single-game pricing is now pulled automatically from the same generic consensus market used by Full Slate. "
-                "Moneyline, run line and total are all graded together. Totals remain experimental."
+            st.markdown(
+                f"""
+                <div class="custom-result-summary">
+                  <b>{user_verdict(best['Verdict'])} — {html.escape(str(best['Bet']))} {int(best['Odds']):+d}</b>
+                  <span>
+                    Win {best['Model Prob']*100:.1f}% • Edge {best['Edge']*100:+.1f}% •
+                    EV {best['EV']*100:+.1f}% • Fair {int(best['Model Fair']):+d}
+                  </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
+            st.caption("Edited-price test only. The automatic live-market recommendation remains the primary view above.")
 
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Download Result CSV", data=csv, file_name=f"mlb_model_{away.replace(' ', '_')}_at_{home.replace(' ', '_')}.csv", mime="text/csv")
