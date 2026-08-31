@@ -9,7 +9,7 @@ import streamlit as st
 
 from model import MODEL_VERSION, fetch_today_games, run_model, implied_prob, expected_value, fair_ml, TEAM_IDS, load_team_ids
 
-APP_VERSION = "1.0.0-PRODUCTION-MONEYLINE"
+APP_VERSION = "1.0.1-UX-RESTORE"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -28,8 +28,8 @@ header[data-testid="stHeader"]{background:rgba(6,17,31,.78);backdrop-filter:blur
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}.metric{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.05)}.metric span{display:block;font-size:.53rem;font-weight:900;letter-spacing:.07em;color:#677f98;text-transform:uppercase}.metric b{display:block;font-size:.78rem;color:#eaf2f9;margin-top:2px}
 .game-card{margin:9px 0;padding:13px 14px;border-radius:16px;background:linear-gradient(180deg,rgba(14,29,49,.97),rgba(9,21,37,.98));border:1px solid rgba(148,163,184,.10)}.game-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.game-time{font-size:.60rem;color:#6f87a0;font-weight:850;letter-spacing:.05em}.match{font-size:.91rem;font-weight:950;color:#eef5fb;margin-top:3px}.sp{font-size:.64rem;color:#8298af;margin-top:3px}.pick{margin-top:10px;padding:10px 11px;border-radius:11px;background:rgba(5,16,30,.62);display:flex;justify-content:space-between;gap:10px;align-items:center}.pick-main{font-size:.92rem;font-weight:950;color:#f7fafc}.pick-sub{font-size:.62rem;color:#7890aa;margin-top:3px}.lineup-ok{color:#86efac}.lineup-wait{color:#fde68a}
 .note{padding:11px 12px;border-radius:12px;background:rgba(59,130,246,.06);border:1px solid rgba(96,165,250,.12);color:#91a7bd;font-size:.72rem;line-height:1.45}
-.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
-@media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
+.single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
+@media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.detail-grid{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -242,64 +242,131 @@ if not games:
 if not candidates:
     st.warning("The model loaded the slate, but no games could be matched to a two-way moneyline market yet. Refresh closer to game time if lines are not posted.")
 else:
-    official=[x for x in candidates if x["best"]["verdict"] in ("BEST BET","BET")]
-    best=(official or candidates)[0]
-    b=best["best"]
-    lineup_text="Confirmed lineups" if best["lineup_confirmed"] else "Lineups not fully confirmed"
-    st.markdown('<div class="kicker">Top Recommendation</div>',unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class="best-card">
-      <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-      <div class="metrics">
-        <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
-        <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
-        <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
-        <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
-      </div>
-      <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {best['alpha']*100:.0f}% / market {100-best['alpha']*100:.0f}% • {best['books']} books in consensus</div>
-    </div>
-    """,unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Mode</div>', unsafe_allow_html=True)
+    mode = st.radio(
+        "View mode",
+        ["🎯 Single Game", "📋 Full Slate"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="production_view_mode",
+    )
 
-    st.markdown('<div class="kicker">Official Card</div>',unsafe_allow_html=True)
-    if not official:
-        st.info("No moneyline cleared the official BET threshold right now. The strongest available lean is shown above.")
-    else:
-        for i,x in enumerate(official[:5],1):
-            b=x["best"]
-            st.markdown(f"""
-            <div class="game-card">
-              <div class="game-head"><div><div class="game-time">#{i} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-              <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d}</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div>
-            </div>
-            """,unsafe_allow_html=True)
-
-    st.markdown('<div class="kicker">Full Slate</div>',unsafe_allow_html=True)
-    # Chronological presentation, not ranking, for the full board.
     def start_sort(x):
         try:
             g=next(g for g in games if g.get("GamePk")==x["GamePk"])
             return pd.to_datetime(g.get("GameDate"),utc=True)
         except Exception:
             return pd.Timestamp.max.tz_localize("UTC")
-    for x in sorted(candidates,key=start_sort):
-        b=x["best"]
-        with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['verdict']}",expanded=False):
-            st.markdown(f"""
-            <div class="game-card" style="margin-top:0">
-              <div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-              <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>
-            </div>
-            """,unsafe_allow_html=True)
-            a,h=x["all"]
-            st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market. {x['lineup_status']}.")
-            if x.get("confidence_reasons"):
-                st.caption(f"Data notes: {x['confidence_reasons']}")
 
-    export=[]
-    for x in candidates:
-        b=x["best"]
-        export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML","Odds":b["odds"],"Book":b["book"],"Verdict":b["verdict"],"Calibrated_Prob":b["prob"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Model_Weight":x["alpha"],"Model_Version":MODEL_VERSION})
-    st.download_button("Download Today's Moneyline Board",pd.DataFrame(export).to_csv(index=False).encode("utf-8"),file_name="mlb_production_moneyline_board.csv",mime="text/csv",use_container_width=True)
+    if mode == "🎯 Single Game":
+        chrono = sorted(candidates, key=start_sort)
+        labels = [f"{x['time']} • {x['away']} @ {x['home']}" for x in chrono]
+        selected_label = st.selectbox("Choose matchup", labels, index=0)
+        x = chrono[labels.index(selected_label)]
+        b = x["best"]
+        away_side = next(z for z in x["all"] if z["team"] == x["away"])
+        home_side = next(z for z in x["all"] if z["team"] == x["home"])
+        lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
+
+        st.markdown('<div class="kicker">Single Game Analysis</div>', unsafe_allow_html=True)
+        st.markdown(f'''
+        <div class="best-card">
+          <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
+          <div class="metrics">
+            <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
+            <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
+            <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
+            <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
+          </div>
+          <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Matchup Detail</div>', unsafe_allow_html=True)
+        st.markdown(f'''
+        <div class="single-summary">
+          <div class="match">{x['away']} @ {x['home']}</div>
+          <div class="sp">{x['away_sp']} vs {x['home_sp']}</div>
+          <div class="detail-grid">
+            <div class="detail"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div>
+            <div class="detail"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div>
+            <div class="detail"><span>Projected runs</span><b>{x['away_proj']:.2f} – {x['home_proj']:.2f}</b></div>
+            <div class="detail"><span>{x['away']} fair ML</span><b>{away_side['fair']:+d}</b></div>
+            <div class="detail"><span>{x['home']} fair ML</span><b>{home_side['fair']:+d}</b></div>
+            <div class="detail"><span>Model confidence</span><b>{x['confidence']}/100</b></div>
+          </div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Both Sides</div>', unsafe_allow_html=True)
+        for side in [away_side, home_side]:
+            st.markdown(f'''
+            <div class="game-card">
+              <div class="game-head"><div><div class="pick-main">{side['team']} ML {side['odds']:+d}</div><div class="pick-sub">{side['book']} • Fair {side['fair']:+d}</div></div><div class="badge {cls(side['verdict'])}">{side['verdict']}</div></div>
+              <div class="metrics">
+                <div class="metric"><span>Win chance</span><b>{side['prob']*100:.1f}%</b></div>
+                <div class="metric"><span>Market no-vig</span><b>{side['market_prob']*100:.1f}%</b></div>
+                <div class="metric"><span>Edge</span><b>{side['edge']*100:+.1f}%</b></div>
+                <div class="metric"><span>EV</span><b>{side['ev']*100:+.1f}%</b></div>
+              </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+        st.caption(f"{x['lineup_status']}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market.")
+        if x.get("confidence_reasons"):
+            st.caption(f"Data notes: {x['confidence_reasons']}")
+
+    else:
+        official=[x for x in candidates if x["best"]["verdict"] in ("BEST BET","BET")]
+        best=(official or candidates)[0]
+        b=best["best"]
+        lineup_text="Confirmed lineups" if best["lineup_confirmed"] else "Lineups not fully confirmed"
+        st.markdown('<div class="kicker">Top Recommendation</div>',unsafe_allow_html=True)
+        st.markdown(f'''
+        <div class="best-card">
+          <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
+          <div class="metrics">
+            <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
+            <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
+            <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
+            <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
+          </div>
+          <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {best['alpha']*100:.0f}% / market {100-best['alpha']*100:.0f}% • {best['books']} books in consensus</div>
+        </div>
+        ''',unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Official Card</div>',unsafe_allow_html=True)
+        if not official:
+            st.info("No moneyline cleared the official BET threshold right now. The strongest available lean is shown above.")
+        else:
+            for i,x in enumerate(official[:5],1):
+                b=x["best"]
+                st.markdown(f'''
+                <div class="game-card">
+                  <div class="game-head"><div><div class="game-time">#{i} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
+                  <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d}</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div>
+                </div>
+                ''',unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Full Slate</div>',unsafe_allow_html=True)
+        for x in sorted(candidates,key=start_sort):
+            b=x["best"]
+            with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['verdict']}",expanded=False):
+                st.markdown(f'''
+                <div class="game-card" style="margin-top:0">
+                  <div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
+                  <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>
+                </div>
+                ''',unsafe_allow_html=True)
+                st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market. {x['lineup_status']}.")
+                if x.get("confidence_reasons"):
+                    st.caption(f"Data notes: {x['confidence_reasons']}")
+
+        export=[]
+        for x in candidates:
+            b=x["best"]
+            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML","Odds":b["odds"],"Book":b["book"],"Verdict":b["verdict"],"Calibrated_Prob":b["prob"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Model_Weight":x["alpha"],"Model_Version":MODEL_VERSION})
+        st.download_button("Download Today's Moneyline Board",pd.DataFrame(export).to_csv(index=False).encode("utf-8"),file_name="mlb_production_moneyline_board.csv",mime="text/csv",use_container_width=True)
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
