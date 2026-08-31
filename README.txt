@@ -1,4 +1,4 @@
-MLB Model v0.14.0 — Point-in-Time Bullpen Test
+MLB Model v0.14.1 — Point-in-Time Bullpen Test
 
 Purpose
 -------
@@ -40,3 +40,8 @@ mlb_pitcher_bullpen_comparison.csv
 Promotion rule
 --------------
 Promote bullpen only if it improves predictive accuracy (especially calibrated 2025 Brier) versus frozen v0.13 without degrading 2024 validation. Do not promote because ROI looks better.
+
+
+v0.14.1 bullpen ingestion fix
+------------------------------
+The original v0.14.0 team-level MLB /stats gameLog request returned zero relief rows for all 90 team-seasons. v0.14.1 replaces it with a historical full-season roster -> player gameLog pipeline, filters each appearance to the requested team when MLB supplies split.team.id, retains only relief appearances (gamesStarted=0), and caches both player-season logs and the finished team-season ledger. A new v141 cache namespace prevents reuse of the broken empty responses. This uses zero Odds API credits.

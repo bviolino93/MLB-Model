@@ -30,7 +30,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.14.0-PIT-BULLPEN"
+APP_VERSION = "0.14.1-PIT-BULLPEN-ROSTER-FIX"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -4136,65 +4136,237 @@ def run_pitcher_model_2_test(master_df,min_prior_games=12,min_pitcher_starts=3):
     }
 
 
-# ===== v0.14 point-in-time bullpen research layer =====
+# ===== v0.14.1 point-in-time bullpen research layer =====
 BULLPEN_CACHE_DIR = Path(".mlb_bullpen_cache")
 BULLPEN_CACHE_DIR.mkdir(exist_ok=True)
 
 
 def _bullpen_cache_file(season, team_id):
-    return BULLPEN_CACHE_DIR / f"team_{int(team_id)}_{int(season)}_pitching_gamelog.json"
+    # v0.14.1 deliberately uses a new cache namespace so the empty/broken
+    # team-level gameLog responses from v0.14.0 can never be reused.
+    return BULLPEN_CACHE_DIR / f"v141_team_{int(team_id)}_{int(season)}_relief_rows.json"
+
+
+def _historical_team_roster(season, team_id):
+    """Return pitcher IDs who appeared on a team's historical season roster.
+
+    MLB's generic /stats?teamId=... gameLog query does not return the
+    per-pitcher appearance ledger we need.  v0.14.1 instead gets the historical
+    full-season roster, then reuses the already-tested player gameLog endpoint
+    from the starter PIT model.
+    """
+    url = f"https://statsapi.mlb.com/api/v1/teams/{int(team_id)}/roster"
+    attempts = ["fullSeason", "40Man", "active"]
+    last_err = None
+    for roster_type in attempts:
+        try:
+            resp = requests.get(
+                url,
+                params={"rosterType": roster_type, "season": int(season), "hydrate": "person"},
+                timeout=35,
+            )
+        except requests.RequestException as ex:
+            last_err = f"roster request failed: {ex}"
+            continue
+        if resp.status_code != 200:
+            last_err = f"roster HTTP {resp.status_code}"
+            continue
+        try:
+            payload = resp.json()
+        except Exception:
+            last_err = "roster response was not valid JSON"
+            continue
+
+        ids = []
+        for item in payload.get("roster", []) or []:
+            person = item.get("person") or {}
+            pos = item.get("position") or person.get("primaryPosition") or {}
+            ptype = str(pos.get("type", "")).lower()
+            pcode = str(pos.get("code", ""))
+            pabbr = str(pos.get("abbreviation", "")).upper()
+            # Pitchers are normally code 1 / type Pitcher. Include two-way
+            # players defensively because their pitching gameLog is still valid.
+            is_pitcher = (ptype == "pitcher") or (pcode == "1") or (pabbr in {"P", "TWP"})
+            pid = person.get("id")
+            if is_pitcher and pid is not None:
+                try:
+                    ids.append(int(pid))
+                except Exception:
+                    pass
+        ids = sorted(set(ids))
+        if ids:
+            return ids, None, roster_type
+        last_err = f"{roster_type} roster contained no pitcher IDs"
+    return [], last_err or "no historical roster data", None
+
+
+def _parse_player_relief_rows_for_team(payload, pitcher_id, team_id, season):
+    """Parse one pitcher's historical gameLog and keep only relief work for team.
+
+    The split-level team ID is required when available so a traded pitcher's
+    appearances for another club do not leak into this team's bullpen history.
+    If MLB omits a split team entirely, the row is retained only as a fallback;
+    the roster itself still anchors the pitcher to the requested team-season.
+    """
+    rows = []
+    target_team = int(team_id)
+    for block in (payload or {}).get("stats", []) or []:
+        for split in block.get("splits", []) or []:
+            stat = split.get("stat") or {}
+            game = split.get("game") or {}
+            raw_date = split.get("date")
+            if not raw_date:
+                continue
+            try:
+                d = pd.to_datetime(raw_date, errors="raise", utc=True)
+            except Exception:
+                continue
+
+            split_team = split.get("team") or {}
+            split_team_id = split_team.get("id")
+            if split_team_id is not None:
+                try:
+                    if int(split_team_id) != target_team:
+                        continue
+                except Exception:
+                    continue
+
+            def num(key, default=0.0):
+                try:
+                    v = stat.get(key)
+                    return float(v) if v not in (None, "", "-") else float(default)
+                except Exception:
+                    return float(default)
+
+            if num("gamesStarted", 0.0) >= 1.0:
+                continue
+
+            try:
+                txt = str(stat.get("inningsPitched", 0.0)).strip()
+                if "." in txt:
+                    whole, outs = txt.split(".", 1)
+                    oi = int(outs)
+                    ip = float(int(whole)) + (oi / 3.0 if oi in (0, 1, 2) else float("nan"))
+                else:
+                    ip = float(txt)
+            except Exception:
+                ip = float("nan")
+            if not np.isfinite(ip) or ip <= 0:
+                continue
+
+            rows.append({
+                "date": d.isoformat(),
+                "gamePk": game.get("gamePk"),
+                "team_id": target_team,
+                "season": int(season),
+                "player_id": int(pitcher_id),
+                "inningsPitched": float(ip),
+                "earnedRuns": num("earnedRuns"),
+                "strikeOuts": num("strikeOuts"),
+                "baseOnBalls": num("baseOnBalls"),
+                "homeRuns": num("homeRuns"),
+                "hits": num("hits"),
+                "hitBatsmen": num("hitBatsmen"),
+                "battersFaced": num("battersFaced"),
+                "numberOfPitches": num("numberOfPitches", np.nan),
+            })
+    return rows
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_team_pitching_gamelog(season, team_id):
-    """Fetch all pitcher-game logs for one MLB team-season in one free MLB Stats API call.
+    """Build one team's relief-appearance ledger from roster + player gameLogs.
 
-    `stats=gameLog` returns pitcher appearances. We later retain appearances where
-    gamesStarted == 0, which gives a point-in-time bullpen ledger without using
-    season-end relief aggregates. Disk + Streamlit caching keeps reruns cheap.
+    This replaces v0.14.0's invalid assumption that the generic MLB /stats
+    endpoint can return every pitcher appearance for a team-season in one call.
+    It costs ZERO Odds API credits. MLB Stats API calls are cached both at the
+    player-season level and as a finished team-season relief ledger.
     """
     cache_file = _bullpen_cache_file(season, team_id)
     if cache_file.exists():
         try:
-            return json.loads(cache_file.read_text()), None, True
+            cached = json.loads(cache_file.read_text())
+            if (cached or {}).get("_relief_rows"):
+                return cached, None, True
         except Exception:
             pass
 
-    url = "https://statsapi.mlb.com/api/v1/stats"
-    params = {
-        "stats": "gameLog",
-        "group": "pitching",
-        "season": int(season),
-        "teamId": int(team_id),
-        "sportIds": 1,
-        "gameType": "R",
-        "playerPool": "ALL",
-        "limit": 1000,
+    pitcher_ids, roster_err, roster_type = _historical_team_roster(season, team_id)
+    if not pitcher_ids:
+        return None, f"Team {team_id} {season} historical roster failed: {roster_err}", False
+
+    rows = []
+    errors = []
+    cache_hits = 0
+
+    # Keep the nested pool small. Outer build_bullpen_feature_table already
+    # parallelizes team-seasons; too much concurrency can make MLB throttle us.
+    def load_pitcher(pid):
+        payload, err, cached = fetch_pitcher_season_gamelog(int(season), int(pid))
+        if err or not payload:
+            return [], err or f"Pitcher {pid} returned no gameLog payload", cached
+        return _parse_player_relief_rows_for_team(payload, pid, team_id, season), None, cached
+
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(pitcher_ids)))) as ex:
+        futs = {ex.submit(load_pitcher, pid): pid for pid in pitcher_ids}
+        for fut in as_completed(futs):
+            pid = futs[fut]
+            try:
+                prow, err, cached = fut.result()
+            except Exception as exc:
+                prow, err, cached = [], f"Pitcher {pid} parse failed: {exc}", False
+            if cached:
+                cache_hits += 1
+            if err:
+                errors.append(err)
+            if prow:
+                rows.extend(prow)
+
+    if rows:
+        # A traded/re-added player can show up more than once in roster payloads;
+        # ensure one pitcher/game appearance only.
+        dedup = {}
+        for row in rows:
+            key = (row.get("player_id"), row.get("gamePk"), row.get("date"))
+            dedup[key] = row
+        rows = list(dedup.values())
+        rows.sort(key=lambda r: (str(r.get("date")), int(r.get("player_id") or 0)))
+
+    out = {
+        "_relief_rows": rows,
+        "_meta": {
+            "team_id": int(team_id),
+            "season": int(season),
+            "roster_type": roster_type,
+            "pitchers_requested": len(pitcher_ids),
+            "player_cache_hits": cache_hits,
+            "player_errors": len(errors),
+        },
     }
-    try:
-        resp = requests.get(url, params=params, timeout=45)
-    except requests.RequestException as ex:
-        return None, f"Team {team_id} {season} pitching log request failed: {ex}", False
-    if resp.status_code != 200:
-        return None, f"Team {team_id} {season} pitching log returned HTTP {resp.status_code}.", False
-    try:
-        payload = resp.json()
-    except Exception:
-        return None, f"Team {team_id} {season} pitching log was not valid JSON.", False
-    try:
-        cache_file.write_text(json.dumps(payload))
-    except Exception:
-        pass
-    return payload, None, False
+    if rows:
+        try:
+            cache_file.write_text(json.dumps(out, allow_nan=True))
+        except Exception:
+            pass
+        return out, None, False
+
+    sample = "; ".join(errors[:2])
+    return None, (
+        f"Team {team_id} {season} roster loaded {len(pitcher_ids)} pitchers but produced "
+        f"no team relief appearances. {sample}"
+    ).strip(), False
 
 
 def parse_team_reliever_gamelog(payload, team_id=None, season=None):
-    """Parse pitcher gameLog splits and retain relief appearances only.
+    """Parse the v0.14.1 synthetic relief ledger (with legacy fallback)."""
+    if isinstance(payload, dict) and "_relief_rows" in payload:
+        df = pd.DataFrame(payload.get("_relief_rows") or [])
+        if df.empty:
+            return df
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
+        return df.dropna(subset=["date"]).copy()
 
-    This deliberately uses the per-game `gamesStarted` flag instead of a player's
-    roster role. A pitcher who starts one game and relieves in another is treated
-    correctly for each appearance.
-    """
+    # Legacy parser retained so old valid cached payloads (if any) remain usable.
     rows = []
     for block in (payload or {}).get("stats", []) or []:
         for split in block.get("splits", []) or []:
@@ -4208,47 +4380,37 @@ def parse_team_reliever_gamelog(payload, team_id=None, season=None):
                 d = pd.to_datetime(raw_date, errors="raise", utc=True)
             except Exception:
                 continue
-
             def num(key, default=0.0):
                 try:
                     v = stat.get(key)
                     return float(v) if v not in (None, "", "-") else float(default)
                 except Exception:
                     return float(default)
-
-            gs = num("gamesStarted", 0.0)
-            if gs >= 1.0:
+            if num("gamesStarted", 0.0) >= 1.0:
                 continue
             try:
-                txt=str(stat.get("inningsPitched",0.0)).strip()
+                txt = str(stat.get("inningsPitched", 0.0)).strip()
                 if "." in txt:
-                    whole,outs=txt.split(".",1); oi=int(outs)
-                    ip=float(int(whole)) + (oi/3.0 if oi in (0,1,2) else float("nan"))
+                    whole, outs = txt.split(".", 1); oi = int(outs)
+                    ip = float(int(whole)) + (oi / 3.0 if oi in (0, 1, 2) else float("nan"))
                 else:
-                    ip=float(txt)
+                    ip = float(txt)
             except Exception:
-                ip=float("nan")
+                ip = float("nan")
             if not np.isfinite(ip) or ip <= 0:
                 continue
-            pid = person.get("id")
             rows.append({
-                "date": d,
-                "gamePk": game.get("gamePk"),
+                "date": d, "gamePk": game.get("gamePk"),
                 "team_id": int(team_id) if team_id is not None else np.nan,
                 "season": int(season) if season is not None else d.year,
-                "player_id": pid,
-                "inningsPitched": float(ip),
-                "earnedRuns": num("earnedRuns"),
-                "strikeOuts": num("strikeOuts"),
-                "baseOnBalls": num("baseOnBalls"),
-                "homeRuns": num("homeRuns"),
-                "hits": num("hits"),
-                "hitBatsmen": num("hitBatsmen"),
+                "player_id": person.get("id"), "inningsPitched": float(ip),
+                "earnedRuns": num("earnedRuns"), "strikeOuts": num("strikeOuts"),
+                "baseOnBalls": num("baseOnBalls"), "homeRuns": num("homeRuns"),
+                "hits": num("hits"), "hitBatsmen": num("hitBatsmen"),
                 "battersFaced": num("battersFaced"),
                 "numberOfPitches": num("numberOfPitches", np.nan),
             })
     return pd.DataFrame(rows)
-
 
 def summarize_bullpen_before_game(relief_df, game_time, min_relief_ip=12.0):
     """Build a bullpen profile using only relief appearances before target game.
@@ -4369,7 +4531,7 @@ def build_bullpen_feature_table(master_df, min_prior_team_games=12, min_pitcher_
     ledgers={}; errors=[]; cache_hits=0
     pairs_sorted=sorted(pairs)
     max_workers=min(6,max(1,len(pairs_sorted)))
-    status.caption(f"Loading free MLB bullpen histories • {len(pairs_sorted)} team-seasons")
+    status.caption(f"Loading roster-based MLB bullpen histories • {len(pairs_sorted)} team-seasons")
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         fut={ex.submit(fetch_team_pitching_gamelog,season,tid):(season,tid) for season,tid in pairs_sorted}
         done=0
@@ -4388,13 +4550,13 @@ def build_bullpen_feature_table(master_df, min_prior_team_games=12, min_pitcher_
                 if not df.empty:
                     ledgers[(season,tid)]=df
                 else:
-                    errors.append(f"Team {tid} {season} returned no relief game-log rows.")
+                    errors.append(f"Team {tid} {season} returned no roster/player relief rows.")
             prog.progress(min(100,int(done*100/len(pairs_sorted))),text=f"Bullpen histories • {done}/{len(pairs_sorted)}")
     status.empty(); prog.empty()
 
     if len(ledgers) < max(10, int(len(pairs_sorted)*0.70)):
         sample="; ".join(errors[:3])
-        raise ValueError(f"Bullpen game-log coverage too low ({len(ledgers)}/{len(pairs_sorted)} team-seasons). {sample}")
+        raise ValueError(f"Bullpen roster/player coverage too low ({len(ledgers)}/{len(pairs_sorted)} team-seasons). {sample}")
 
     rows=[]
     feat_names=None
@@ -5975,9 +6137,9 @@ if mode == "Backtest Lab":
                 if isinstance(bets,pd.DataFrame) and not bets.empty:
                     st.download_button("Download v0.13 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_model_2_bets_2025.csv",mime="text/csv",key="dl_v13_bets")
     st.divider()
-    st.markdown('<div class="section-kicker">v0.14.0 • PIT BULLPEN TEST</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-kicker">v0.14.1 • PIT BULLPEN TEST</div>', unsafe_allow_html=True)
     st.caption("Frozen v0.13 Pitcher Model 2.0 versus Pitcher 2.0 + point-in-time bullpen quality and availability. Same ≤6h, no-doubleheader walk-forward protocol.")
-    st.info("Bullpen data comes from free MLB pitcher game logs and is filtered strictly to relief appearances before each target game. Adds season-shrunk relief skill, 7/14-day form, 1/3-day workload, heavy-use arms and back-to-back availability. 2025 never selects the blend or betting thresholds.")
+    st.info("Bullpen data comes from historical MLB full-season rosters plus each pitcher's free MLB game log, filtered strictly to relief appearances for that team before each target game. Adds season-shrunk relief skill, 7/14-day form, 1/3-day workload, heavy-use arms and back-to-back availability. 2025 never selects the blend or betting thresholds.")
     v14_upload=st.file_uploader("Upload Moneyline Master CSV for Bullpen Test",type=["csv"],key="bullpen_v14_upload")
     if v14_upload is not None:
         try:
@@ -5993,7 +6155,7 @@ if mode == "Backtest Lab":
                 st.rerun()
             if st.session_state.get("v14_bullpen_pending",False):
                 rt,rs,rip=st.session_state.get("v14_bullpen_params",(v14_team,v14_starts,v14_bpip))
-                st.info("Bullpen test started. First run may take a few minutes while team-season relief logs are cached; reruns should be much faster.")
+                st.info("Bullpen test started. First run may take a few minutes while historical rosters and pitcher-season relief logs are cached; reruns should be much faster.")
                 prog14=st.progress(5,text="Building point-in-time pitcher + bullpen states…")
                 try:
                     out=run_pitcher_bullpen_test(v14_master,min_prior_games=rt,min_pitcher_starts=rs,min_bullpen_ip=rip)
