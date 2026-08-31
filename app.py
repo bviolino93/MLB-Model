@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.4-SINGLE-GAME-ODDS"
+APP_VERSION = "1.0.4.1-UI-RUNTIME-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -47,7 +47,7 @@ header[data-testid="stHeader"]{background:rgba(6,17,31,.78);backdrop-filter:blur
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}.metric{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.05)}.metric span{display:block;font-size:.53rem;font-weight:900;letter-spacing:.07em;color:#677f98;text-transform:uppercase}.metric b{display:block;font-size:.78rem;color:#eaf2f9;margin-top:2px}
 .game-card{margin:9px 0;padding:13px 14px;border-radius:16px;background:linear-gradient(180deg,rgba(14,29,49,.97),rgba(9,21,37,.98));border:1px solid rgba(148,163,184,.10)}.game-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.game-time{font-size:.60rem;color:#6f87a0;font-weight:850;letter-spacing:.05em}.match{font-size:.91rem;font-weight:950;color:#eef5fb;margin-top:3px}.sp{font-size:.64rem;color:#8298af;margin-top:3px}.pick{margin-top:10px;padding:10px 11px;border-radius:11px;background:rgba(5,16,30,.62);display:flex;justify-content:space-between;gap:10px;align-items:center}.pick-main{font-size:.92rem;font-weight:950;color:#f7fafc}.pick-sub{font-size:.62rem;color:#7890aa;margin-top:3px}.lineup-ok{color:#86efac}.lineup-wait{color:#fde68a}
 .note{padding:11px 12px;border-radius:12px;background:rgba(59,130,246,.06);border:1px solid rgba(96,165,250,.12);color:#91a7bd;font-size:.72rem;line-height:1.45}
-.single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
+.single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850!important;background:#123252!important;color:#f8fbff!important;border:1px solid #2d5b82!important;box-shadow:none!important}.stButton>button:hover{background:#174267!important;border-color:#4c86b5!important;color:#fff!important}.stButton>button:focus{color:#fff!important}.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{background:#0f766e!important;color:#fff!important;border-color:#2dd4bf!important}.stButton>button:disabled{background:#17263a!important;color:#8fa3ba!important;border-color:#2a3a4e!important;opacity:1!important}div[data-testid="stRadio"] label,div[data-testid="stRadio"] label p,div[data-testid="stRadio"] span{color:#eef5fb!important;opacity:1!important}div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p{color:#eef5fb!important}div[data-testid="stSelectbox"] label,div[data-testid="stDateInput"] label{color:#dbeafe!important}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
 @media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.detail-grid{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
 </style>
 """, unsafe_allow_html=True)
@@ -439,23 +439,41 @@ else:
             st.caption(f"Data notes: {x['confidence_reasons']}")
 
     else:
-        official=[x for x in candidates if x["best"]["verdict"] in ("BEST BET","BET")]
-        best=(official or candidates)[0]
+        official=[x for x in candidates if x["market_available"] and x["best"]["verdict"] in ("BEST BET","BET")]
+        priced=[x for x in candidates if x["market_available"]]
+        best=(official or priced or candidates)[0]
         b=best["best"]
         lineup_text="Confirmed lineups" if best["lineup_confirmed"] else "Lineups not fully confirmed"
         st.markdown('<div class="kicker">Top Recommendation</div>',unsafe_allow_html=True)
-        st.markdown(f'''
-        <div class="best-card">
-          <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-          <div class="metrics">
-            <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
-            <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
-            <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
-            <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
-          </div>
-          <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {best['alpha']*100:.0f}% / market {100-best['alpha']*100:.0f}% • {best['books']} books in consensus</div>
-        </div>
-        ''',unsafe_allow_html=True)
+        if best["market_available"]:
+            st.markdown(f'''
+            <div class="best-card">
+              <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
+              <div class="metrics">
+                <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
+                <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
+                <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
+                <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
+              </div>
+              <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {best['alpha']*100:.0f}% / market {(1-best['alpha'])*100:.0f}% • {best['books']} books in consensus</div>
+            </div>
+            ''',unsafe_allow_html=True)
+        else:
+            away_side=next(z for z in best["all"] if z["team"]==best["away"])
+            home_side=next(z for z in best["all"] if z["team"]==best["home"])
+            fav=away_side if away_side["prob"]>=home_side["prob"] else home_side
+            st.markdown(f'''
+            <div class="best-card">
+              <div class="best-top"><div><div class="best-tag">MODEL VIEW</div><div class="best-pick">{fav['team']} {fav['prob']*100:.1f}%</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • market not loaded</div></div><div class="badge badge-lean">MODEL ONLY</div></div>
+              <div class="metrics">
+                <div class="metric"><span>{best['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div>
+                <div class="metric"><span>{best['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div>
+                <div class="metric"><span>{best['away']} fair</span><b>{away_side['fair']:+d}</b></div>
+                <div class="metric"><span>{best['home']} fair</span><b>{home_side['fair']:+d}</b></div>
+              </div>
+              <div class="best-game" style="margin-top:10px">{lineup_text} • Model confidence {best['confidence']}/100 • Load full-slate odds only when you want priced recommendations</div>
+            </div>
+            ''',unsafe_allow_html=True)
 
         st.markdown('<div class="kicker">Official Card</div>',unsafe_allow_html=True)
         if official:
