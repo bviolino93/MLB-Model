@@ -1,38 +1,29 @@
-
 import math
-import time
-import warnings
-import requests
-import numpy as np
-import pandas as pd
-
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from pybaseball import statcast_pitcher
-from scipy.stats import skellam
+import numpy as np
+import pandas as pd
+import requests
 
-warnings.filterwarnings("ignore")
-
-MODEL_VERSION = "0.5.4-LITE-MARKET-SAFE"
-APP_VERSION = "0.6.0-WEB"
+MODEL_VERSION = "1.1.0-PRODUCTION-ML-TOTALS-RESEARCH"
 MLB_API = "https://statsapi.mlb.com/api"
 
 BASE_RUNS_PER_TEAM = 4.45
 HOME_RUN_ADVANTAGE = 0.12
 PYTH_EXPONENT = 1.83
-
 STARTER_IMPACT = 1.35
-BULLPEN_IMPACT = 0.90
-TEAM_STRENGTH_EXPONENT = 0.50
 
-USE_PARK = True
-USE_PLATOON = True
-USE_WEATHER = True
-USE_TRAVEL_REST = True
-USE_BULLPEN_USAGE = True
-USE_TEAM_STRENGTH = True
+TEAM_IDS = {}
+_json_cache = {}
+_pitcher_cache = {}
+_hitting_cache = {}
+_platoon_cache = {}
+_feed_cache = {}
+_hitter_cache = {}
+_hand_cache = {}
 
+# Totals research context only. These factors do NOT alter the frozen moneyline engine.
 PARKS = {
     "Coors Field": {"factor": 1.10, "lat": 39.7559, "lon": -104.9942},
     "Great American Ball Park": {"factor": 1.05, "lat": 39.0979, "lon": -84.5082},
@@ -68,980 +59,631 @@ PARKS = {
     "Rate Field": {"factor": 1.01, "lat": 41.8300, "lon": -87.6338},
     "Guaranteed Rate Field": {"factor": 1.01, "lat": 41.8300, "lon": -87.6338},
 }
+_totals_weather_cache = {}
 
-team_offense_cache = {}
-team_strength_cache = {}
-platoon_cache = {}
-pitch_log_cache = {}
-pitcher_season_cache = {}
-starter_quality_cache = {}
-pitcher_hand_cache = {}
-roster_cache = {}
-reliever_cache = {}
-bullpen_cache = {}
-feed_cache = {}
-hitter_cache = {}
-weather_cache = {}
-rest_cache = {}
-
-TEAM_IDS = {}
-PROBABLE_BY_TEAM = {}
 
 def today_et():
     return datetime.now(ZoneInfo("America/New_York")).date()
 
+
+def now_et():
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
 def season_now():
     return today_et().year
 
-def get_json(url, params=None):
-    try:
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {}
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, float(x)))
+
 
 def safe_float(x, default=np.nan):
     try:
-        if x in [None, "", "-", "--"]:
+        if x in (None, "", "-", "--"):
             return default
         return float(x)
     except Exception:
         return default
 
-def clamp(x, lo, hi):
-    return max(lo, min(hi, float(x)))
 
 def ip_to_decimal(ip):
     try:
         s = str(ip)
         if "." not in s:
             return float(s)
-        whole, outs = s.split(".")
-        return float(whole) + float(outs) / 3
+        whole, outs = s.split(".", 1)
+        return float(whole) + float(outs) / 3.0
     except Exception:
         return 0.0
 
+
 def fair_ml(prob):
-    prob = clamp(prob, 0.001, 0.999)
-    if prob >= 0.50:
-        return int(round(-100 * prob / (1 - prob)))
-    return int(round(100 * (1 - prob) / prob))
+    p = clamp(prob, 0.001, 0.999)
+    if p >= 0.5:
+        return int(round(-100 * p / (1 - p)))
+    return int(round(100 * (1 - p) / p))
+
 
 def implied_prob(odds):
-    odds = float(odds)
-    if odds == 0 or abs(odds) < 100:
+    o = float(odds)
+    if o == 0 or abs(o) < 100:
         raise ValueError(f"Invalid American odds: {odds}")
-    if odds > 0:
-        return 100.0 / (odds + 100.0)
-    return abs(odds) / (abs(odds) + 100.0)
+    return 100.0 / (o + 100.0) if o > 0 else abs(o) / (abs(o) + 100.0)
+
 
 def expected_value(prob, odds):
-    odds = float(odds)
-    if odds > 0:
-        profit = odds / 100.0
-    else:
-        profit = 100.0 / abs(odds)
-    return prob * profit - (1.0 - prob)
+    o = float(odds)
+    profit = o / 100.0 if o > 0 else 100.0 / abs(o)
+    return float(prob) * profit - (1.0 - float(prob))
+
 
 def win_prob(runs_for, runs_against):
-    return (runs_for ** PYTH_EXPONENT) / (
-        runs_for ** PYTH_EXPONENT + runs_against ** PYTH_EXPONENT
-    )
+    rf = max(0.01, float(runs_for))
+    ra = max(0.01, float(runs_against))
+    return (rf ** PYTH_EXPONENT) / ((rf ** PYTH_EXPONENT) + (ra ** PYTH_EXPONENT))
 
-def haversine(lat1, lon1, lat2, lon2):
-    if any(pd.isna(x) for x in [lat1, lon1, lat2, lon2]):
-        return 0.0
-    r = 3958.8
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
 
-def run_line_probs(away_runs, home_runs):
-    away_runs = max(0.10, float(away_runs))
-    home_runs = max(0.10, float(home_runs))
-    return {
-        "Away_-1.5_Prob": 1 - skellam.cdf(1, away_runs, home_runs),
-        "Away_+1.5_Prob": 1 - skellam.cdf(-2, away_runs, home_runs),
-        "Home_-1.5_Prob": skellam.cdf(-2, away_runs, home_runs),
-        "Home_+1.5_Prob": skellam.cdf(1, away_runs, home_runs),
-    }
+def get_json(url, params=None, cache_key=None):
+    key = cache_key or (url, tuple(sorted((params or {}).items())))
+    if key in _json_cache:
+        return _json_cache[key]
+    try:
+        r = requests.get(url, params=params, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        data = {}
+    _json_cache[key] = data
+    return data
+
 
 def load_team_ids():
     global TEAM_IDS
-    data = get_json(f"{MLB_API}/v1/teams", {"sportId": 1})
-    TEAM_IDS = {t["name"]: t["id"] for t in data.get("teams", [])}
+    data = get_json(f"{MLB_API}/v1/teams", {"sportId": 1}, cache_key="teams")
+    TEAM_IDS = {t.get("name"): t.get("id") for t in data.get("teams", []) if t.get("name") and t.get("id")}
     return TEAM_IDS
 
-def fetch_today_games():
-    global TEAM_IDS
+
+def fetch_games_for_date(selected_date=None):
+    """Fetch the free MLB schedule for a selected current/upcoming date.
+
+    This function never calls The Odds API and therefore never consumes odds credits.
+    """
     if not TEAM_IDS:
         load_team_ids()
-
-    today = today_et()
-    schedule = get_json(
+    if selected_date is None:
+        selected_date = today_et()
+    try:
+        day = pd.Timestamp(selected_date).date().strftime("%Y-%m-%d")
+    except Exception:
+        day = today_et().strftime("%Y-%m-%d")
+    data = get_json(
         f"{MLB_API}/v1/schedule",
-        {
-            "sportId": 1,
-            "date": today.strftime("%Y-%m-%d"),
-            "hydrate": "probablePitcher,venue",
-        },
+        {"sportId": 1, "date": day, "hydrate": "probablePitcher,venue"},
+        cache_key=("schedule", day),
     )
     games = []
-    for block in schedule.get("dates", []):
+    for block in data.get("dates", []):
         for g in block.get("games", []):
-            away = g["teams"]["away"]["team"]["name"]
-            home = g["teams"]["home"]["team"]["name"]
-            away_sp = g["teams"]["away"].get("probablePitcher", {})
-            home_sp = g["teams"]["home"].get("probablePitcher", {})
+            away = g.get("teams", {}).get("away", {})
+            home = g.get("teams", {}).get("home", {})
+            asp = away.get("probablePitcher", {}) or {}
+            hsp = home.get("probablePitcher", {}) or {}
             game_date = g.get("gameDate")
             try:
-                game_dt = pd.to_datetime(game_date, utc=True)
-                game_et = game_dt.tz_convert("America/New_York")
-                time_label = game_et.strftime("%-I:%M %p")
+                dt = pd.to_datetime(game_date, utc=True).tz_convert("America/New_York")
+                time_label = dt.strftime("%-I:%M %p")
+                hours_to_game = (dt.to_pydatetime() - now_et()).total_seconds() / 3600.0
             except Exception:
                 time_label = ""
-            games.append(
-                {
-                    "GamePk": g["gamePk"],
-                    "Away": away,
-                    "Home": home,
-                    "Away_SP": away_sp.get("fullName"),
-                    "Away_SP_ID": away_sp.get("id"),
-                    "Home_SP": home_sp.get("fullName"),
-                    "Home_SP_ID": home_sp.get("id"),
-                    "Venue": g.get("venue", {}).get("name", ""),
-                    "GameDate": game_date,
-                    "GameNumber": safe_float(g.get("gameNumber"), 1),
-                    "DoubleHeader": g.get("doubleHeader", "N"),
-                    "TimeLabel": time_label,
-                }
-            )
+                hours_to_game = np.nan
+            games.append({
+                "GamePk": g.get("gamePk"),
+                "Away": away.get("team", {}).get("name"),
+                "Home": home.get("team", {}).get("name"),
+                "Away_SP": asp.get("fullName"),
+                "Away_SP_ID": asp.get("id"),
+                "Home_SP": hsp.get("fullName"),
+                "Home_SP_ID": hsp.get("id"),
+                "Venue": g.get("venue", {}).get("name", ""),
+                "GameDate": game_date,
+                "TimeLabel": time_label,
+                "HoursToGame": hours_to_game,
+                "GameNumber": int(safe_float(g.get("gameNumber"), 1)),
+                "DoubleHeader": g.get("doubleHeader", "N"),
+            })
     return games
 
-def set_probable_pitchers(games):
-    global PROBABLE_BY_TEAM
-    PROBABLE_BY_TEAM = {}
-    for g in games:
-        if g["Away_SP_ID"]:
-            PROBABLE_BY_TEAM[g["Away"]] = g["Away_SP_ID"]
-        if g["Home_SP_ID"]:
-            PROBABLE_BY_TEAM[g["Home"]] = g["Home_SP_ID"]
+
+def fetch_today_games():
+    """Backward-compatible alias for today's slate."""
+    return fetch_games_for_date(today_et())
+
 
 def pitcher_hand(player_id):
     if not player_id:
         return "U"
-    if player_id in pitcher_hand_cache:
-        return pitcher_hand_cache[player_id]
-    data = get_json(f"{MLB_API}/v1/people/{player_id}")
+    if player_id in _hand_cache:
+        return _hand_cache[player_id]
+    data = get_json(f"{MLB_API}/v1/people/{player_id}", cache_key=("person", player_id))
     try:
         hand = data["people"][0].get("pitchHand", {}).get("code", "U")
     except Exception:
         hand = "U"
-    pitcher_hand_cache[player_id] = hand
+    _hand_cache[player_id] = hand
     return hand
 
-def team_offense(team_name):
-    if team_name in team_offense_cache:
-        return team_offense_cache[team_name]
-    team_id = TEAM_IDS.get(team_name)
-    result = {"OPS": 0.720, "RunsPG": BASE_RUNS_PER_TEAM, "Factor": 1.00}
-    if not team_id:
-        return result
-    data = get_json(
-        f"{MLB_API}/v1/teams/{team_id}/stats",
-        {"stats": "season", "group": "hitting", "season": season_now()},
-    )
-    try:
-        stat = data["stats"][0]["splits"][0]["stat"]
-        ops = safe_float(stat.get("ops"), 0.720)
-        runs = safe_float(stat.get("runs"), 0)
-        gp = safe_float(stat.get("gamesPlayed"), 1)
-        runs_pg = runs / max(1, gp)
-        ops_factor = (ops / 0.720) ** 0.50
-        run_factor = (runs_pg / BASE_RUNS_PER_TEAM) ** 0.30
-        factor = (0.65 * ops_factor + 0.35 * run_factor) ** 1.20
-        result = {"OPS": ops, "RunsPG": runs_pg, "Factor": clamp(factor, 0.82, 1.18)}
-    except Exception:
-        pass
-    team_offense_cache[team_name] = result
-    return result
 
-def team_strength(team_name):
-    if not USE_TEAM_STRENGTH:
-        return {"RunsFor": np.nan, "RunsAgainst": np.nan, "RunDiffPG": 0.0, "Factor": 1.00, "Available": False}
-    if team_name in team_strength_cache:
-        return team_strength_cache[team_name]
-    team_id = TEAM_IDS.get(team_name)
-    result = {"RunsFor": np.nan, "RunsAgainst": np.nan, "RunDiffPG": 0.0, "Factor": 1.00, "Available": False}
-    if not team_id:
-        return result
-    hitting = get_json(
-        f"{MLB_API}/v1/teams/{team_id}/stats",
-        {"stats": "season", "group": "hitting", "season": season_now()},
-    )
-    pitching = get_json(
-        f"{MLB_API}/v1/teams/{team_id}/stats",
+def _pitcher_season_stats(player_id):
+    data = get_json(
+        f"{MLB_API}/v1/people/{player_id}/stats",
         {"stats": "season", "group": "pitching", "season": season_now()},
+        cache_key=("pitcher_season", season_now(), player_id),
     )
     try:
-        hs = hitting["stats"][0]["splits"][0]["stat"]
-        ps = pitching["stats"][0]["splits"][0]["stat"]
-        rf = safe_float(hs.get("runs"), np.nan)
-        gp = safe_float(hs.get("gamesPlayed"), np.nan)
-        ra = safe_float(ps.get("runs"), np.nan)
-        if pd.isna(rf) or pd.isna(ra) or pd.isna(gp) or gp <= 0:
-            raise ValueError()
-        rd = (rf - ra) / gp
-        factor = clamp(1.0 + rd / 10.0, 0.92, 1.08)
-        result = {"RunsFor": rf, "RunsAgainst": ra, "RunDiffPG": rd, "Factor": factor, "Available": True}
+        return data["stats"][0]["splits"][0]["stat"]
     except Exception:
-        pass
-    team_strength_cache[team_name] = result
-    return result
+        return {}
 
-def team_platoon(team_name, opposing_pitcher_hand):
-    if not USE_PLATOON or opposing_pitcher_hand not in ["L", "R"]:
-        return {"OPS": 0.720, "Factor": 1.00, "Available": False}
-    key = (team_name, opposing_pitcher_hand)
-    if key in platoon_cache:
-        return platoon_cache[key]
-    team_id = TEAM_IDS.get(team_name)
-    if not team_id:
-        return {"OPS": 0.720, "Factor": 1.00, "Available": False}
-    sit_code = "vl" if opposing_pitcher_hand == "L" else "vr"
-    data = get_json(
-        f"{MLB_API}/v1/teams/{team_id}/stats",
-        {"stats": "season", "group": "hitting", "season": season_now(), "sitCodes": sit_code},
-    )
-    result = {"OPS": 0.720, "Factor": 1.00, "Available": False}
-    try:
-        splits = data["stats"][0]["splits"]
-        if splits:
-            ops = safe_float(splits[0]["stat"].get("ops"), np.nan)
-            if not pd.isna(ops):
-                result = {"OPS": ops, "Factor": clamp((ops / 0.720) ** 0.40, 0.88, 1.12), "Available": True}
-    except Exception:
-        pass
-    platoon_cache[key] = result
-    return result
 
-def pitching_log(player_id):
-    if not player_id:
-        return pd.DataFrame()
-    if player_id in pitch_log_cache:
-        return pitch_log_cache[player_id]
+def _pitcher_game_log(player_id):
     data = get_json(
         f"{MLB_API}/v1/people/{player_id}/stats",
         {"stats": "gameLog", "group": "pitching", "season": season_now()},
+        cache_key=("pitcher_log", season_now(), player_id),
     )
     rows = []
     try:
-        for s in data["stats"][0]["splits"]:
-            stat = s.get("stat", {})
-            rows.append(
-                {
-                    "Date": s.get("date"),
-                    "IP": ip_to_decimal(stat.get("inningsPitched", 0)),
-                    "Pitches": safe_float(stat.get("numberOfPitches"), np.nan),
-                    "Started": int(safe_float(stat.get("gamesStarted"), 0) > 0),
-                }
-            )
+        for s in data.get("stats", [])[0].get("splits", []):
+            st = s.get("stat", {})
+            started = safe_float(st.get("gamesStarted"), 0) > 0
+            rows.append({
+                "Date": pd.to_datetime(s.get("date"), errors="coerce"),
+                "Started": int(started),
+                "IP": ip_to_decimal(st.get("inningsPitched", 0)),
+                "ER": safe_float(st.get("earnedRuns"), 0),
+                "H": safe_float(st.get("hits"), 0),
+                "BB": safe_float(st.get("baseOnBalls"), 0),
+                "K": safe_float(st.get("strikeOuts"), 0),
+                "HR": safe_float(st.get("homeRuns"), 0),
+                "Pitches": safe_float(st.get("numberOfPitches"), np.nan),
+            })
     except Exception:
         pass
     df = pd.DataFrame(rows)
-    if len(df):
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date", ascending=False).reset_index(drop=True)
-    pitch_log_cache[player_id] = df
+    if not df.empty:
+        df = df.dropna(subset=["Date"]).sort_values("Date", ascending=False).reset_index(drop=True)
     return df
 
-def pitcher_season(player_id):
-    if not player_id:
-        return {"Games": 0, "Starts": 0, "IP": 0, "IP_per_Start": np.nan}
-    if player_id in pitcher_season_cache:
-        return pitcher_season_cache[player_id]
-    data = get_json(
-        f"{MLB_API}/v1/people/{player_id}/stats",
-        {"stats": "season", "group": "pitching", "season": season_now()},
-    )
-    result = {"Games": 0, "Starts": 0, "IP": 0, "IP_per_Start": np.nan}
-    try:
-        stat = data["stats"][0]["splits"][0]["stat"]
-        gp = safe_float(stat.get("gamesPlayed"), 0)
-        starts = safe_float(stat.get("gamesStarted"), 0)
-        ip = ip_to_decimal(stat.get("inningsPitched", 0))
-        result = {"Games": gp, "Starts": starts, "IP": ip, "IP_per_Start": ip / starts if starts > 0 else np.nan}
-    except Exception:
-        pass
-    pitcher_season_cache[player_id] = result
-    return result
 
-def starter_profile(player_id):
-    season = pitcher_season(player_id)
-    log = pitching_log(player_id)
-    gp, starts = season["Games"], season["Starts"]
-    start_rate = starts / gp if gp > 0 else 0
-    recent = log.head(8)
-    recent_pitches = recent["Pitches"].dropna().mean() if len(recent) else np.nan
-    recent_ip = recent["IP"].mean() if len(recent) else np.nan
-    recent_start_rate = recent["Started"].mean() if len(recent) else 0
-    if starts >= 5 and start_rate >= 0.50:
-        role = "NORMAL_STARTER"
-    elif gp >= 5 and start_rate < 0.20 and (
-        (not pd.isna(recent_pitches) and recent_pitches <= 35)
-        or (not pd.isna(recent_ip) and recent_ip <= 2.0)
-    ):
-        role = "OPENER"
-    elif starts >= 1 or recent_start_rate >= 0.25:
-        role = "SPOT_STARTER"
+def _rates_from_counts(ip, er, h, bb, k, hr):
+    if ip <= 0:
+        return None
+    era = 9.0 * er / ip
+    k9 = 9.0 * k / ip
+    bb9 = 9.0 * bb / ip
+    hr9 = 9.0 * hr / ip
+    whip = (h + bb) / ip
+    fip = ((13.0 * hr + 3.0 * bb - 2.0 * k) / ip) + 3.15
+    return {"ERA": era, "K9": k9, "BB9": bb9, "HR9": hr9, "WHIP": whip, "FIP": fip}
+
+
+def _aggregate_starts(df):
+    if df is None or df.empty:
+        return None
+    x = df[df["Started"] == 1].copy()
+    if x.empty:
+        return None
+    ip = float(x["IP"].sum())
+    return _rates_from_counts(
+        ip,
+        float(x["ER"].sum()), float(x["H"].sum()), float(x["BB"].sum()),
+        float(x["K"].sum()), float(x["HR"].sum()),
+    )
+
+
+def starter_quality_v2(player_id):
+    if not player_id:
+        return {
+            "Quality": 0.985, "Starts": 0, "IP": 0, "RecentStarts": 0,
+            "SeasonERA": np.nan, "SeasonFIP": np.nan, "RecentERA": np.nan,
+            "RecentK9": np.nan, "RecentBB9": np.nan, "RecentPitches": np.nan,
+        }
+    if player_id in _pitcher_cache:
+        return _pitcher_cache[player_id]
+
+    st = _pitcher_season_stats(player_id)
+    log = _pitcher_game_log(player_id)
+    starts = int(safe_float(st.get("gamesStarted"), 0))
+    ip = ip_to_decimal(st.get("inningsPitched", 0))
+    er = safe_float(st.get("earnedRuns"), np.nan)
+    h = safe_float(st.get("hits"), np.nan)
+    bb = safe_float(st.get("baseOnBalls"), np.nan)
+    k = safe_float(st.get("strikeOuts"), np.nan)
+    hr = safe_float(st.get("homeRuns"), np.nan)
+
+    season_rates = None
+    if all(np.isfinite(v) for v in [ip, er, h, bb, k, hr]) and ip > 0:
+        season_rates = _rates_from_counts(ip, er, h, bb, k, hr)
+
+    recent = log[log["Started"] == 1].head(5) if not log.empty else pd.DataFrame()
+    recent_rates = _aggregate_starts(recent)
+    recent_pitches = float(recent["Pitches"].dropna().mean()) if not recent.empty and recent["Pitches"].notna().any() else np.nan
+
+    # Fixed league priors; recent form is deliberately shrunk toward the season baseline.
+    prior = {"ERA": 4.20, "FIP": 4.20, "K9": 8.60, "BB9": 3.20, "HR9": 1.25, "WHIP": 1.30}
+    s = season_rates or prior.copy()
+    season_weight = clamp(ip / 70.0, 0.15, 1.0) if ip > 0 else 0.15
+    shrunk_s = {k0: season_weight * s.get(k0, prior[k0]) + (1 - season_weight) * prior[k0] for k0 in prior}
+
+    if recent_rates:
+        recent_ip = float(recent["IP"].sum())
+        rw = clamp(recent_ip / 28.0, 0.10, 0.75)
+        rr = {k0: rw * recent_rates.get(k0, shrunk_s[k0]) + (1 - rw) * shrunk_s[k0] for k0 in prior}
     else:
-        role = "ROLE_UNCERTAIN"
-    return {
-        "Role": role,
-        "Games": gp,
+        rr = shrunk_s.copy()
+
+    # Research-informed composite: skill components + recency. Lower run-prevention metrics are better.
+    z = (
+        0.17 * ((4.20 - shrunk_s["FIP"]) / 0.85)
+        + 0.12 * ((4.20 - shrunk_s["ERA"]) / 1.00)
+        + 0.15 * ((shrunk_s["K9"] - 8.60) / 1.80)
+        + 0.12 * ((3.20 - shrunk_s["BB9"]) / 1.00)
+        + 0.08 * ((1.25 - shrunk_s["HR9"]) / 0.45)
+        + 0.10 * ((1.30 - shrunk_s["WHIP"]) / 0.18)
+        + 0.12 * ((4.20 - rr["FIP"]) / 0.95)
+        + 0.08 * ((4.20 - rr["ERA"]) / 1.15)
+        + 0.04 * ((rr["K9"] - 8.60) / 2.00)
+        + 0.02 * ((3.20 - rr["BB9"]) / 1.10)
+    )
+    raw_quality = 1.0 + 0.16 * math.tanh(z / 1.25)
+    role_shrink = clamp(starts / 6.0, 0.25, 1.0)
+    quality = 1.0 + (raw_quality - 1.0) * role_shrink
+
+    result = {
+        "Quality": clamp(quality, 0.82, 1.18),
         "Starts": starts,
-        "StartRate": start_rate,
-        "IP_per_Start": season["IP_per_Start"],
+        "IP": ip,
+        "RecentStarts": len(recent),
+        "SeasonERA": shrunk_s["ERA"],
+        "SeasonFIP": shrunk_s["FIP"],
+        "SeasonK9": shrunk_s["K9"],
+        "SeasonBB9": shrunk_s["BB9"],
+        "RecentERA": rr["ERA"],
+        "RecentFIP": rr["FIP"],
+        "RecentK9": rr["K9"],
+        "RecentBB9": rr["BB9"],
         "RecentPitches": recent_pitches,
-        "RecentIP": recent_ip,
     }
-
-def expected_sp_ip(player_id, profile):
-    log = pitching_log(player_id)
-    role = profile["Role"]
-    season_ip_start = profile["IP_per_Start"]
-    recent_starts = log[log["Started"] == 1].head(5) if len(log) else pd.DataFrame()
-    recent_all = log.head(6) if len(log) else pd.DataFrame()
-    recent_start_ip = np.nan
-    if len(recent_starts):
-        vals = recent_starts["IP"].values
-        weights = np.arange(len(vals), 0, -1)
-        recent_start_ip = np.average(vals, weights=weights)
-    recent_all_ip = recent_all["IP"].mean() if len(recent_all) else np.nan
-    recent_pitches = recent_all["Pitches"].dropna().mean() if len(recent_all) else np.nan
-
-    if role == "NORMAL_STARTER":
-        if not pd.isna(recent_start_ip) and not pd.isna(season_ip_start):
-            ip = 0.60 * recent_start_ip + 0.40 * season_ip_start
-        elif not pd.isna(recent_start_ip):
-            ip = recent_start_ip
-        elif not pd.isna(season_ip_start):
-            ip = season_ip_start
-        else:
-            ip = 5.25
-        if not pd.isna(recent_pitches):
-            if recent_pitches >= 95:
-                ip += 0.20
-            elif recent_pitches <= 75:
-                ip -= 0.30
-        return clamp(ip, 4.0, 7.0)
-
-    if role == "OPENER":
-        return clamp(recent_all_ip if not pd.isna(recent_all_ip) else 1.5, 0.7, 3.0)
-
-    if role == "SPOT_STARTER":
-        vals = [x for x in [recent_start_ip, recent_all_ip, season_ip_start] if not pd.isna(x)]
-        return clamp(np.mean(vals) if vals else 4.0, 2.25, 5.50)
-
-    return clamp(recent_all_ip if not pd.isna(recent_all_ip) else 3.75, 2.0, 5.25)
-
-def starter_quality(player_id):
-    if not player_id:
-        return {"Quality": 1.00, "PA": 0}
-    if player_id in starter_quality_cache:
-        return starter_quality_cache[player_id]
-    try:
-        df = statcast_pitcher(f"{season_now()}-03-15", today_et().strftime("%Y-%m-%d"), player_id)
-        terminal = df[df["events"].notna()].copy()
-        pa = len(terminal)
-        if pa == 0:
-            raise ValueError()
-        xw = terminal["estimated_woba_using_speedangle"].dropna()
-        xwoba = xw.mean() if len(xw) else 0.315
-        k_pct = terminal["events"].isin(["strikeout", "strikeout_double_play"]).mean()
-        bb_pct = terminal["events"].isin(["walk", "intent_walk"]).mean()
-        batted = df[df["launch_speed"].notna()]
-        ev = batted["launch_speed"].mean() if len(batted) else 88.5
-        hard_hit = (batted["launch_speed"] >= 95).mean() if len(batted) else 0.390
-        composite = (
-            0.35 * ((0.315 - xwoba) / 0.030)
-            + 0.25 * ((k_pct - 0.225) / 0.060)
-            + 0.15 * ((0.082 - bb_pct) / 0.030)
-            + 0.10 * ((88.5 - ev) / 2.0)
-            + 0.15 * ((0.390 - hard_hit) / 0.070)
-        )
-        raw_quality = 1.0 + 0.20 * np.tanh(composite / 1.5)
-        shrink = min(1.0, pa / 250)
-        quality = 1.0 + (raw_quality - 1.0) * shrink
-        result = {"Quality": quality, "PA": pa}
-    except Exception:
-        result = {"Quality": 1.00, "PA": 0}
-    starter_quality_cache[player_id] = result
+    _pitcher_cache[player_id] = result
     return result
 
-def adjusted_starter_quality(raw_quality, pa, role):
-    role_baselines = {
-        "NORMAL_STARTER": 1.000,
-        "SPOT_STARTER": 0.985,
-        "OPENER": 0.975,
-        "ROLE_UNCERTAIN": 0.970,
-        "UNKNOWN": 0.975,
-    }
-    fallback = role_baselines.get(role, 0.980)
+
+def expected_sp_ip(player_id):
+    if not player_id:
+        return 4.5
+    log = _pitcher_game_log(player_id)
+    starts = log[log["Started"] == 1].head(5) if not log.empty else pd.DataFrame()
+    if starts.empty:
+        p = starter_quality_v2(player_id)
+        return clamp((p.get("IP", 0) / max(1, p.get("Starts", 0))) if p.get("Starts", 0) else 5.0, 4.0, 6.4)
+    vals = starts["IP"].to_numpy(dtype=float)
+    weights = np.arange(len(vals), 0, -1, dtype=float)
+    ip = float(np.average(vals, weights=weights))
+    pitches = starts["Pitches"].dropna()
+    if len(pitches):
+        avgp = float(pitches.mean())
+        if avgp >= 95:
+            ip += 0.15
+        elif avgp <= 75:
+            ip -= 0.25
+    return clamp(ip, 4.0, 6.8)
+
+
+def _team_hitting_stats(team_name, stats_type="season", start_date=None, end_date=None):
+    if not TEAM_IDS:
+        load_team_ids()
+    tid = TEAM_IDS.get(team_name)
+    if not tid:
+        return {}
+    key = (team_name, stats_type, str(start_date), str(end_date))
+    if key in _hitting_cache:
+        return _hitting_cache[key]
+    params = {"stats": stats_type, "group": "hitting", "season": season_now()}
+    if start_date:
+        params["startDate"] = str(start_date)
+    if end_date:
+        params["endDate"] = str(end_date)
+    data = get_json(f"{MLB_API}/v1/teams/{tid}/stats", params, cache_key=("hit", key))
+    try:
+        out = data["stats"][0]["splits"][0]["stat"]
+    except Exception:
+        out = {}
+    _hitting_cache[key] = out
+    return out
+
+
+def _hitting_rates(stat):
+    if not stat:
+        return None
+    pa = safe_float(stat.get("plateAppearances"), np.nan)
+    ab = safe_float(stat.get("atBats"), np.nan)
+    bb = safe_float(stat.get("baseOnBalls"), 0)
+    hbp = safe_float(stat.get("hitByPitch"), 0)
+    sf = safe_float(stat.get("sacFlies"), 0)
+    so = safe_float(stat.get("strikeOuts"), 0)
+    hr = safe_float(stat.get("homeRuns"), 0)
+    hits = safe_float(stat.get("hits"), 0)
+    doubles = safe_float(stat.get("doubles"), 0)
+    triples = safe_float(stat.get("triples"), 0)
+    runs = safe_float(stat.get("runs"), 0)
+    ops = safe_float(stat.get("ops"), np.nan)
+    if not np.isfinite(pa):
+        pa = (ab if np.isfinite(ab) else 0) + bb + hbp + sf
     if pa <= 0:
-        return fallback
-    if pa >= 100:
-        return raw_quality
-    sw = pa / 100
-    return clamp(sw * raw_quality + (1 - sw) * fallback, 0.80, 1.20)
+        return None
+    singles = max(0.0, hits - doubles - triples - hr)
+    tb = singles + 2*doubles + 3*triples + 4*hr
+    iso = (tb / max(ab, 1)) - (hits / max(ab, 1)) if np.isfinite(ab) and ab > 0 else 0.145
+    return {
+        "PA": pa, "OPS": ops if np.isfinite(ops) else 0.720,
+        "Kpct": so/pa, "BBpct": bb/pa, "HRpct": hr/pa,
+        "ISO": iso, "RPA": runs/pa,
+    }
 
-def active_roster(team_name):
-    if team_name in roster_cache:
-        return roster_cache[team_name]
-    team_id = TEAM_IDS.get(team_name)
-    if not team_id:
-        return []
-    data = get_json(
-        f"{MLB_API}/v1/teams/{team_id}/roster",
-        {"rosterType": "active", "season": season_now()},
+
+def team_offense(team_name):
+    season_stat = _team_hitting_stats(team_name, "season")
+    season = _hitting_rates(season_stat) or {"PA": 0, "OPS": .720, "Kpct": .225, "BBpct": .082, "HRpct": .030, "ISO": .145, "RPA": .115}
+    start = today_et() - timedelta(days=14)
+    recent_stat = _team_hitting_stats(team_name, "byDateRange", start, today_et())
+    recent = _hitting_rates(recent_stat)
+    if recent and recent["PA"] >= 120:
+        rw = clamp(recent["PA"] / (recent["PA"] + 350.0), 0.15, 0.45)
+    else:
+        rw = 0.0
+    ops = (1-rw)*season["OPS"] + rw*(recent["OPS"] if recent else season["OPS"])
+    k = (1-rw)*season["Kpct"] + rw*(recent["Kpct"] if recent else season["Kpct"])
+    bb = (1-rw)*season["BBpct"] + rw*(recent["BBpct"] if recent else season["BBpct"])
+    hr = (1-rw)*season["HRpct"] + rw*(recent["HRpct"] if recent else season["HRpct"])
+    iso = (1-rw)*season["ISO"] + rw*(recent["ISO"] if recent else season["ISO"])
+    composite = (
+        0.45*((ops-.720)/.070) + 0.16*((.225-k)/.035) + 0.15*((bb-.082)/.025)
+        + 0.14*((hr-.030)/.010) + 0.10*((iso-.145)/.040)
     )
-    roster = []
-    for p in data.get("roster", []):
-        roster.append(
-            {
-                "id": p["person"]["id"],
-                "name": p["person"]["fullName"],
-                "position": p.get("position", {}).get("abbreviation"),
-            }
-        )
-    roster_cache[team_name] = roster
-    return roster
+    factor = 1.0 + 0.10*math.tanh(composite/1.8)
+    return {"Factor": clamp(factor,.88,1.12), "OPS": ops, "RecentUsed": bool(rw>0), "PA": season["PA"]}
 
-def reliever_stats(player_id):
-    if player_id in reliever_cache:
-        return reliever_cache[player_id]
+
+def team_platoon(team_name, opposing_hand):
+    if opposing_hand not in ("L", "R"):
+        return {"Factor": 1.0, "OPS": .720, "Available": False, "PA": 0}
+    key = (team_name, opposing_hand)
+    if key in _platoon_cache:
+        return _platoon_cache[key]
+    if not TEAM_IDS:
+        load_team_ids()
+    tid = TEAM_IDS.get(team_name)
+    if not tid:
+        return {"Factor": 1.0, "OPS": .720, "Available": False, "PA": 0}
+    sit = "vl" if opposing_hand == "L" else "vr"
     data = get_json(
-        f"{MLB_API}/v1/people/{player_id}/stats",
-        {"stats": "season", "group": "pitching", "season": season_now()},
+        f"{MLB_API}/v1/teams/{tid}/stats",
+        {"stats": "season", "group": "hitting", "season": season_now(), "sitCodes": sit},
+        cache_key=("platoon", season_now(), tid, sit),
     )
     try:
         stat = data["stats"][0]["splits"][0]["stat"]
-        result = {
-            "ERA": safe_float(stat.get("era"), 4.20),
-            "WHIP": safe_float(stat.get("whip"), 1.30),
-            "K9": safe_float(stat.get("strikeoutsPer9Inn"), 8.5),
-            "Saves": safe_float(stat.get("saves"), 0),
-            "Holds": safe_float(stat.get("holds"), 0),
-        }
     except Exception:
-        result = None
-    reliever_cache[player_id] = result
-    return result
-
-def reliever_usage(player_id):
-    log = pitching_log(player_id)
-    if len(log) == 0:
-        return {"Availability": 1.00, "UsageWeight": 0.90, "Pitches1": 0, "Pitches2": 0}
-    today_ts = pd.Timestamp(today_et())
-    temp = log.copy()
-    temp["DaysAgo"] = (today_ts - temp["Date"]).dt.days
-    p1 = temp.loc[temp["DaysAgo"] <= 1, "Pitches"].fillna(0).sum()
-    p2 = temp.loc[temp["DaysAgo"] <= 2, "Pitches"].fillna(0).sum()
-    penalty = 0
-    if p1 >= 30:
-        penalty += 0.18
-    elif p1 >= 20:
-        penalty += 0.10
-    if p2 >= 45:
-        penalty += 0.10
-    availability = clamp(1 - penalty, 0.65, 1.00)
-    appearances_7 = len(temp[temp["DaysAgo"] <= 7])
-    usage_weight = (0.85 + min(appearances_7 * 0.05, 0.25)) * (0.75 + 0.25 * availability)
-    return {"Availability": availability, "UsageWeight": usage_weight, "Pitches1": p1, "Pitches2": p2}
-
-def bullpen_quality(team_name):
-    if team_name in bullpen_cache:
-        return bullpen_cache[team_name]
-    roster = active_roster(team_name)
-    probable_id = PROBABLE_BY_TEAM.get(team_name)
-    rows = []
-    for p in roster:
-        if p["id"] == probable_id:
-            continue
-        if p["position"] not in ["P", "RP", "CP", "SP"]:
-            continue
-        profile = starter_profile(p["id"])
-        if profile["Role"] == "NORMAL_STARTER" and profile["StartRate"] >= 0.60:
-            continue
-        stats = reliever_stats(p["id"])
-        if not stats:
-            continue
-        usage = reliever_usage(p["id"])
-        era_score = 4.20 / max(stats["ERA"], 1.50)
-        whip_score = 1.30 / max(stats["WHIP"], 0.70)
-        k_score = max(stats["K9"], 4.0) / 8.5
-        quality = clamp(0.45 * era_score + 0.35 * whip_score + 0.20 * k_score, 0.75, 1.30)
-        leverage = stats["Saves"] + stats["Holds"]
-        leverage_weight = 1.0 + min(leverage / 40, 0.60)
-        final_weight = leverage_weight * usage["UsageWeight"] if USE_BULLPEN_USAGE else leverage_weight
-        rows.append(
-            {
-                "Name": p["name"],
-                "Quality": quality,
-                "Availability": usage["Availability"],
-                "Weight": final_weight,
-            }
-        )
-        time.sleep(0.002)
-    if not rows:
-        result = {"Quality": 1.00, "Availability": 1.00, "Limited": "", "Relievers": 0}
+        stat = {}
+    rates = _hitting_rates(stat)
+    if not rates or rates["PA"] < 80:
+        result = {"Factor": 1.0, "OPS": .720, "Available": False, "PA": rates["PA"] if rates else 0}
     else:
-        weights = np.array([x["Weight"] for x in rows])
-        qualities = np.array([x["Quality"] for x in rows])
-        avails = np.array([x["Availability"] for x in rows])
-        raw_quality = np.average(qualities, weights=weights)
-        availability = np.average(avails, weights=weights)
-        adjusted_quality = raw_quality * (0.75 + 0.25 * availability)
-        limited = [x["Name"] for x in rows if x["Availability"] < 0.85]
-        result = {
-            "Quality": clamp(adjusted_quality, 0.75, 1.30),
-            "Availability": availability,
-            "Limited": ", ".join(limited[:5]),
-            "Relievers": len(rows),
-        }
-    bullpen_cache[team_name] = result
+        # Heavy shrinkage: platoon earns a modest adjustment rather than replacing team strength.
+        shrink = rates["PA"] / (rates["PA"] + 180.0)
+        ops = shrink*rates["OPS"] + (1-shrink)*.720
+        result = {"Factor": clamp((ops/.720)**0.28,.93,1.07), "OPS": ops, "Available": True, "PA": rates["PA"]}
+    _platoon_cache[key] = result
     return result
+
 
 def game_feed(game_pk):
-    if game_pk in feed_cache:
-        return feed_cache[game_pk]
-    data = get_json(f"{MLB_API}/v1.1/game/{game_pk}/feed/live")
-    feed_cache[game_pk] = data
+    if game_pk in _feed_cache:
+        return _feed_cache[game_pk]
+    data = get_json(f"{MLB_API}/v1.1/game/{game_pk}/feed/live", cache_key=("feed", game_pk))
+    _feed_cache[game_pk] = data
     return data
 
+
 def get_lineup(game_pk, side):
-    feed = game_feed(game_pk)
     try:
-        team = feed["liveData"]["boxscore"]["teams"][side]
+        team = game_feed(game_pk)["liveData"]["boxscore"]["teams"][side]
         order = team.get("battingOrder", [])
         players = team.get("players", {})
-        return [
-            {"id": pid, "name": players.get(f"ID{pid}", {}).get("person", {}).get("fullName")}
-            for pid in order
-        ]
+        return [{"id": pid, "name": players.get(f"ID{pid}", {}).get("person", {}).get("fullName", "")} for pid in order[:9]]
     except Exception:
         return []
 
+
 def hitter_ops(player_id):
-    if player_id in hitter_cache:
-        return hitter_cache[player_id]
+    key = (season_now(), player_id)
+    if key in _hitter_cache:
+        return _hitter_cache[key]
     data = get_json(
         f"{MLB_API}/v1/people/{player_id}/stats",
         {"stats": "season", "group": "hitting", "season": season_now()},
+        cache_key=("hitter", *key),
     )
     try:
-        ops = safe_float(data["stats"][0]["splits"][0]["stat"].get("ops"), 0.720)
+        stat = data["stats"][0]["splits"][0]["stat"]
+        ops = safe_float(stat.get("ops"), .720)
+        pa = safe_float(stat.get("plateAppearances"), 0)
     except Exception:
-        ops = 0.720
-    hitter_cache[player_id] = ops
+        ops, pa = .720, 0
+    if pa < 20:
+        w = pa/(pa+50.0)
+        ops = w*ops + (1-w)*.720
+    _hitter_cache[key] = ops
     return ops
+
 
 def lineup_factor(lineup):
     if len(lineup) < 8:
-        return 1.00
-    weights = np.array([1.15, 1.12, 1.10, 1.08, 1.04, 1.00, 0.96, 0.92, 0.88])
-    ops_values = [hitter_ops(p["id"]) for p in lineup[:9]]
-    weighted_ops = np.average(ops_values, weights=weights[:len(ops_values)])
-    return clamp((weighted_ops / 0.720) ** 0.45, 0.88, 1.12)
+        return 1.0
+    weights = np.array([1.15,1.12,1.10,1.08,1.04,1.00,.96,.92,.88], dtype=float)
+    vals = np.array([hitter_ops(p["id"]) for p in lineup[:9]], dtype=float)
+    weighted = float(np.average(vals, weights=weights[:len(vals)]))
+    return clamp((weighted/.720)**0.38,.91,1.09)
+
 
 def final_offense(team_name, lineup, opposing_hand):
     base = team_offense(team_name)
     platoon = team_platoon(team_name, opposing_hand)
-    lf = lineup_factor(lineup)
     lineup_used = len(lineup) >= 8
+    lf = lineup_factor(lineup) if lineup_used else 1.0
     if lineup_used:
-        final = 0.50 * base["Factor"] + 0.20 * platoon["Factor"] + 0.30 * lf
+        factor = 0.60*base["Factor"] + 0.20*platoon["Factor"] + 0.20*lf
     else:
-        final = 0.70 * base["Factor"] + 0.30 * platoon["Factor"]
+        factor = 0.75*base["Factor"] + 0.25*platoon["Factor"]
     return {
-        "Factor": clamp(final, 0.80, 1.20),
-        "BaseFactor": base["Factor"],
-        "PlatoonFactor": platoon["Factor"],
-        "PlatoonOPS": platoon["OPS"],
-        "PlatoonAvailable": platoon["Available"],
-        "LineupFactor": lf,
-        "LineupUsed": lineup_used,
+        "Factor": clamp(factor,.86,1.14), "BaseFactor": base["Factor"],
+        "PlatoonFactor": platoon["Factor"], "PlatoonOPS": platoon["OPS"],
+        "PlatoonAvailable": platoon["Available"], "LineupFactor": lf,
+        "LineupUsed": lineup_used, "RecentOffenseUsed": base["RecentUsed"],
     }
 
-def weather_info(venue, game_date):
+
+def starter_run_factor(quality, expected_ip):
+    ip = clamp(expected_ip, 4.0, 6.8)
+    sp_component = math.exp(-STARTER_IMPACT * (float(quality)-1.0))
+    # Research rejected the bullpen layer. Remaining innings are deliberately neutral.
+    return clamp((ip/9.0)*sp_component + ((9.0-ip)/9.0)*1.0, .84, 1.16)
+
+
+def confidence_score(g, away_sp, home_sp, away_off, home_off):
+    score = 100
+    reasons = []
+    if not g.get("Away_SP_ID"):
+        score -= 24; reasons.append("away starter unknown")
+    if not g.get("Home_SP_ID"):
+        score -= 24; reasons.append("home starter unknown")
+    if away_sp.get("Starts",0) < 3:
+        score -= 10; reasons.append("away starter small sample")
+    if home_sp.get("Starts",0) < 3:
+        score -= 10; reasons.append("home starter small sample")
+    if not away_off.get("PlatoonAvailable"):
+        score -= 3
+    if not home_off.get("PlatoonAvailable"):
+        score -= 3
+    if not away_off.get("LineupUsed"):
+        score -= 7; reasons.append("away lineup unconfirmed")
+    if not home_off.get("LineupUsed"):
+        score -= 7; reasons.append("home lineup unconfirmed")
+    score = int(clamp(score, 35, 100))
+    grade = "HIGH" if score >= 85 else "MEDIUM" if score >= 70 else "LOW"
+    return score, grade, " | ".join(reasons)
+
+
+
+def totals_weather_info(venue, game_date):
     default = {"Temp": np.nan, "Wind": np.nan, "Humidity": np.nan, "Precip": np.nan, "Factor": 1.00, "Available": False}
-    if not USE_WEATHER:
-        return default
     park = PARKS.get(venue)
-    if not park:
+    if not park or not game_date:
         return default
     key = (venue, str(game_date))
-    if key in weather_cache:
-        return weather_cache[key]
+    if key in _totals_weather_cache:
+        return _totals_weather_cache[key]
     try:
         game_dt = pd.to_datetime(game_date, utc=True)
         data = get_json(
             "https://api.open-meteo.com/v1/forecast",
-            {
-                "latitude": park["lat"],
-                "longitude": park["lon"],
-                "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,wind_speed_10m",
-                "temperature_unit": "fahrenheit",
-                "wind_speed_unit": "mph",
-                "timezone": "UTC",
-                "forecast_days": 7,
-            },
+            {"latitude": park["lat"], "longitude": park["lon"],
+             "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,wind_speed_10m",
+             "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "timezone": "UTC", "forecast_days": 14},
+            cache_key=("totals_weather", venue, str(game_date)),
         )
-        hourly = data.get("hourly", {})
-        times = pd.to_datetime(hourly.get("time", []), utc=True)
-        if len(times) == 0:
-            raise ValueError()
-        diffs = np.abs((times - game_dt).total_seconds())
-        idx = int(np.argmin(diffs))
-        temp = safe_float(hourly.get("temperature_2m", [])[idx], np.nan)
-        humidity = safe_float(hourly.get("relative_humidity_2m", [])[idx], np.nan)
-        precip = safe_float(hourly.get("precipitation_probability", [])[idx], np.nan)
-        wind = safe_float(hourly.get("wind_speed_10m", [])[idx], np.nan)
-        factor = 1.00
-        if not pd.isna(temp):
-            factor *= 1 + (temp - 72) * 0.0015
-        result = {
-            "Temp": temp,
-            "Wind": wind,
-            "Humidity": humidity,
-            "Precip": precip,
-            "Factor": clamp(factor, 0.96, 1.04),
-            "Available": True,
-        }
+        hourly=data.get("hourly",{}); times=pd.to_datetime(hourly.get("time",[]),utc=True)
+        if len(times)==0: raise ValueError("weather unavailable")
+        idx=int(np.argmin(np.abs((times-game_dt).total_seconds())))
+        temp=safe_float(hourly.get("temperature_2m",[])[idx],np.nan)
+        humidity=safe_float(hourly.get("relative_humidity_2m",[])[idx],np.nan)
+        precip=safe_float(hourly.get("precipitation_probability",[])[idx],np.nan)
+        wind=safe_float(hourly.get("wind_speed_10m",[])[idx],np.nan)
+        factor=1.0
+        if not pd.isna(temp): factor*=1.0+(temp-72.0)*0.0015
+        result={"Temp":temp,"Wind":wind,"Humidity":humidity,"Precip":precip,"Factor":clamp(factor,.96,1.04),"Available":True}
     except Exception:
-        result = default
-    weather_cache[key] = result
+        result=default
+    _totals_weather_cache[key]=result
     return result
 
-def team_rest_context(team_name, today_venue, game_number=1):
-    if not USE_TRAVEL_REST:
-        return {"PlayedYesterday": False, "TravelMiles": 0, "ExtraInningsPrev": False, "Factor": 1.00}
-    key = (team_name, today_venue, game_number)
-    if key in rest_cache:
-        return rest_cache[key]
-    team_id = TEAM_IDS.get(team_name)
-    result = {"PlayedYesterday": False, "TravelMiles": 0, "ExtraInningsPrev": False, "Factor": 1.00}
-    if not team_id:
-        return result
 
-    yesterday = today_et() - timedelta(days=1)
-    data = get_json(
-        f"{MLB_API}/v1/schedule",
-        {"sportId": 1, "teamId": team_id, "date": yesterday.strftime("%Y-%m-%d"), "hydrate": "venue"},
-    )
-    prev_games = [g for block in data.get("dates", []) for g in block.get("games", [])]
-    factor = 1.00
-    played = len(prev_games) > 0
-    travel_miles = 0
-    extra = False
-
-    if played:
-        prev = prev_games[-1]
-        prev_venue = prev.get("venue", {}).get("name", "")
-        prev_park = PARKS.get(prev_venue)
-        today_park = PARKS.get(today_venue)
-        if prev_park and today_park:
-            travel_miles = haversine(prev_park["lat"], prev_park["lon"], today_park["lat"], today_park["lon"])
-        try:
-            prev_feed = game_feed(prev["gamePk"])
-            inning = safe_float(prev_feed["liveData"]["linescore"].get("currentInning", 9), 9)
-            extra = inning > 9
-        except Exception:
-            extra = False
-        if travel_miles >= 2000:
-            factor *= 0.985
-        elif travel_miles >= 1000:
-            factor *= 0.9925
-        if extra:
-            factor *= 0.9925
-    else:
-        factor *= 1.005
-
-    if game_number >= 2:
-        factor *= 0.985
-
-    result = {
-        "PlayedYesterday": played,
-        "TravelMiles": travel_miles,
-        "ExtraInningsPrev": extra,
-        "Factor": clamp(factor, 0.96, 1.02),
-    }
-    rest_cache[key] = result
-    return result
-
-def pitching_factor(sp_quality, bp_quality, sp_ip):
-    sp_ip = clamp(sp_ip, 0.7, 7.0)
-    bp_ip = 9.0 - sp_ip
-    starter_run_factor = math.exp(-STARTER_IMPACT * (sp_quality - 1.00))
-    bullpen_run_factor = math.exp(-BULLPEN_IMPACT * (bp_quality - 1.00))
-    factor = (sp_ip / 9.0) * starter_run_factor + (bp_ip / 9.0) * bullpen_run_factor
-    return clamp(factor, 0.72, 1.32)
-
-def confidence_score(
-    away_sp_id, home_sp_id, away_profile, home_profile, away_sp, home_sp,
-    away_lineup, home_lineup, away_bp, home_bp, park_known, weather_available,
-    away_platoon_available, home_platoon_available, away_strength_available, home_strength_available
-):
-    score = 100
-    reasons = []
-    if not away_sp_id:
-        score -= 18; reasons.append("AWAY SP UNKNOWN")
-    if not home_sp_id:
-        score -= 18; reasons.append("HOME SP UNKNOWN")
-    if len(away_lineup) < 8:
-        score -= 10; reasons.append("AWAY LINEUP MISSING")
-    if len(home_lineup) < 8:
-        score -= 10; reasons.append("HOME LINEUP MISSING")
-    if away_sp["PA"] < 100:
-        score -= 7; reasons.append("AWAY SP SMALL SAMPLE")
-    if home_sp["PA"] < 100:
-        score -= 7; reasons.append("HOME SP SMALL SAMPLE")
-    for side, profile in [("AWAY", away_profile), ("HOME", home_profile)]:
-        if profile["Role"] == "OPENER":
-            score -= 5; reasons.append(f"{side} OPENER")
-        elif profile["Role"] == "SPOT_STARTER":
-            score -= 4
-        elif profile["Role"] in ["ROLE_UNCERTAIN", "UNKNOWN"]:
-            score -= 7
-    if away_bp["Availability"] < 0.90:
-        score -= 3
-    if home_bp["Availability"] < 0.90:
-        score -= 3
-    if not park_known:
-        score -= 4; reasons.append("PARK UNKNOWN")
-    if USE_WEATHER and not weather_available:
-        score -= 3
-    if USE_PLATOON and not away_platoon_available:
-        score -= 2
-    if USE_PLATOON and not home_platoon_available:
-        score -= 2
-    if USE_TEAM_STRENGTH and not away_strength_available:
-        score -= 2
-    if USE_TEAM_STRENGTH and not home_strength_available:
-        score -= 2
-    score = int(clamp(score, 30, 100))
-    grade = "HIGH" if score >= 85 else "MEDIUM" if score >= 70 else "LOW"
-    return {"Score": score, "Grade": grade, "Reasons": " | ".join(reasons)}
+def totals_projection(row):
+    # Research-only total projection; does not alter the frozen moneyline engine.
+    base_total=safe_float(row.get("Away_Proj_Runs"),BASE_RUNS_PER_TEAM)+safe_float(row.get("Home_Proj_Runs"),BASE_RUNS_PER_TEAM)
+    venue=row.get("Venue",""); park=PARKS.get(venue,{})
+    park_factor=safe_float(park.get("factor"),1.0)
+    wx=totals_weather_info(venue,row.get("GameDate")); weather_factor=safe_float(wx.get("Factor"),1.0)
+    projected=clamp(base_total*park_factor*weather_factor,5.5,14.5)
+    return {"Base_Total":float(base_total),"Projected_Total":float(projected),"Park_Factor":float(park_factor),"Park_Known":bool(park),
+            "Weather_Factor":float(weather_factor),"Weather_Available":bool(wx.get("Available")),"Temp":wx.get("Temp"),"Wind":wx.get("Wind"),
+            "Humidity":wx.get("Humidity"),"Precip":wx.get("Precip")}
 
 def reset_dynamic_caches():
-    bullpen_cache.clear()
-    feed_cache.clear()
-    weather_cache.clear()
-    rest_cache.clear()
-    platoon_cache.clear()
-    team_offense_cache.clear()
-    team_strength_cache.clear()
-    roster_cache.clear()
+    # Keep static person/team metadata, but refresh game feeds so lineups can appear during the day.
+    _feed_cache.clear()
+
 
 def run_model(games_to_run):
     if not games_to_run:
         return pd.DataFrame()
-
     if not TEAM_IDS:
         load_team_ids()
-
-    set_probable_pitchers(games_to_run)
     reset_dynamic_caches()
     rows = []
-
     for g in games_to_run:
-        away_profile = starter_profile(g["Away_SP_ID"]) if g["Away_SP_ID"] else {
-            "Role": "UNKNOWN", "Starts": 0, "StartRate": 0, "RecentPitches": np.nan, "IP_per_Start": np.nan
-        }
-        home_profile = starter_profile(g["Home_SP_ID"]) if g["Home_SP_ID"] else {
-            "Role": "UNKNOWN", "Starts": 0, "StartRate": 0, "RecentPitches": np.nan, "IP_per_Start": np.nan
-        }
+        asp = starter_quality_v2(g.get("Away_SP_ID"))
+        hsp = starter_quality_v2(g.get("Home_SP_ID"))
+        ahand = pitcher_hand(g.get("Away_SP_ID"))
+        hhand = pitcher_hand(g.get("Home_SP_ID"))
+        aip = expected_sp_ip(g.get("Away_SP_ID"))
+        hip = expected_sp_ip(g.get("Home_SP_ID"))
 
-        away_raw = starter_quality(g["Away_SP_ID"])
-        home_raw = starter_quality(g["Home_SP_ID"])
-        away_sp = {
-            "Quality": adjusted_starter_quality(away_raw["Quality"], away_raw["PA"], away_profile["Role"]),
-            "RawQuality": away_raw["Quality"],
-            "PA": away_raw["PA"],
-        }
-        home_sp = {
-            "Quality": adjusted_starter_quality(home_raw["Quality"], home_raw["PA"], home_profile["Role"]),
-            "RawQuality": home_raw["Quality"],
-            "PA": home_raw["PA"],
-        }
+        aline = get_lineup(g.get("GamePk"), "away")
+        hline = get_lineup(g.get("GamePk"), "home")
+        aoff = final_offense(g.get("Away"), aline, hhand)
+        hoff = final_offense(g.get("Home"), hline, ahand)
 
-        away_hand = pitcher_hand(g["Away_SP_ID"])
-        home_hand = pitcher_hand(g["Home_SP_ID"])
-        away_sp_ip = expected_sp_ip(g["Away_SP_ID"], away_profile) if g["Away_SP_ID"] else 4.5
-        home_sp_ip = expected_sp_ip(g["Home_SP_ID"], home_profile) if g["Home_SP_ID"] else 4.5
-
-        away_bp = bullpen_quality(g["Away"])
-        home_bp = bullpen_quality(g["Home"])
-
-        away_lineup = get_lineup(g["GamePk"], "away")
-        home_lineup = get_lineup(g["GamePk"], "home")
-
-        away_off = final_offense(g["Away"], away_lineup, home_hand)
-        home_off = final_offense(g["Home"], home_lineup, away_hand)
-
-        away_strength = team_strength(g["Away"])
-        home_strength = team_strength(g["Home"])
-
-        park = PARKS.get(g["Venue"])
-        park_known = park is not None
-        park_factor = park["factor"] if USE_PARK and park else 1.00
-
-        weather = weather_info(g["Venue"], g["GameDate"])
-        weather_factor = weather["Factor"] if USE_WEATHER else 1.00
-
-        away_rest = team_rest_context(g["Away"], g["Venue"], g["GameNumber"])
-        home_rest = team_rest_context(g["Home"], g["Venue"], g["GameNumber"])
-
-        away_pitch_factor = pitching_factor(home_sp["Quality"], home_bp["Quality"], home_sp_ip)
-        home_pitch_factor = pitching_factor(away_sp["Quality"], away_bp["Quality"], away_sp_ip)
-
-        away_strength_mult = away_strength["Factor"] ** TEAM_STRENGTH_EXPONENT if USE_TEAM_STRENGTH else 1.00
-        home_strength_mult = home_strength["Factor"] ** TEAM_STRENGTH_EXPONENT if USE_TEAM_STRENGTH else 1.00
-
-        away_runs = (
-            BASE_RUNS_PER_TEAM
-            * away_off["Factor"]
-            * away_pitch_factor
-            * park_factor
-            * weather_factor
-            * away_rest["Factor"]
-            * away_strength_mult
-        )
-
-        home_runs = (
-            BASE_RUNS_PER_TEAM
-            * home_off["Factor"]
-            * home_pitch_factor
-            * park_factor
-            * weather_factor
-            * home_rest["Factor"]
-            * home_strength_mult
-            + HOME_RUN_ADVANTAGE
-        )
-
-        total = away_runs + home_runs
+        away_runs = BASE_RUNS_PER_TEAM * aoff["Factor"] * starter_run_factor(hsp["Quality"], hip)
+        home_runs = BASE_RUNS_PER_TEAM * hoff["Factor"] * starter_run_factor(asp["Quality"], aip) + HOME_RUN_ADVANTAGE
         away_prob = win_prob(away_runs, home_runs)
-        home_prob = 1 - away_prob
-        rl = run_line_probs(away_runs, home_runs)
-
-        confidence = confidence_score(
-            g["Away_SP_ID"], g["Home_SP_ID"], away_profile, home_profile,
-            away_sp, home_sp, away_lineup, home_lineup, away_bp, home_bp,
-            park_known, weather["Available"], away_off["PlatoonAvailable"],
-            home_off["PlatoonAvailable"], away_strength["Available"], home_strength["Available"]
-        )
-
-        warnings_list = []
-        if away_profile["Role"] == "OPENER":
-            warnings_list.append("AWAY OPENER")
-        if home_profile["Role"] == "OPENER":
-            warnings_list.append("HOME OPENER")
-        if len(away_lineup) < 8:
-            warnings_list.append("AWAY LINEUP MISSING")
-        if len(home_lineup) < 8:
-            warnings_list.append("HOME LINEUP MISSING")
-        if away_sp["PA"] < 100:
-            warnings_list.append("AWAY SP SMALL SAMPLE")
-        if home_sp["PA"] < 100:
-            warnings_list.append("HOME SP SMALL SAMPLE")
-        if not park_known:
-            warnings_list.append("PARK UNKNOWN")
+        home_prob = 1.0-away_prob
+        conf, conf_grade, conf_reasons = confidence_score(g, asp, hsp, aoff, hoff)
 
         rows.append({
-            "Date": str(today_et()),
-            "GamePk": g["GamePk"],
-            "Game": f"{g['Away']} @ {g['Home']}",
-            "Away": g["Away"],
-            "Home": g["Home"],
-            "Venue": g["Venue"],
-            "Away_SP": g["Away_SP"],
-            "Home_SP": g["Home_SP"],
-            "Away_SP_Hand": away_hand,
-            "Home_SP_Hand": home_hand,
-            "Away_SP_Role": away_profile["Role"],
-            "Home_SP_Role": home_profile["Role"],
-            "Away_SP_RawQuality": away_sp["RawQuality"],
-            "Home_SP_RawQuality": home_sp["RawQuality"],
-            "Away_SP_Quality": away_sp["Quality"],
-            "Home_SP_Quality": home_sp["Quality"],
-            "Away_SP_PA": away_sp["PA"],
-            "Home_SP_PA": home_sp["PA"],
-            "Away_SP_ExpIP": away_sp_ip,
-            "Home_SP_ExpIP": home_sp_ip,
-            "Away_BP_Quality": away_bp["Quality"],
-            "Home_BP_Quality": home_bp["Quality"],
-            "Away_BP_Availability": away_bp["Availability"],
-            "Home_BP_Availability": home_bp["Availability"],
-            "Away_BP_Limited": away_bp["Limited"],
-            "Home_BP_Limited": home_bp["Limited"],
-            "Away_Lineup_Used": away_off["LineupUsed"],
-            "Home_Lineup_Used": home_off["LineupUsed"],
-            "Away_Platoon_OPS": away_off["PlatoonOPS"],
-            "Home_Platoon_OPS": home_off["PlatoonOPS"],
-            "Away_Platoon_Factor": away_off["PlatoonFactor"],
-            "Home_Platoon_Factor": home_off["PlatoonFactor"],
-            "Away_Base_Offense": away_off["BaseFactor"],
-            "Home_Base_Offense": home_off["BaseFactor"],
-            "Away_Offense": away_off["Factor"],
-            "Home_Offense": home_off["Factor"],
-            "Away_RunDiffPG": away_strength["RunDiffPG"],
-            "Home_RunDiffPG": home_strength["RunDiffPG"],
-            "Away_TeamStrength": away_strength["Factor"],
-            "Home_TeamStrength": home_strength["Factor"],
-            "Away_TeamStrength_Mult": away_strength_mult,
-            "Home_TeamStrength_Mult": home_strength_mult,
-            "Park_Factor": park_factor,
-            "Weather_Temp": weather["Temp"],
-            "Weather_Wind": weather["Wind"],
-            "Weather_Humidity": weather["Humidity"],
-            "Weather_Precip": weather["Precip"],
-            "Weather_Factor": weather_factor,
-            "Away_Played_Yesterday": away_rest["PlayedYesterday"],
-            "Home_Played_Yesterday": home_rest["PlayedYesterday"],
-            "Away_Travel_Miles": away_rest["TravelMiles"],
-            "Home_Travel_Miles": home_rest["TravelMiles"],
-            "Away_Prev_Extra_Innings": away_rest["ExtraInningsPrev"],
-            "Home_Prev_Extra_Innings": home_rest["ExtraInningsPrev"],
-            "Away_Rest_Factor": away_rest["Factor"],
-            "Home_Rest_Factor": home_rest["Factor"],
-            "Away_FacingPitch_Factor": away_pitch_factor,
-            "Home_FacingPitch_Factor": home_pitch_factor,
-            "Away_Proj_Runs": away_runs,
-            "Home_Proj_Runs": home_runs,
-            "Projected_Run_Diff_AwayMinusHome": away_runs - home_runs,
-            "Model_Total": total,
-            "Away_WinProb": away_prob,
-            "Home_WinProb": home_prob,
-            "Away_FairML": fair_ml(away_prob),
-            "Home_FairML": fair_ml(home_prob),
-            "Away_-1.5_Prob": rl["Away_-1.5_Prob"],
-            "Away_-1.5_FairML": fair_ml(rl["Away_-1.5_Prob"]),
-            "Away_+1.5_Prob": rl["Away_+1.5_Prob"],
-            "Away_+1.5_FairML": fair_ml(rl["Away_+1.5_Prob"]),
-            "Home_-1.5_Prob": rl["Home_-1.5_Prob"],
-            "Home_-1.5_FairML": fair_ml(rl["Home_-1.5_Prob"]),
-            "Home_+1.5_Prob": rl["Home_+1.5_Prob"],
-            "Home_+1.5_FairML": fair_ml(rl["Home_+1.5_Prob"]),
-            "Model_Confidence": confidence["Score"],
-            "Confidence_Grade": confidence["Grade"],
-            "Confidence_Reasons": confidence["Reasons"],
-            "RunLine_Status": "EXPERIMENTAL",
-            "Data_Status": "OK" if not warnings_list else " | ".join(warnings_list),
+            "Date": str(today_et()), "GamePk": g.get("GamePk"), "Game": f"{g.get('Away')} @ {g.get('Home')}",
+            "Away": g.get("Away"), "Home": g.get("Home"), "Venue": g.get("Venue"), "TimeLabel": g.get("TimeLabel",""),
+            "GameDate": g.get("GameDate"), "HoursToGame": g.get("HoursToGame"),
+            "Away_SP": g.get("Away_SP"), "Home_SP": g.get("Home_SP"), "Away_SP_Hand": ahand, "Home_SP_Hand": hhand,
+            "Away_SP_Quality": asp["Quality"], "Home_SP_Quality": hsp["Quality"],
+            "Away_SP_Starts": asp["Starts"], "Home_SP_Starts": hsp["Starts"],
+            "Away_SP_SeasonERA": asp.get("SeasonERA"), "Home_SP_SeasonERA": hsp.get("SeasonERA"),
+            "Away_SP_SeasonFIP": asp.get("SeasonFIP"), "Home_SP_SeasonFIP": hsp.get("SeasonFIP"),
+            "Away_SP_RecentERA": asp.get("RecentERA"), "Home_SP_RecentERA": hsp.get("RecentERA"),
+            "Away_SP_RecentFIP": asp.get("RecentFIP"), "Home_SP_RecentFIP": hsp.get("RecentFIP"),
+            "Away_SP_ExpIP": aip, "Home_SP_ExpIP": hip,
+            "Away_Base_Offense": aoff["BaseFactor"], "Home_Base_Offense": hoff["BaseFactor"],
+            "Away_Platoon_Factor": aoff["PlatoonFactor"], "Home_Platoon_Factor": hoff["PlatoonFactor"],
+            "Away_Lineup_Factor": aoff["LineupFactor"], "Home_Lineup_Factor": hoff["LineupFactor"],
+            "Away_Lineup_Used": aoff["LineupUsed"], "Home_Lineup_Used": hoff["LineupUsed"],
+            "Away_Offense": aoff["Factor"], "Home_Offense": hoff["Factor"],
+            "Away_Proj_Runs": away_runs, "Home_Proj_Runs": home_runs,
+            "Away_WinProb": away_prob, "Home_WinProb": home_prob,
+            "Away_FairML": fair_ml(away_prob), "Home_FairML": fair_ml(home_prob),
+            "Model_Confidence": conf, "Confidence_Grade": conf_grade, "Confidence_Reasons": conf_reasons,
+            "Lineup_Status": "CONFIRMED" if aoff["LineupUsed"] and hoff["LineupUsed"] else "PARTIAL/UNCONFIRMED",
             "Model_Version": MODEL_VERSION,
         })
-
     return pd.DataFrame(rows)

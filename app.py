@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.9-DIAGNOSTICS-DOWNLOAD"
+APP_VERSION = "1.1.0-TOTALS-RESEARCH"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -167,6 +167,86 @@ def fetch_single_game_odds(api_key, game):
     except Exception:
         ev={}
     return {"events": [ev] if isinstance(ev,dict) and ev else [], "error": "" if ev else "No live moneyline was returned for this game.", "quota": quota}
+
+
+@st.cache_data(ttl=75, show_spinner=False)
+def fetch_full_slate_totals(api_key):
+    if not api_key: return {"events":[],"error":"ODDS_API_KEY is not configured.","quota":{}}
+    try:
+        r=requests.get(f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/odds",params={"apiKey":api_key,"regions":"us","markets":"totals","oddsFormat":"american","dateFormat":"iso"},timeout=25)
+    except requests.RequestException:
+        return {"events":[],"error":"Could not reach The Odds API for totals.","quota":{}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401: return {"events":[],"error":"The Odds API rejected ODDS_API_KEY (401).","quota":quota}
+    if r.status_code==429: return {"events":[],"error":"The Odds API credit/rate limit was reached (429).","quota":quota}
+    if r.status_code>=400: return {"events":[],"error":f"The Odds API returned HTTP {r.status_code} for totals.","quota":quota}
+    try: ev=r.json()
+    except Exception: ev=[]
+    return {"events":ev if isinstance(ev,list) else [],"error":"","quota":quota}
+
+
+def fetch_single_game_totals(api_key, game):
+    listing=fetch_odds_event_list(api_key)
+    if listing.get("error"): return listing
+    event=match_event(listing.get("events",[]),game)
+    if not event: return {"events":[],"error":"Could not match this MLB game to The Odds API event list yet.","quota":listing.get("quota",{})}
+    event_id=event.get("id")
+    try:
+        r=requests.get(f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events/{event_id}/odds",params={"apiKey":api_key,"regions":"us","markets":"totals","oddsFormat":"american","dateFormat":"iso"},timeout=25)
+    except requests.RequestException:
+        return {"events":[],"error":"Could not reach The Odds API for this game's total.","quota":{}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code>=400: return {"events":[],"error":f"The Odds API returned HTTP {r.status_code} for this game's total.","quota":quota}
+    try: ev=r.json()
+    except Exception: ev={}
+    return {"events":[ev] if isinstance(ev,dict) and ev else [],"error":"" if ev else "No live total was returned for this game.","quota":quota}
+
+
+def totals_market(event):
+    if not event: return None
+    rows=[]
+    for book in event.get("bookmakers",[]):
+        title=book.get("title") or book.get("key") or "book"
+        for m in book.get("markets",[]):
+            if m.get("key")!="totals": continue
+            by_point={}
+            for o in m.get("outcomes",[]):
+                name=str(o.get("name","")).strip().lower()
+                try: point=float(o.get("point"))
+                except Exception: continue
+                price=valid_odds(o.get("price"))
+                if price is None or name not in ("over","under"): continue
+                by_point.setdefault(point,{})[name]=(price,title)
+            for point,pair in by_point.items():
+                if "over" in pair and "under" in pair: rows.append({"point":point,"over":pair["over"][0],"under":pair["under"][0],"book":title})
+    if not rows: return None
+    counts={}
+    for r in rows: counts[r["point"]]=counts.get(r["point"],0)+1
+    maxn=max(counts.values()); points=sorted([p for p,n in counts.items() if n==maxn]); point=float(statistics.median(points))
+    same=[r for r in rows if abs(r["point"]-point)<1e-9]
+    oc=int(round(statistics.median([r["over"] for r in same]))); uc=int(round(statistics.median([r["under"] for r in same])))
+    ob=max(same,key=lambda r:r["over"]); ub=max(same,key=lambda r:r["under"]); po,pu=no_vig_pair(oc,uc)
+    return {"total":point,"over_best":ob["over"],"under_best":ub["under"],"over_book":ob["book"],"under_book":ub["book"],
+            "over_market_prob":po,"under_market_prob":pu,"books":len(same)}
+
+
+def poisson_total_probs(lam,line):
+    lam=max(.1,float(lam)); line=float(line); probs=[]; p=math.exp(-lam); probs.append(p)
+    for k in range(1,40): p=p*lam/k; probs.append(p)
+    if abs(line-round(line))<1e-9:
+        n=int(round(line)); push=probs[n] if 0<=n<len(probs) else 0.; under=sum(probs[:max(n,0)]); over=max(0.,1.-under-push)
+    else:
+        cutoff=math.floor(line); under=sum(probs[:cutoff+1]); push=0.; over=max(0.,1.-under)
+    s=over+under+push
+    return (over/s,under/s,push/s) if s>0 else (.5,.5,0.)
+
+
+def totals_ev(win,lose,odds):
+    o=float(odds); profit=o/100. if o>0 else 100./abs(o); return float(win)*profit-float(lose)
+
+
+def total_fair_ml(win,lose):
+    d=float(win)+float(lose); return fair_ml(float(win)/d) if d>0 else None
 
 def event_match(event, game):
     if team_key(event.get("away_team")) != team_key(game.get("Away")) or team_key(event.get("home_team")) != team_key(game.get("Home")):
@@ -433,8 +513,8 @@ def slate_export_df(candidates):
 st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
-  <div class="title">Moneyline Model</div>
-  <div class="sub">Pitcher 2.0 + offense/platoon + confirmed-lineup upgrade. Edge-Driven Card uses the frozen production probabilities and lets historical edge buckets drive the bet label; the underlying model is unchanged.</div>
+  <div class="title">MLB Edge</div>
+  <div class="sub">Moneyline remains the validated production market. Totals Research adds a separate projected-total view using the same pitcher/offense/lineup core plus park and weather context. Totals are research-only until historically validated.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -445,18 +525,16 @@ except Exception:
     api_key=""
 
 st.markdown('<div class="kicker">Slate Controls</div>', unsafe_allow_html=True)
-ctrl1,ctrl2=st.columns([3,2])
+ctrl1,ctrl2,ctrl3=st.columns([3,2,2])
 with ctrl1:
-    slate_date=st.date_input(
-        "Slate date",
-        value=today_et(),
-        min_value=today_et(),
-        max_value=today_et()+timedelta(days=14),
-        help="Current/upcoming MLB dates only. Historical odds are never requested by this production app.",
-    )
+    slate_date=st.date_input("Slate date",value=today_et(),min_value=today_et(),max_value=today_et()+timedelta(days=14),help="Current/upcoming MLB dates only.")
 with ctrl2:
-    st.caption("Live odds are manual. Opening or changing the date uses 0 Odds API credits.")
-    load_market=st.button("Load / Refresh Full Slate Odds",use_container_width=True,help="Explicitly loads current moneylines for the full MLB feed. Single Game has its own separate odds button below.")
+    st.caption("Moneyline market")
+    load_market=st.button("Load Full Slate ML Odds",use_container_width=True)
+with ctrl3:
+    st.caption("Totals research market")
+    load_totals_market=st.button("Load Full Slate Totals",use_container_width=True)
+st.caption("Nothing calls The Odds API automatically. Moneyline and totals are separate manual pulls so you control credits.")
 
 free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
 if free_refresh:
@@ -469,6 +547,11 @@ if "odds_payload" not in st.session_state:
     st.session_state.odds_loaded_at=None
     st.session_state.odds_scope=None
 
+if "totals_payload" not in st.session_state:
+    st.session_state.totals_payload={"events":[],"error":"","quota":{}}
+    st.session_state.totals_loaded=False
+    st.session_state.totals_scope=None
+
 if load_market:
     fetch_odds.clear()
     st.session_state.odds_payload=fetch_odds(api_key)
@@ -476,7 +559,14 @@ if load_market:
     st.session_state.odds_loaded_at=pd.Timestamp.now(tz="America/New_York")
     st.session_state.odds_scope="full slate"
 
+if load_totals_market:
+    fetch_full_slate_totals.clear()
+    st.session_state.totals_payload=fetch_full_slate_totals(api_key)
+    st.session_state.totals_loaded=True
+    st.session_state.totals_scope="full slate totals"
+
 odds_payload=st.session_state.odds_payload if st.session_state.get("odds_loaded") else {"events":[],"error":"","quota":{}}
+totals_payload=st.session_state.totals_payload if st.session_state.get("totals_loaded") else {"events":[],"error":"","quota":{}}
 
 with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
     games=fetch_games_for_date(slate_date)
@@ -575,6 +665,26 @@ else:
         if x.get("confidence_reasons"):
             st.caption(f"Data notes: {x['confidence_reasons']}")
 
+        st.markdown('<div class="kicker">Totals Research</div>', unsafe_allow_html=True)
+        st.caption("Research only — no official totals BET/LEAN grade yet. Uses pitcher/offense/lineup plus totals-only park/weather context.")
+        pull_total=st.button("Load / Refresh Total for This Game",use_container_width=True,key=f"pull_total_{x['GamePk']}")
+        if pull_total:
+            st.session_state.totals_payload=fetch_single_game_totals(api_key,selected_game)
+            st.session_state.totals_loaded=True
+            st.session_state.totals_scope=f"single game total: {x['away']} @ {x['home']}"
+            st.rerun()
+        row_for_total=model_df.loc[model_df["GamePk"]==x["GamePk"]].iloc[0].to_dict()
+        tctx=engine.totals_projection(row_for_total) if hasattr(engine,"totals_projection") else {"Projected_Total":x['away_proj']+x['home_proj'],"Base_Total":x['away_proj']+x['home_proj'],"Park_Factor":1.,"Weather_Factor":1.,"Weather_Available":False}
+        tev=match_event(totals_payload.get("events",[]),selected_game) if st.session_state.get("totals_loaded") else None
+        tm=totals_market(tev); proj_total=float(tctx["Projected_Total"])
+        if tm:
+            op,up,push=poisson_total_probs(proj_total,tm["total"]); d=op+up
+            oe=op/d-tm["over_market_prob"] if d>0 else 0.; ue=up/d-tm["under_market_prob"] if d>0 else 0.
+            lean="OVER" if oe>=ue else "UNDER"; over_ev=totals_ev(op,up,tm["over_best"]); under_ev=totals_ev(up,op,tm["under_best"])
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS RESEARCH</div><div class="best-pick">Model {proj_total:.2f} • Market {tm['total']:.1f}</div><div class="best-game">Research lean: {lean} • {tm['books']} books</div></div><div class="badge badge-lean">RESEARCH</div></div><div class="metrics"><div class="metric"><span>Over prob</span><b>{op*100:.1f}%</b></div><div class="metric"><span>Under prob</span><b>{up*100:.1f}%</b></div><div class="metric"><span>Over edge</span><b>{oe*100:+.1f}%</b></div><div class="metric"><span>Under edge</span><b>{ue*100:+.1f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tm['over_best']:+d} ({tm['over_book']}) • EV {over_ev*100:+.1f}% • Fair {total_fair_ml(op,up):+d} | Under {tm['under_best']:+d} ({tm['under_book']}) • EV {under_ev*100:+.1f}% • Fair {total_fair_ml(up,op):+d}</div></div>''',unsafe_allow_html=True)
+        else:
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS RESEARCH</div><div class="best-pick">Projected total {proj_total:.2f}</div><div class="best-game">Load this game's total only when you want a market comparison.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Base runs</span><b>{float(tctx['Base_Total']):.2f}</b></div><div class="metric"><span>Park factor</span><b>{float(tctx['Park_Factor']):.3f}</b></div><div class="metric"><span>Weather factor</span><b>{float(tctx['Weather_Factor']):.3f}</b></div><div class="metric"><span>Projected total</span><b>{proj_total:.2f}</b></div></div></div>''',unsafe_allow_html=True)
+
         st.markdown('<div class="kicker">Game Data</div>', unsafe_allow_html=True)
         if "show_single_downloads" not in st.session_state:
             st.session_state.show_single_downloads = False
@@ -639,6 +749,22 @@ else:
                 st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
                 if x.get("confidence_reasons"):
                     st.caption(f"Data notes: {x['confidence_reasons']}")
+        st.markdown('<div class="kicker">Totals Research Board</div>', unsafe_allow_html=True)
+        if not st.session_state.get("totals_loaded"):
+            st.info("Totals market not loaded. Use the separate full-slate totals button only when you want live total prices.")
+        for cx in sorted(candidates,key=start_sort):
+            mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
+            if mr.empty: continue
+            ctx=engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine,"totals_projection") else {"Projected_Total":cx['away_proj']+cx['home_proj']}
+            game_obj=next((g for g in games if g.get("GamePk")==cx["GamePk"]),None)
+            ev=match_event(totals_payload.get("events",[]),game_obj) if game_obj and st.session_state.get("totals_loaded") else None
+            tm=totals_market(ev); proj=float(ctx["Projected_Total"])
+            if tm:
+                op,up,push=poisson_total_probs(proj,tm["total"]); d=op+up; oe=op/d-tm["over_market_prob"] if d>0 else 0.; ue=up/d-tm["under_market_prob"] if d>0 else 0.; lean="OVER" if oe>=ue else "UNDER"; line=f"Market {tm['total']:.1f} • Research lean {lean} • edge {max(oe,ue)*100:+.1f}%"
+            else: line="Model only • market total not loaded"
+            with st.expander(f"{cx['time']} • {cx['away']} @ {cx['home']} — Model total {proj:.2f}",expanded=False):
+                st.write(line); st.caption("Research only. No official totals bet label until historical validation is completed.")
+
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
         if "show_slate_downloads" not in st.session_state:
             st.session_state.show_slate_downloads = False
@@ -662,7 +788,7 @@ else:
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Diagnostics Download keeps the same edge-driven bet-selection thresholds and adds closable download panels plus selected-game diagnostic export: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines remain excluded. Totals are available as research-only output and are not part of the official card. Diagnostics Download keeps the same edge-driven bet-selection thresholds and adds closable download panels plus selected-game diagnostic export: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Moneyline and totals are separate requests so you control which market consumes credits. Single Game and Full Slate each support explicit totals pulls. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
