@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.7-EDGE-DRIVEN-CARD"
+APP_VERSION = "1.0.8-CLEAR-CARD"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -487,68 +487,30 @@ else:
         official=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection") in ("BEST BET","BET")], key=lambda x:x["best"].get("smart_score",-999), reverse=True)[:5]
         secondary=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection")=="LEAN"], key=lambda x:x["best"].get("smart_score",-999), reverse=True)
         priced=[x for x in candidates if x["market_available"]]
-        best=(official or secondary or priced or candidates)[0]
-        b=best["best"]
-        lineup_text="Confirmed lineups" if best["lineup_confirmed"] else "Lineups not fully confirmed"
-        st.markdown('<div class="kicker">Top Recommendation</div>',unsafe_allow_html=True)
-        if best["market_available"]:
-            st.markdown(f'''
-            <div class="best-card">
-              <div class="best-top"><div><div class="best-tag">{b['selection']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • {b['book']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div>
-              <div class="metrics">
-                <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
-                <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
-                <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
-                <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
-              </div>
-              <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {best['alpha']*100:.0f}% / market {(1-best['alpha'])*100:.0f}% • {best['books']} books in consensus</div>
-            </div>
-            ''',unsafe_allow_html=True)
+
+        if not priced:
+            st.markdown('<div class="kicker">Today\'s Model View</div>',unsafe_allow_html=True)
+            st.info("Live odds are not loaded. The slate remains fully selectable in model-only mode; load full-slate odds only when you want priced recommendations.")
         else:
-            away_side=next(z for z in best["all"] if z["team"]==best["away"])
-            home_side=next(z for z in best["all"] if z["team"]==best["home"])
-            fav=away_side if away_side["prob"]>=home_side["prob"] else home_side
-            st.markdown(f'''
-            <div class="best-card">
-              <div class="best-top"><div><div class="best-tag">MODEL VIEW</div><div class="best-pick">{fav['team']} {fav['prob']*100:.1f}%</div><div class="best-game">{best['away']} @ {best['home']} • {best['time']} • market not loaded</div></div><div class="badge badge-lean">MODEL ONLY</div></div>
-              <div class="metrics">
-                <div class="metric"><span>{best['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div>
-                <div class="metric"><span>{best['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div>
-                <div class="metric"><span>{best['away']} fair</span><b>{away_side['fair']:+d}</b></div>
-                <div class="metric"><span>{best['home']} fair</span><b>{home_side['fair']:+d}</b></div>
-              </div>
-              <div class="best-game" style="margin-top:10px">{lineup_text} • Model confidence {best['confidence']}/100 • Load full-slate odds only when you want priced recommendations</div>
-            </div>
-            ''',unsafe_allow_html=True)
+            st.markdown('<div class="kicker">Today\'s Plays</div>',unsafe_allow_html=True)
+            plays=official + secondary
+            if not plays:
+                st.info("No game currently reaches the 5% LEAN threshold. The model is passing the slate at these prices.")
+            else:
+                st.caption(f"{len(official)} official bet{'s' if len(official)!=1 else ''} • {len(secondary)} lean{'s' if len(secondary)!=1 else ''}. BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%. No minimum number of bets is forced.")
+                rank=1
+                for x in plays[:8]:
+                    b=x["best"]
+                    is_official=b["selection"] in ("BEST BET","BET")
+                    rank_label=f"#{rank}" if is_official else "WATCH"
+                    if is_official:
+                        rank+=1
+                    st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{rank_label} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • Win {b['prob']*100:.1f}%</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div></div>''',unsafe_allow_html=True)
 
-        st.markdown('<div class="kicker">Edge-Driven Official Card</div>',unsafe_allow_html=True)
-        if official:
-            dogs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]>0)
-            favs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]<0)
-            st.caption(f"Top {len(official)} official play{'s' if len(official)!=1 else ''} • {dogs} underdog{'s' if dogs!=1 else ''} • {favs} favorite{'s' if favs!=1 else ''}. BET starts at 7.5% edge; BEST BET starts at 10%. EV is displayed and used for ranking, not as a separate hard gate. No side balance is forced.")
-            if dogs==len(official) and len(official)>=3:
-                st.warning("All current official qualifiers are underdogs. That means no favorite cleared the production thresholds at these prices; it is not an instruction to blindly bet every dog.")
-        if not official:
-            st.info("No moneyline cleared the 7.5% edge BET threshold right now. LEAN opinions remain visible below; the app never forces a minimum number of bets.")
-        else:
-            for i,x in enumerate(official[:5],1):
-                b=x["best"]
-                st.markdown(f'''
-                <div class="game-card">
-                  <div class="game-head"><div><div class="game-time">#{i} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div>
-                  <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d}</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div>
-                </div>
-                ''',unsafe_allow_html=True)
-
-        if secondary:
-            st.markdown('<div class="kicker">Lean Watchlist</div>',unsafe_allow_html=True)
-            st.caption("5–7.5% edge zone, or a play held back by a large-dog/lineup guardrail. These are model opinions, not official bets.")
-            for x in secondary[:3]:
-                b=x["best"]
-                st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{x["time"]}</div><div class="match">{x["away"]} @ {x["home"]}</div></div><div class="badge {cls(b["selection"])}">{b["selection"]}</div></div><div class="pick"><div><div class="pick-main">{b["team"]} ML {b["odds"]:+d}</div><div class="pick-sub">{b["book"]} • Edge {b["edge"]*100:+.1f}% • EV {b["ev"]*100:+.1f}% • Fair {b["fair"]:+d}</div></div></div></div>''', unsafe_allow_html=True)
-
-        st.markdown('<div class="kicker">Full Slate</div>',unsafe_allow_html=True)
-        for x in sorted(candidates,key=start_sort):
+        other_games=[x for x in sorted(candidates,key=start_sort) if x["best"].get("selection") not in ("BEST BET","BET","LEAN")]
+        st.markdown('<div class="kicker">Other Games</div>',unsafe_allow_html=True)
+        st.caption(f"{len(other_games)} game{'s' if len(other_games)!=1 else ''} currently outside the play list. Expand any matchup for the full model view.")
+        for x in other_games:
             b=x["best"]
             with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['selection']}",expanded=False):
                 if x['market_available']:
@@ -563,7 +525,6 @@ else:
                 st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
                 if x.get("confidence_reasons"):
                     st.caption(f"Data notes: {x['confidence_reasons']}")
-
         export=[]
         for x in candidates:
             b=x["best"]
@@ -572,7 +533,7 @@ else:
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Edge-Driven Card is a separate bet-selection layer: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Clear Card keeps the same edge-driven bet-selection thresholds but simplifies the presentation: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
