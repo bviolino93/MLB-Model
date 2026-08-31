@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.3.1-IMPORT-COMPAT-FIX"
+APP_VERSION = "1.0.4-SINGLE-GAME-ODDS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -109,6 +109,64 @@ def fetch_odds(api_key):
         ev=[]
     return {"events":ev if isinstance(ev,list) else [],"error":"","quota":quota}
 
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_odds_event_list(api_key):
+    """Fetch current MLB event IDs only. The provider documents this endpoint as quota-free."""
+    if not api_key:
+        return {"events": [], "error": "ODDS_API_KEY is not configured.", "quota": {}}
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events",
+            params={"apiKey": api_key, "dateFormat": "iso"},
+            timeout=25,
+        )
+    except requests.RequestException:
+        return {"events": [], "error": "Could not reach The Odds API event list.", "quota": {}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401:
+        return {"events": [], "error": "The Odds API rejected ODDS_API_KEY (401).", "quota": quota}
+    if r.status_code>=400:
+        return {"events": [], "error": f"The Odds API event list returned HTTP {r.status_code}.", "quota": quota}
+    try:
+        ev=r.json()
+    except Exception:
+        ev=[]
+    return {"events": ev if isinstance(ev,list) else [], "error": "", "quota": quota}
+
+
+def fetch_single_game_odds(api_key, game):
+    """Fetch h2h odds for one explicitly selected MLB event."""
+    listing=fetch_odds_event_list(api_key)
+    if listing.get("error"):
+        return listing
+    event=match_event(listing.get("events",[]), game)
+    if not event:
+        return {"events": [], "error": "Could not match this MLB game to The Odds API event list yet.", "quota": listing.get("quota",{})}
+    event_id=event.get("id")
+    if not event_id:
+        return {"events": [], "error": "Matched event did not contain an Odds API event ID.", "quota": listing.get("quota",{})}
+    try:
+        r=requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events/{event_id}/odds",
+            params={"apiKey":api_key,"regions":"us","markets":"h2h","oddsFormat":"american","dateFormat":"iso"},
+            timeout=25,
+        )
+    except requests.RequestException:
+        return {"events": [], "error": "Could not reach The Odds API for this game.", "quota": {}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401:
+        return {"events": [], "error": "The Odds API rejected ODDS_API_KEY (401).", "quota": quota}
+    if r.status_code==429:
+        return {"events": [], "error": "The Odds API credit/rate limit was reached (429).", "quota": quota}
+    if r.status_code>=400:
+        return {"events": [], "error": f"The Odds API returned HTTP {r.status_code} for this game.", "quota": quota}
+    try:
+        ev=r.json()
+    except Exception:
+        ev={}
+    return {"events": [ev] if isinstance(ev,dict) and ev else [], "error": "" if ev else "No live moneyline was returned for this game.", "quota": quota}
 
 def event_match(event, game):
     if team_key(event.get("away_team")) != team_key(game.get("Away")) or team_key(event.get("home_team")) != team_key(game.get("Home")):
@@ -261,7 +319,7 @@ with ctrl1:
     )
 with ctrl2:
     st.caption("Live odds are manual. Opening or changing the date uses 0 Odds API credits.")
-    load_market=st.button("Load / Refresh Live Odds",use_container_width=True,help="This is the only control that calls The Odds API and can use credits.")
+    load_market=st.button("Load / Refresh Full Slate Odds",use_container_width=True,help="Explicitly loads current moneylines for the full MLB feed. Single Game has its own separate odds button below.")
 
 free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
 if free_refresh:
@@ -272,12 +330,14 @@ if "odds_payload" not in st.session_state:
     st.session_state.odds_payload={"events":[],"error":"","quota":{}}
     st.session_state.odds_loaded=False
     st.session_state.odds_loaded_at=None
+    st.session_state.odds_scope=None
 
 if load_market:
     fetch_odds.clear()
     st.session_state.odds_payload=fetch_odds(api_key)
     st.session_state.odds_loaded=True
     st.session_state.odds_loaded_at=pd.Timestamp.now(tz="America/New_York")
+    st.session_state.odds_scope="full slate"
 
 odds_payload=st.session_state.odds_payload if st.session_state.get("odds_loaded") else {"events":[],"error":"","quota":{}}
 
@@ -298,7 +358,7 @@ if odds_payload.get("error"):
     st.error(odds_payload["error"])
 
 if not st.session_state.get("odds_loaded"):
-    st.info("Model-only mode. Tap **Load / Refresh Live Odds** when you want current prices, edge/EV and official BET/LEAN/PASS grades. No Odds API call has been made yet.")
+    st.info("Model-only mode. In **Single Game**, choose a matchup and load only that game's odds. In **Full Slate**, use the full-slate button above. No Odds API call has been made yet.")
 
 if not games:
     st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
@@ -326,8 +386,23 @@ else:
     if mode == "🎯 Single Game":
         chrono = sorted(candidates, key=start_sort)
         labels = [f"{x['time']} • {x['away']} @ {x['home']}" for x in chrono]
-        selected_label = st.selectbox("Choose matchup", labels, index=0)
+        selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup")
         x = chrono[labels.index(selected_label)]
+        selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
+
+        st.caption("Selecting a matchup does **not** call the odds API. Tap below only when you want this game's live moneyline.")
+        pull_single = st.button("Load / Refresh Odds for This Game", use_container_width=True, type="primary")
+        if pull_single:
+            payload = fetch_single_game_odds(api_key, selected_game)
+            st.session_state.odds_payload = payload
+            st.session_state.odds_loaded = True
+            st.session_state.odds_loaded_at = pd.Timestamp.now(tz="America/New_York")
+            st.session_state.odds_scope = f"single game: {x['away']} @ {x['home']}"
+            st.rerun()
+
+        if st.session_state.get("odds_loaded") and st.session_state.get("odds_scope"):
+            st.caption(f"Loaded odds scope: **{st.session_state.odds_scope}**")
+
         b = x["best"]
         away_side = next(z for z in x["all"] if z["team"] == x["away"])
         home_side = next(z for z in x["all"] if z["team"] == x["home"])
@@ -426,7 +501,7 @@ else:
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded from v1.0. Live Odds API pulls are manual-only; date changes and model-only views consume zero Odds API credits.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded from v1.0. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
