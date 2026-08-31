@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.6-BALANCED-CARD"
+APP_VERSION = "1.0.7-EDGE-DRIVEN-CARD"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -243,37 +243,35 @@ def grade(prob, odds, confidence, lineup_confirmed):
 
 
 def smart_card_label(side, confidence, lineup_confirmed):
-    """Balanced selection layer only; model probabilities/calibration stay unchanged."""
+    """Edge-driven selection layer; model probabilities/calibration stay unchanged."""
     if side.get("odds") is None or side.get("edge") is None or side.get("ev") is None:
         return "MODEL ONLY"
 
     odds=float(side["odds"])
     edge=float(side["edge"])
-    ev=float(side["ev"])
     legacy=side.get("verdict","PASS")
 
-    # Never override a production guardrail that already rejected the side.
+    # Preserve hard production rejections (invalid/very long prices, etc.).
     if legacy == "PASS":
         return "PASS"
 
-    # +200 and longer dogs have a thin historical sample. Keep them materially stricter.
+    # Thin historical sample for +200 and longer dogs: require materially more edge.
     if odds >= 200:
-        if lineup_confirmed and confidence >= 82 and edge >= .15 and ev >= .12 and legacy in ("BEST BET","BET"):
+        if lineup_confirmed and confidence >= 82 and edge >= .15 and legacy in ("BEST BET","BET"):
             return "BEST BET"
-        if lineup_confirmed and confidence >= 80 and edge >= .12 and ev >= .10 and legacy in ("BEST BET","BET"):
+        if lineup_confirmed and confidence >= 80 and edge >= .12 and legacy in ("BEST BET","BET"):
             return "BET"
-        if edge >= .075 and ev >= .05:
+        if edge >= .075:
             return "LEAN"
         return "PASS"
 
-    # Balanced card: enough selectivity to protect the edge without forcing an empty slate.
-    best_conf = 76 if lineup_confirmed else 80
-    bet_conf = 72 if lineup_confirmed else 76
-    if legacy in ("BEST BET","BET") and confidence >= best_conf and edge >= .12 and ev >= .10:
+    # Frozen price-bucket audit supports edge as the primary gate.
+    # 10%+ = strongest zone, 7.5–10% = bettable, 5–7.5% = lean, <5% = pass.
+    if legacy in ("BEST BET","BET") and edge >= .10:
         return "BEST BET"
-    if legacy in ("BEST BET","BET") and confidence >= bet_conf and edge >= .08 and ev >= .06:
+    if legacy in ("BEST BET","BET") and edge >= .075:
         return "BET"
-    if edge >= .05 and ev >= .03:
+    if edge >= .05:
         return "LEAN"
     return "PASS"
 
@@ -344,7 +342,7 @@ st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">Moneyline Model</div>
-  <div class="sub">Pitcher 2.0 + offense/platoon + confirmed-lineup upgrade. Balanced Card turns the same production probabilities into a selective but usable 0–5 bet slate; the underlying model is unchanged.</div>
+  <div class="sub">Pitcher 2.0 + offense/platoon + confirmed-lineup upgrade. Edge-Driven Card uses the frozen production probabilities and lets historical edge buckets drive the bet label; the underlying model is unchanged.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -523,15 +521,15 @@ else:
             </div>
             ''',unsafe_allow_html=True)
 
-        st.markdown('<div class="kicker">Balanced Official Card</div>',unsafe_allow_html=True)
+        st.markdown('<div class="kicker">Edge-Driven Official Card</div>',unsafe_allow_html=True)
         if official:
             dogs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]>0)
             favs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]<0)
-            st.caption(f"Top {len(official)} official play{'s' if len(official)!=1 else ''} • {dogs} underdog{'s' if dogs!=1 else ''} • {favs} favorite{'s' if favs!=1 else ''}. BET zone starts around 8% edge; BEST BET starts around 12%. No side balance is forced.")
+            st.caption(f"Top {len(official)} official play{'s' if len(official)!=1 else ''} • {dogs} underdog{'s' if dogs!=1 else ''} • {favs} favorite{'s' if favs!=1 else ''}. BET starts at 7.5% edge; BEST BET starts at 10%. EV is displayed and used for ranking, not as a separate hard gate. No side balance is forced.")
             if dogs==len(official) and len(official)>=3:
                 st.warning("All current official qualifiers are underdogs. That means no favorite cleared the production thresholds at these prices; it is not an instruction to blindly bet every dog.")
         if not official:
-            st.info("No moneyline cleared the Balanced Card BET threshold right now. LEAN opinions remain visible below; the app never forces a minimum number of bets.")
+            st.info("No moneyline cleared the 7.5% edge BET threshold right now. LEAN opinions remain visible below; the app never forces a minimum number of bets.")
         else:
             for i,x in enumerate(official[:5],1):
                 b=x["best"]
@@ -544,7 +542,7 @@ else:
 
         if secondary:
             st.markdown('<div class="kicker">Lean Watchlist</div>',unsafe_allow_html=True)
-            st.caption("5–8% edge zone, or a play held back by a large-dog/lineup guardrail. These are model opinions, not official bets.")
+            st.caption("5–7.5% edge zone, or a play held back by a large-dog/lineup guardrail. These are model opinions, not official bets.")
             for x in secondary[:3]:
                 b=x["best"]
                 st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{x["time"]}</div><div class="match">{x["away"]} @ {x["home"]}</div></div><div class="badge {cls(b["selection"])}">{b["selection"]}</div></div><div class="pick"><div><div class="pick-main">{b["team"]} ML {b["odds"]:+d}</div><div class="pick-sub">{b["book"]} • Edge {b["edge"]*100:+.1f}% • EV {b["ev"]*100:+.1f}% • Fair {b["fair"]:+d}</div></div></div></div>''', unsafe_allow_html=True)
@@ -569,12 +567,12 @@ else:
         export=[]
         for x in candidates:
             b=x["best"]
-            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean","Odds":b["odds"],"Book":b["book"],"Balanced_Card":b.get("selection"),"Legacy_Grade":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,"Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,"Model_Version":MODEL_VERSION})
+            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean","Odds":b["odds"],"Book":b["book"],"Edge_Driven_Card":b.get("selection"),"Legacy_Grade":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,"Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,"Model_Version":MODEL_VERSION})
         st.download_button("Download Today's Moneyline Board",pd.DataFrame(export).to_csv(index=False).encode("utf-8"),file_name="mlb_production_moneyline_board.csv",mime="text/csv",use_container_width=True)
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Balanced Card is a separate bet-selection layer: BEST BET generally starts at 12% edge / 10% EV, BET at 8% / 6%, LEAN at 5% / 3%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Edge-Driven Card is a separate bet-selection layer: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
