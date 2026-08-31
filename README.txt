@@ -1,47 +1,41 @@
-MLB Model v0.14.1 — Point-in-Time Bullpen Test
+MLB Model v0.15.0 — Point-in-Time Offense + Platoon Test
 
 Purpose
 -------
-Freeze v0.13 Pitcher Model 2.0 as the research champion and test whether genuinely point-in-time bullpen quality and availability add predictive value.
+Freeze v0.13 Pitcher Model 2.0 and test whether point-in-time team offense and handedness matchup add out-of-sample value.
 
 Protocol
 --------
-- Same Moneyline Master input: mlb_moneyline_master_2023_2025.csv
-- Strict <=6 hours to first pitch
-- Doubleheaders removed
-- 2023 fit
-- 2024 selects model/market blend
-- 2023+2024 refit
-- 2025 untouched holdout
-- Same betting thresholds; ROI never selects the model
-- Frozen v0.13 champion rerun on the exact same bullpen-eligible rows
+- Same Moneyline Master CSV as prior PIT tests.
+- 2023 train -> 2024 validation/blend selection -> 2025 untouched holdout.
+- Strict <=6 hours before first pitch and no doubleheaders.
+- Frozen v0.13 champion is refit on the exact same offense-eligible rows.
+- Same betting thresholds. Promotion is based on Brier/log loss, not ROI.
 
-Bullpen features
+New inputs
+----------
+- Season-to-date team hitting rates.
+- Prior-14-day offense.
+- K%, BB%, HR/PA, ISO, run/PA, fixed-weight wOBA-like quality.
+- Team hitting versus the opposing starter's throwing hand (L/R), shrunk hard toward overall offense.
+- Platoon split is used only after the configured minimum prior PA; otherwise the model falls back to overall offense and records the coverage.
+
+Data / leakage controls
+-----------------------
+- Free MLB Stats API only; zero Odds API historical credits.
+- Hitting game logs are filtered to calendar days strictly before the target game.
+- Same-day target-game hitting cannot enter the features.
+- Fixed batting weights and shrinkage constants; no target-season final league averages.
+- Historical starter identity retains the same retrospective caveat documented in v0.12-v0.14.
+
+Default settings
 ----------------
-- Season-to-date relief FIP/ERA/K-BB9/WHIP with fixed-prior shrinkage
-- Prior 7-day and 14-day relief form
-- Prior 1-day and 3-day innings/pitches
-- Number of relievers used
-- Relievers throwing >=20 pitches yesterday
-- Relievers used on back-to-back prior days
+- Prior team games: 12
+- Prior starter starts: 3
+- Minimum prior platoon PA: 80
 
-Data integrity
+Primary output
 --------------
-Bullpen history is sourced from MLB Stats API pitcher gameLog data. Only appearances with gamesStarted == 0 are treated as relief appearances, and only appearances before the target game date are used. Target doubleheaders are excluded by the strict research sample.
+mlb_pitcher_offense_platoon_comparison.csv
 
-First run
----------
-The app requests roughly one free MLB pitching game-log payload per team-season and caches it in .mlb_bullpen_cache. First run can take a few minutes; reruns should be much faster. This uses zero The Odds API credits.
-
-Main output
------------
-mlb_pitcher_bullpen_comparison.csv
-
-Promotion rule
---------------
-Promote bullpen only if it improves predictive accuracy (especially calibrated 2025 Brier) versus frozen v0.13 without degrading 2024 validation. Do not promote because ROI looks better.
-
-
-v0.14.1 bullpen ingestion fix
-------------------------------
-The original v0.14.0 team-level MLB /stats gameLog request returned zero relief rows for all 90 team-seasons. v0.14.1 replaces it with a historical full-season roster -> player gameLog pipeline, filters each appearance to the requested team when MLB supplies split.team.id, retains only relief appearances (gamesStarted=0), and caches both player-season logs and the finished team-season ledger. A new v141 cache namespace prevents reuse of the broken empty responses. This uses zero Odds API credits.
+If v0.15 does not improve the frozen v0.13 champion cleanly on calibrated 2025 Brier without validation deterioration, reject the offense/platoon layer.

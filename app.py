@@ -30,7 +30,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.14.1-PIT-BULLPEN-ROSTER-FIX"
+APP_VERSION = "0.15.0-PIT-OFFENSE-PLATOON"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -4703,6 +4703,214 @@ def run_pitcher_bullpen_test(master_df,min_prior_games=12,min_pitcher_starts=3,m
         "coefficients":v14.get("coefficients",pd.DataFrame()),
     }
 
+
+
+# ===== v0.15.0 point-in-time offense + platoon research layer =====
+OFFENSE_CACHE_DIR = Path(".mlb_offense_cache_v15")
+OFFENSE_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _offense_cache_file(season, team_id, split_code):
+    tag = split_code or "all"
+    return OFFENSE_CACHE_DIR / f"team_{int(team_id)}_{int(season)}_{tag}_hitting_gamelog.json"
+
+
+def _starter_hand_cache_file(pitcher_id):
+    return OFFENSE_CACHE_DIR / f"pitcher_{int(pitcher_id)}_hand.json"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_team_hitting_gamelog(season, team_id, split_code=None):
+    """Free MLB Stats API team hitting game log. split_code is vl / vr when requested."""
+    cf=_offense_cache_file(season,team_id,split_code)
+    if cf.exists():
+        try: return json.loads(cf.read_text()),None,True
+        except Exception: pass
+    url=f"https://statsapi.mlb.com/api/v1/teams/{int(team_id)}/stats"
+    params={"stats":"gameLog","group":"hitting","season":int(season),"gameType":"R"}
+    if split_code: params["sitCodes"]=str(split_code)
+    try: r=requests.get(url,params=params,timeout=35)
+    except requests.RequestException as e: return None,f"Team {team_id} {season} hitting request failed: {e}",False
+    if r.status_code!=200: return None,f"Team {team_id} {season} hitting returned HTTP {r.status_code}",False
+    try: payload=r.json()
+    except Exception: return None,f"Team {team_id} {season} hitting response was not JSON",False
+    try: cf.write_text(json.dumps(payload))
+    except Exception: pass
+    return payload,None,False
+
+
+def parse_team_hitting_gamelog(payload):
+    rows=[]
+    for block in (payload or {}).get("stats",[]) or []:
+        for sp in block.get("splits",[]) or []:
+            stat=sp.get("stat") or {}; raw=sp.get("date"); game=sp.get("game") or {}
+            if not raw: continue
+            try: d=pd.to_datetime(raw,errors="raise",utc=True)
+            except Exception: continue
+            def n(k,default=0.0):
+                try:
+                    v=stat.get(k)
+                    return float(v) if v not in (None,"","-") else float(default)
+                except Exception: return float(default)
+            ab=n("atBats"); h=n("hits"); d2=n("doubles"); d3=n("triples"); hr=n("homeRuns")
+            bb=n("baseOnBalls"); so=n("strikeOuts"); hbp=n("hitByPitch"); sf=n("sacFlies")
+            pa=n("plateAppearances",ab+bb+hbp+sf)
+            tb=n("totalBases",max(0.0,h-d2-d3-hr)+2*d2+3*d3+4*hr)
+            rows.append({"date":d,"gamePk":game.get("gamePk"),"PA":pa,"AB":ab,"H":h,"2B":d2,"3B":d3,"HR":hr,"BB":bb,"SO":so,"HBP":hbp,"SF":sf,"TB":tb,"R":n("runs")})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_pitcher_throw_hand(pitcher_id):
+    cf=_starter_hand_cache_file(pitcher_id)
+    if cf.exists():
+        try:
+            x=json.loads(cf.read_text()); return x.get("hand","U"),None,True
+        except Exception: pass
+    try: r=requests.get(f"https://statsapi.mlb.com/api/v1/people/{int(pitcher_id)}",timeout=25)
+    except requests.RequestException as e: return "U",str(e),False
+    if r.status_code!=200: return "U",f"HTTP {r.status_code}",False
+    try: hand=((r.json().get("people") or [{}])[0].get("pitchHand") or {}).get("code","U")
+    except Exception: hand="U"
+    if hand not in ("L","R"): hand="U"
+    try: cf.write_text(json.dumps({"hand":hand}))
+    except Exception: pass
+    return hand,None,False
+
+
+def _hitting_rates(df):
+    if df is None or df.empty: return None
+    sums={c:float(pd.to_numeric(df[c],errors="coerce").fillna(0).sum()) for c in ["PA","AB","H","2B","3B","HR","BB","SO","HBP","TB","R"] if c in df.columns}
+    pa=sums.get("PA",0.0); ab=sums.get("AB",0.0)
+    if pa<=0 or ab<=0: return None
+    h=sums.get("H",0); d2=sums.get("2B",0); d3=sums.get("3B",0); hr=sums.get("HR",0); bb=sums.get("BB",0); hbp=sums.get("HBP",0); so=sums.get("SO",0); tb=sums.get("TB",0)
+    singles=max(0.0,h-d2-d3-hr)
+    # Fixed wOBA-like weights: stable constants, not estimated from future target-season results.
+    woba_num=.69*bb+.72*hbp+.89*singles+1.27*d2+1.62*d3+2.10*hr
+    return {"PA":pa,"wOBAx":woba_num/pa,"Kpct":so/pa,"BBpct":bb/pa,"HRpct":hr/pa,"ISO":max(0.0,(tb-h)/ab),"RPA":sums.get("R",0)/pa}
+
+
+def summarize_offense_before_game(overall_df,split_df,game_time,min_overall_pa=180.0,min_platoon_pa=80.0):
+    target=pd.Timestamp(game_time).tz_convert("UTC").normalize()
+    def before(df):
+        if df is None or df.empty: return pd.DataFrame()
+        x=df.copy(); x["date"]=pd.to_datetime(x["date"],errors="coerce",utc=True)
+        return x[x["date"].dt.normalize()<target].copy()
+    o=before(overall_df); s=before(split_df)
+    season=_hitting_rates(o)
+    if season is None or season["PA"]<float(min_overall_pa): return None
+    recent=_hitting_rates(o[o["date"].dt.normalize()>=target-pd.Timedelta(days=14)]) or season
+    platoon=_hitting_rates(s)
+    use_split=bool(platoon is not None and platoon["PA"]>=float(min_platoon_pa))
+    # Shrink platoon rates hard toward the club's overall prior. This prevents small handedness samples from exploding.
+    if use_split:
+        w=platoon["PA"]/(platoon["PA"]+120.0)
+        shr={k:(w*platoon[k]+(1-w)*season[k]) for k in ["wOBAx","Kpct","BBpct","HRpct","ISO","RPA"]}
+        split_pa=platoon["PA"]
+    else:
+        shr={k:season[k] for k in ["wOBAx","Kpct","BBpct","HRpct","ISO","RPA"]}; split_pa=0.0
+    return {
+        "OFF_PA":season["PA"],"OFF_wOBAx":season["wOBAx"],"OFF_Kpct":season["Kpct"],"OFF_BBpct":season["BBpct"],"OFF_HRpct":season["HRpct"],"OFF_ISO":season["ISO"],"OFF_RPA":season["RPA"],
+        "OFF_14_wOBAx":recent["wOBAx"],"OFF_14_Kpct":recent["Kpct"],"OFF_14_BBpct":recent["BBpct"],"OFF_14_HRpct":recent["HRpct"],"OFF_14_ISO":recent["ISO"],
+        "PL_PA":split_pa,"PL_Used":1.0 if use_split else 0.0,"PL_wOBAx":shr["wOBAx"],"PL_Kpct":shr["Kpct"],"PL_BBpct":shr["BBpct"],"PL_HRpct":shr["HRpct"],"PL_ISO":shr["ISO"],"PL_RPA":shr["RPA"],
+    }
+
+
+def build_offense_platoon_feature_table(master_df,min_prior_team_games=12,min_pitcher_starts=3,min_platoon_pa=80.0):
+    pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_team_games,min_pitcher_starts=min_pitcher_starts)
+    if pit.empty: return pit,pd.DataFrame()
+    for c in ["Away_Team_ID","Home_Team_ID","Away_Starter_ID","Home_Starter_ID"]:
+        if c not in pit.columns: raise ValueError(f"Historical PIT table is missing {c}.")
+    pairs=set()
+    for _,r in pit.iterrows():
+        try:
+            season=int(r["Season"]); pairs.add((season,int(r["Away_Team_ID"]))); pairs.add((season,int(r["Home_Team_ID"])))
+        except Exception: pass
+    # Fetch overall + vs-left + vs-right team logs. Split failures degrade to overall rather than killing the entire test.
+    ledgers={}; errors=[]; cache_hits=0; jobs=[(s,t,sp) for s,t in sorted(pairs) for sp in (None,"vl","vr")]
+    stat=st.empty(); prog=st.progress(0); stat.caption(f"Loading point-in-time hitting histories • {len(jobs)} team/split seasons")
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        fut={ex.submit(fetch_team_hitting_gamelog,s,t,sp):(s,t,sp) for s,t,sp in jobs}; done=0
+        for f in as_completed(fut):
+            key=fut[f]; done+=1
+            try: payload,err,cached=f.result()
+            except Exception as e: payload,err,cached=None,str(e),False
+            if cached: cache_hits+=1
+            if err: errors.append(f"{key}: {err}")
+            else:
+                d=parse_team_hitting_gamelog(payload)
+                if not d.empty: ledgers[key]=d
+            prog.progress(min(100,int(100*done/max(1,len(jobs)))),text=f"Hitting histories • {done}/{len(jobs)}")
+    stat.empty(); prog.empty()
+    overall_loaded=sum(1 for s,t in pairs if (s,t,None) in ledgers)
+    if overall_loaded < max(10,int(.80*len(pairs))):
+        raise ValueError(f"Overall hitting game-log coverage too low ({overall_loaded}/{len(pairs)} team-seasons). {'; '.join(errors[:2])}")
+
+    # Starter handedness, cached independently.
+    pids=set()
+    for c in ["Away_Starter_ID","Home_Starter_ID"]:
+        pids.update(pd.to_numeric(pit[c],errors="coerce").dropna().astype(int).tolist())
+    hands={}; herrors=0
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        fut={ex.submit(fetch_pitcher_throw_hand,p):p for p in pids}
+        for f in as_completed(fut):
+            p=fut[f]
+            try: hand,err,_=f.result()
+            except Exception: hand,err="U","error"
+            hands[p]=hand
+            if err: herrors+=1
+
+    rows=[]; platoon_used=0; matchup_sides=0
+    for _,r in pit.iterrows():
+        try:
+            season=int(r["Season"]); aid=int(r["Away_Team_ID"]); hid=int(r["Home_Team_ID"]); asp=int(r["Away_Starter_ID"]); hsp=int(r["Home_Starter_ID"])
+            gt=pd.to_datetime(r["Commence_Time"],errors="coerce",utc=True)
+        except Exception: continue
+        if pd.isna(gt): continue
+        # Away offense faces HOME starter; home offense faces AWAY starter.
+        away_hand=hands.get(hsp,"U"); home_hand=hands.get(asp,"U")
+        away_split="vl" if away_hand=="L" else ("vr" if away_hand=="R" else None)
+        home_split="vl" if home_hand=="L" else ("vr" if home_hand=="R" else None)
+        af=summarize_offense_before_game(ledgers.get((season,aid,None)),ledgers.get((season,aid,away_split)) if away_split else None,gt,min_platoon_pa=min_platoon_pa)
+        hf=summarize_offense_before_game(ledgers.get((season,hid,None)),ledgers.get((season,hid,home_split)) if home_split else None,gt,min_platoon_pa=min_platoon_pa)
+        if af is None or hf is None: continue
+        rec=r.to_dict(); rec["Away_Opp_SP_Hand"]=away_hand; rec["Home_Opp_SP_Hand"]=home_hand
+        for k,v in af.items(): rec[f"Away_{k}"]=v
+        for k,v in hf.items(): rec[f"Home_{k}"]=v
+        matchup_sides+=2; platoon_used+=int(af["PL_Used"]>0)+int(hf["PL_Used"]>0)
+        rows.append(rec)
+    out=pd.DataFrame(rows)
+    quality=pd.DataFrame([{"Team_Seasons_Requested":len(pairs),"Overall_Seasons_Loaded":overall_loaded,"Split_Ledgers_Loaded":sum(1 for k in ledgers if k[2] in ("vl","vr")),"Cache_Hits":cache_hits,"Starter_Hands":len(hands),"Starter_Hand_Errors":herrors,"PIT_Pitcher_Rows":len(pit),"PIT_Offense_Rows":len(out),"Coverage":len(out)/len(pit) if len(pit) else 0.0,"Platoon_Sides_Used":platoon_used,"Platoon_Side_Coverage":platoon_used/matchup_sides if matchup_sides else 0.0,"Fetch_Errors":len(errors)}])
+    return out,quality
+
+
+def pitcher_offense_platoon_feature_matrix(df):
+    x=pitcher_v2_feature_matrix(df).copy()
+    # Positive values generally mean a stronger home offense relative to the away offense.
+    for k in ["OFF_wOBAx","OFF_BBpct","OFF_HRpct","OFF_ISO","OFF_RPA","OFF_14_wOBAx","OFF_14_BBpct","OFF_14_HRpct","OFF_14_ISO","PL_wOBAx","PL_BBpct","PL_HRpct","PL_ISO","PL_RPA"]:
+        x[f"{k}_Diff"]=pd.to_numeric(df[f"Home_{k}"],errors="coerce")-pd.to_numeric(df[f"Away_{k}"],errors="coerce")
+    for k in ["OFF_Kpct","OFF_14_Kpct","PL_Kpct"]:
+        x[f"{k}_Diff"]=pd.to_numeric(df[f"Away_{k}"],errors="coerce")-pd.to_numeric(df[f"Home_{k}"],errors="coerce")
+    x["PL_Usage_Diff"]=pd.to_numeric(df["Home_PL_Used"],errors="coerce")-pd.to_numeric(df["Away_PL_Used"],errors="coerce")
+    return x.replace([np.inf,-np.inf],np.nan)
+
+
+def run_pitcher_offense_platoon_test(master_df,min_prior_games=12,min_pitcher_starts=3,min_platoon_pa=80.0):
+    pit,quality=build_offense_platoon_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts,min_platoon_pa=min_platoon_pa)
+    if pit.empty: raise ValueError("No point-in-time pitcher + offense/platoon rows were built.")
+    strict=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts)
+    if strict.empty: raise ValueError("No eligible ≤6h non-doubleheader offense/platoon rows were available.")
+    base=_fit_feature_model_walkforward(strict,pitcher_v2_feature_matrix,"v0.13 frozen Pitcher 2.0",ridge=5.0)
+    v15=_fit_feature_model_walkforward_impute(strict,pitcher_offense_platoon_feature_matrix,"v0.15 Pitcher 2.0 + Offense/Platoon",ridge=7.0)
+    results=[base,v15]; table=pd.DataFrame([{k:v for k,v in r.items() if k not in ("hold25","bets","coefficients")} for r in results])
+    seg=[]
+    if not v15.get("Error") and isinstance(v15.get("bets"),pd.DataFrame) and not v15["bets"].empty:
+        b=v15["bets"].copy(); b["Commence_Time"]=pd.to_datetime(b["Commence_Time"],errors="coerce",utc=True); b["Month"]=b["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in b.groupby("Month"): seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",b[b["Odds"]<0]),("Underdogs",b[b["Odds"]>0])]: seg.append({"Segment":name,**summarize_sim_bets(g)})
+    return {"pit":pit,"strict_rows":len(strict),"quality":quality,"table":table,"results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),"coefficients":v15.get("coefficients",pd.DataFrame())}
+
+
 def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
     pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
     if pit.empty:
@@ -6221,6 +6429,67 @@ if mode == "Backtest Lab":
                     st.download_button("Download v0.14 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_holdout_2025.csv",mime="text/csv",key="dl_v14_hold")
                 if isinstance(bets,pd.DataFrame) and not bets.empty:
                     st.download_button("Download v0.14 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_bullpen_bets_2025.csv",mime="text/csv",key="dl_v14_bets")
+
+
+
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.15.0 • PIT OFFENSE + PLATOON TEST</div>', unsafe_allow_html=True)
+    st.caption("Frozen v0.13 Pitcher Model 2.0 versus Pitcher 2.0 + point-in-time offense and handedness matchup. Same ≤6h, no-doubleheader walk-forward protocol.")
+    st.info("Adds season-to-date offense, prior-14-day form, K/BB/power rates, and shrunk team hitting splits versus the opposing starter hand. All target-game batting is excluded. 2025 never selects the blend or betting thresholds. Zero Odds API credits.")
+    v15_upload=st.file_uploader("Upload Moneyline Master CSV for Offense/Platoon Test",type=["csv"],key="offense_v15_upload")
+    if v15_upload is not None:
+        try:
+            v15_master=pd.read_csv(v15_upload)
+            oc1,oc2,oc3=st.columns(3)
+            with oc1: v15_team=st.slider("v0.15 prior team games",5,25,12,1,key="v15_team")
+            with oc2: v15_starts=st.slider("v0.15 prior starter starts",1,8,3,1,key="v15_starts")
+            with oc3: v15_pa=st.slider("Minimum prior platoon PA",30,160,80,10,key="v15_pa")
+            if st.button("Run Pitcher + Offense/Platoon Test",type="primary",key="run_v15_offense"):
+                st.session_state["v15_pending"]=True; st.session_state["v15_params"]=(int(v15_team),int(v15_starts),float(v15_pa)); st.session_state.pop("v15_result",None); st.rerun()
+            if st.session_state.get("v15_pending",False):
+                rt,rs,rpa=st.session_state.get("v15_params",(v15_team,v15_starts,v15_pa))
+                st.info("Offense/platoon test started. First run may take several minutes while 2023–2025 team hitting and handedness histories are cached.")
+                p15=st.progress(5,text="Building point-in-time offense + platoon states…")
+                try:
+                    out=run_pitcher_offense_platoon_test(v15_master,min_prior_games=rt,min_pitcher_starts=rs,min_platoon_pa=rpa)
+                    p15.progress(100,text="Pitcher + offense/platoon comparison complete."); st.session_state["v15_result"]=out; st.session_state["v15_pending"]=False; st.session_state["v15_just_completed"]=True; st.rerun()
+                except Exception as ex:
+                    st.session_state["v15_pending"]=False; st.error(f"Pitcher + offense/platoon test failed: {ex}")
+        except Exception as ex: st.error(f"Could not prepare offense/platoon test: {ex}")
+
+    if "v15_result" in st.session_state:
+        rr=st.session_state["v15_result"] or {}; tt=rr.get("table",pd.DataFrame()); q=rr.get("quality",pd.DataFrame())
+        if st.session_state.pop("v15_just_completed",False): st.success("Offense/platoon test complete — frozen champion comparison below.")
+        if isinstance(q,pd.DataFrame) and not q.empty:
+            z=q.iloc[0]; st.caption(f"Offense coverage: {int(z.get('PIT_Offense_Rows',0)):,}/{int(z.get('PIT_Pitcher_Rows',0)):,} PIT rows • platoon split used on {float(z.get('Platoon_Side_Coverage',0))*100:.1f}% of matchup sides • {int(z.get('Overall_Seasons_Loaded',0))}/{int(z.get('Team_Seasons_Requested',0))} overall team-seasons loaded")
+        if tt is None or tt.empty: st.error("Offense/platoon test returned no comparison rows.")
+        else:
+            st.markdown("**2025 untouched holdout — identical offense-eligible rows**")
+            cols=[c for c in ["Model","Games_2025","Model_Weight","Validation_2024_Brier","Market_Brier","Raw_Model_Brier","Cal_Brier","Brier_Improvement","Bets","Wins","Losses","Units","ROI"] if c in tt.columns]
+            st.dataframe(tt[cols].round({"Model_Weight":2,"Validation_2024_Brier":4,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            try:
+                b=tt[tt["Model"]=="v0.13 frozen Pitcher 2.0"].iloc[0]; n=tt[tt["Model"]=="v0.15 Pitcher 2.0 + Offense/Platoon"].iloc[0]
+                delta=float(b["Cal_Brier"])-float(n["Cal_Brier"]); vdelta=float(b["Validation_2024_Brier"])-float(n["Validation_2024_Brier"])
+                if delta>=.001 and vdelta>=0: st.success(f"OFFENSE/PLATOON PASS: 2025 calibrated Brier improves by {delta:.4f} and 2024 validation does not deteriorate. This layer earns promotion consideration.")
+                elif delta>0 and vdelta>=-.0005: st.info(f"OFFENSE/PLATOON NEUTRAL: small 2025 Brier gain ({delta:.4f}). Keep v0.13 frozen until the gain is stronger.")
+                else: st.warning("OFFENSE/PLATOON FAIL: the new layer did not improve the frozen champion cleanly. Keep v0.13; do not promote on ROI alone.")
+            except Exception: pass
+            seg=rr.get("segments",pd.DataFrame()); coef=rr.get("coefficients",pd.DataFrame())
+            if isinstance(seg,pd.DataFrame) and not seg.empty:
+                with st.expander("v0.15 2025 betting robustness splits",expanded=True): st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            if isinstance(coef,pd.DataFrame) and not coef.empty:
+                ocoef=coef[coef["Feature"].astype(str).str.contains(r"OFF_|PL_",regex=True)].copy()
+                with st.expander("Offense/platoon feature coefficients",expanded=False): st.dataframe((ocoef if not ocoef.empty else coef.head(30)).round({"Coefficient":4,"Abs_Coefficient":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download v0.15 Comparison CSV",tt.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_comparison.csv",mime="text/csv",key="dl_v15_compare")
+            if isinstance(q,pd.DataFrame) and not q.empty: st.download_button("Download v0.15 Data Quality CSV",q.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_data_quality.csv",mime="text/csv",key="dl_v15_quality")
+            if isinstance(seg,pd.DataFrame) and not seg.empty: st.download_button("Download v0.15 Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_segments.csv",mime="text/csv",key="dl_v15_segments")
+            if isinstance(coef,pd.DataFrame) and not coef.empty: st.download_button("Download v0.15 Coefficients CSV",coef.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_coefficients.csv",mime="text/csv",key="dl_v15_coeff")
+            res=(rr.get("results") or {}).get("v0.15 Pitcher 2.0 + Offense/Platoon",{})
+            if isinstance(res,dict):
+                hold=res.get("hold25"); bets=res.get("bets")
+                if isinstance(hold,pd.DataFrame) and not hold.empty: st.download_button("Download v0.15 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_holdout_2025.csv",mime="text/csv",key="dl_v15_hold")
+                if isinstance(bets,pd.DataFrame) and not bets.empty: st.download_button("Download v0.15 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_bets_2025.csv",mime="text/csv",key="dl_v15_bets")
+
 
     st.divider()
     uploaded_bt = st.file_uploader(
