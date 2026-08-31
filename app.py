@@ -30,7 +30,7 @@ from model import (
     fair_ml,
 )
 
-APP_VERSION = "0.15.0-PIT-OFFENSE-PLATOON"
+APP_VERSION = "0.16.0-PIT-LINEUP"
 
 st.set_page_config(page_title="MLB Model", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
@@ -4911,6 +4911,256 @@ def run_pitcher_offense_platoon_test(master_df,min_prior_games=12,min_pitcher_st
     return {"pit":pit,"strict_rows":len(strict),"quality":quality,"table":table,"results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),"coefficients":v15.get("coefficients",pd.DataFrame())}
 
 
+# ===== v0.16.0 retrospective actual-lineup research layer =====
+# IMPORTANT: MLB historical boxscores identify the actual starters who batted, but
+# they do not prove when that lineup was publicly posted. v0.16 is therefore an
+# upper-bound / research test, not a point-in-time certification of lineup data.
+LINEUP_CACHE_DIR = Path(".mlb_lineup_cache_v16")
+LINEUP_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _lineup_box_cache_file(game_pk):
+    return LINEUP_CACHE_DIR / f"game_{int(game_pk)}_boxscore.json"
+
+
+def _hitter_log_cache_file(season, hitter_id):
+    return LINEUP_CACHE_DIR / f"hitter_{int(hitter_id)}_{int(season)}_gamelog.json"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_historical_boxscore(game_pk):
+    cf=_lineup_box_cache_file(game_pk)
+    if cf.exists():
+        try: return json.loads(cf.read_text()),None,True
+        except Exception: pass
+    url=f"https://statsapi.mlb.com/api/v1/game/{int(game_pk)}/boxscore"
+    try: r=requests.get(url,timeout=30)
+    except requests.RequestException as e: return None,f"Game {game_pk} boxscore request failed: {e}",False
+    if r.status_code!=200: return None,f"Game {game_pk} boxscore returned HTTP {r.status_code}",False
+    try: payload=r.json()
+    except Exception: return None,f"Game {game_pk} boxscore response was not JSON",False
+    try: cf.write_text(json.dumps(payload))
+    except Exception: pass
+    return payload,None,False
+
+
+def parse_actual_starting_lineup(payload, side):
+    """Return the nine actual batting-order player IDs from a historical boxscore."""
+    team=((payload or {}).get("teams") or {}).get(side) or {}
+    order=team.get("battingOrder") or []
+    ids=[]
+    for x in order:
+        try: ids.append(int(x))
+        except Exception: pass
+    if len(ids)>=9:
+        return ids[:9]
+    # Fallback: some boxscore payloads expose battingOrder on each player object.
+    tmp=[]
+    for _,p in (team.get("players") or {}).items():
+        bo=p.get("battingOrder")
+        pid=((p.get("person") or {}).get("id"))
+        try:
+            if bo is not None and pid is not None:
+                tmp.append((int(bo),int(pid)))
+        except Exception: pass
+    if tmp:
+        tmp=sorted(tmp)
+        ids=[]
+        seen=set()
+        for _,pid in tmp:
+            if pid not in seen:
+                seen.add(pid); ids.append(pid)
+        return ids[:9]
+    return ids
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_hitter_gamelog(season, hitter_id):
+    cf=_hitter_log_cache_file(season,hitter_id)
+    if cf.exists():
+        try: return json.loads(cf.read_text()),None,True
+        except Exception: pass
+    url=f"https://statsapi.mlb.com/api/v1/people/{int(hitter_id)}/stats"
+    params={"stats":"gameLog","group":"hitting","season":int(season),"gameType":"R"}
+    try: r=requests.get(url,params=params,timeout=30)
+    except requests.RequestException as e: return None,f"Hitter {hitter_id} {season} request failed: {e}",False
+    if r.status_code!=200: return None,f"Hitter {hitter_id} {season} returned HTTP {r.status_code}",False
+    try: payload=r.json()
+    except Exception: return None,f"Hitter {hitter_id} {season} response was not JSON",False
+    try: cf.write_text(json.dumps(payload))
+    except Exception: pass
+    return payload,None,False
+
+
+def parse_hitter_gamelog(payload):
+    rows=[]
+    for block in (payload or {}).get("stats",[]) or []:
+        for sp in block.get("splits",[]) or []:
+            stat=sp.get("stat") or {}; raw=sp.get("date")
+            if not raw: continue
+            try: d=pd.to_datetime(raw,errors="raise",utc=True)
+            except Exception: continue
+            def n(k,default=0.0):
+                try:
+                    v=stat.get(k)
+                    return float(v) if v not in (None,"","-") else float(default)
+                except Exception: return float(default)
+            ab=n("atBats"); h=n("hits"); d2=n("doubles"); d3=n("triples"); hr=n("homeRuns")
+            bb=n("baseOnBalls"); so=n("strikeOuts"); hbp=n("hitByPitch"); sf=n("sacFlies")
+            pa=n("plateAppearances",ab+bb+hbp+sf)
+            tb=n("totalBases",max(0.0,h-d2-d3-hr)+2*d2+3*d3+4*hr)
+            rows.append({"date":d,"PA":pa,"AB":ab,"H":h,"2B":d2,"3B":d3,"HR":hr,
+                         "BB":bb,"SO":so,"HBP":hbp,"SF":sf,"TB":tb,"R":n("runs")})
+    return pd.DataFrame(rows)
+
+
+def _hitter_rates_before_game(df, game_time, min_pa=20.0):
+    if df is None or df.empty: return None
+    target=pd.Timestamp(game_time).tz_convert("UTC").normalize()
+    x=df.copy(); x["date"]=pd.to_datetime(x["date"],errors="coerce",utc=True)
+    x=x[x["date"].dt.normalize()<target].copy()
+    season=_hitting_rates(x)
+    if season is None or season["PA"]<float(min_pa): return None
+    recent=_hitting_rates(x[x["date"].dt.normalize()>=target-pd.Timedelta(days=14)]) or season
+    # Fixed league-ish priors; shrink young/small-sample hitters strongly.
+    prior={"wOBAx":.315,"Kpct":.225,"BBpct":.085,"HRpct":.032,"ISO":.155,"RPA":.120}
+    w=season["PA"]/(season["PA"]+90.0)
+    shr={k:w*season[k]+(1-w)*prior[k] for k in prior}
+    wr=recent["PA"]/(recent["PA"]+45.0)
+    rec={k:wr*recent[k]+(1-wr)*shr[k] for k in prior}
+    return {"PA":season["PA"],**{k:shr[k] for k in prior},**{f"R14_{k}":rec[k] for k in prior}}
+
+
+def summarize_actual_lineup(player_ids, ledgers, season, game_time, team_prior, min_hitter_pa=20.0):
+    vals=[]
+    for slot,pid in enumerate((player_ids or [])[:9],start=1):
+        r=_hitter_rates_before_game(ledgers.get((int(season),int(pid))),game_time,min_pa=min_hitter_pa)
+        if r is not None: vals.append((slot,pid,r))
+    if len(vals)<7: return None
+    # Slightly higher weight for the top of the batting order, fixed ex ante.
+    slot_w=np.array([1.18,1.16,1.14,1.12,1.08,1.00,.94,.88,.82],dtype=float)
+    weights=[]; rates=[]
+    for slot,pid,r in vals:
+        weights.append(slot_w[min(8,max(0,slot-1))]); rates.append(r)
+    weights=np.array(weights,dtype=float); weights=weights/weights.sum()
+    def avg(k): return float(sum(w*r[k] for w,r in zip(weights,rates)))
+    out={
+        "LU_Batters":float(len(vals)),"LU_Median_PA":float(np.median([r["PA"] for r in rates])),
+        "LU_wOBAx":avg("wOBAx"),"LU_Kpct":avg("Kpct"),"LU_BBpct":avg("BBpct"),"LU_HRpct":avg("HRpct"),"LU_ISO":avg("ISO"),"LU_RPA":avg("RPA"),
+        "LU_14_wOBAx":avg("R14_wOBAx"),"LU_14_Kpct":avg("R14_Kpct"),"LU_14_BBpct":avg("R14_BBpct"),"LU_14_HRpct":avg("R14_HRpct"),"LU_14_ISO":avg("R14_ISO"),
+    }
+    tp=team_prior or {}
+    out["LU_vsTeam_wOBAx"]=out["LU_wOBAx"]-float(tp.get("OFF_wOBAx",out["LU_wOBAx"]))
+    out["LU_vsTeam_Kpct"]=float(tp.get("OFF_Kpct",out["LU_Kpct"]))-out["LU_Kpct"]
+    out["LU_vsTeam_BBpct"]=out["LU_BBpct"]-float(tp.get("OFF_BBpct",out["LU_BBpct"]))
+    out["LU_vsTeam_HRpct"]=out["LU_HRpct"]-float(tp.get("OFF_HRpct",out["LU_HRpct"]))
+    out["LU_vsTeam_ISO"]=out["LU_ISO"]-float(tp.get("OFF_ISO",out["LU_ISO"]))
+    return out
+
+
+def build_lineup_feature_table(master_df,min_prior_team_games=12,min_pitcher_starts=3,min_platoon_pa=80.0,min_hitter_pa=20.0):
+    pit,oq=build_offense_platoon_feature_table(master_df,min_prior_team_games=min_prior_team_games,min_pitcher_starts=min_pitcher_starts,min_platoon_pa=min_platoon_pa)
+    if pit.empty: return pit,pd.DataFrame()
+    strict=_integrity_prepare_subset(pit,max_hours=6,min_starts=min_pitcher_starts)
+    if strict.empty: return strict,pd.DataFrame()
+    if "MLB_GamePk" not in strict.columns: raise ValueError("Lineup test requires MLB_GamePk in the Moneyline Master.")
+
+    # Fetch actual historical batting orders only for the already-frozen strict sample.
+    gamepks=pd.to_numeric(strict["MLB_GamePk"],errors="coerce").dropna().astype(int).unique().tolist()
+    boxes={}; errors=[]; cache_hits=0
+    stat=st.empty(); prog=st.progress(0); stat.caption(f"Loading historical actual lineups • {len(gamepks)} games")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        fut={ex.submit(fetch_historical_boxscore,g):g for g in gamepks}; done=0
+        for f in as_completed(fut):
+            g=fut[f]; done+=1
+            try: payload,err,cached=f.result()
+            except Exception as e: payload,err,cached=None,str(e),False
+            if cached: cache_hits+=1
+            if err: errors.append(err)
+            elif payload: boxes[g]=payload
+            prog.progress(min(100,int(100*done/max(1,len(gamepks)))),text=f"Historical lineups • {done}/{len(gamepks)}")
+    stat.empty(); prog.empty()
+
+    # Collect all hitters who actually started in those games, then load one season log per hitter-season.
+    lineups={}; pairs=set(); complete_games=0
+    for _,r in strict.iterrows():
+        try: g=int(r["MLB_GamePk"]); season=int(r["Season"])
+        except Exception: continue
+        p=boxes.get(g)
+        away=parse_actual_starting_lineup(p,"away"); home=parse_actual_starting_lineup(p,"home")
+        if len(away)>=7 and len(home)>=7:
+            complete_games+=1; lineups[g]=(away,home)
+            for pid in away+home: pairs.add((season,int(pid)))
+
+    ledgers={}; hitter_errors=[]; hitter_cache_hits=0
+    stat=st.empty(); prog=st.progress(0); stat.caption(f"Loading point-in-time hitter histories • {len(pairs)} hitter-seasons")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        fut={ex.submit(fetch_hitter_gamelog,s,p):(s,p) for s,p in sorted(pairs)}; done=0
+        for f in as_completed(fut):
+            key=fut[f]; done+=1
+            try: payload,err,cached=f.result()
+            except Exception as e: payload,err,cached=None,str(e),False
+            if cached: hitter_cache_hits+=1
+            if err: hitter_errors.append(f"{key}: {err}")
+            else:
+                d=parse_hitter_gamelog(payload)
+                if not d.empty: ledgers[key]=d
+            prog.progress(min(100,int(100*done/max(1,len(pairs)))),text=f"Hitter histories • {done}/{len(pairs)}")
+    stat.empty(); prog.empty()
+
+    rows=[]
+    for _,r in strict.iterrows():
+        try:
+            g=int(r["MLB_GamePk"]); season=int(r["Season"]); gt=pd.to_datetime(r["Commence_Time"],errors="coerce",utc=True)
+        except Exception: continue
+        if pd.isna(gt) or g not in lineups: continue
+        away_ids,home_ids=lineups[g]
+        atp={k.replace("Away_",""):r.get(k) for k in r.index if str(k).startswith("Away_OFF_")}
+        htp={k.replace("Home_",""):r.get(k) for k in r.index if str(k).startswith("Home_OFF_")}
+        al=summarize_actual_lineup(away_ids,ledgers,season,gt,atp,min_hitter_pa=min_hitter_pa)
+        hl=summarize_actual_lineup(home_ids,ledgers,season,gt,htp,min_hitter_pa=min_hitter_pa)
+        if al is None or hl is None: continue
+        rec=r.to_dict()
+        for k,v in al.items(): rec[f"Away_{k}"]=v
+        for k,v in hl.items(): rec[f"Home_{k}"]=v
+        rows.append(rec)
+    out=pd.DataFrame(rows)
+    qrow={
+        "Strict_v15_Rows":len(strict),"Boxscores_Requested":len(gamepks),"Boxscores_Loaded":len(boxes),"Boxscore_Cache_Hits":cache_hits,
+        "Games_With_7plus_Batters_Both_Sides":complete_games,"Hitter_Seasons_Requested":len(pairs),"Hitter_Seasons_Loaded":len(ledgers),
+        "Hitter_Cache_Hits":hitter_cache_hits,"PIT_Lineup_Rows":len(out),"Lineup_Coverage":len(out)/len(strict) if len(strict) else 0.0,
+        "Boxscore_Fetch_Errors":len(errors),"Hitter_Fetch_Errors":len(hitter_errors),
+    }
+    if isinstance(oq,pd.DataFrame) and not oq.empty:
+        for c,v in oq.iloc[0].to_dict().items(): qrow[f"Offense_{c}"]=v
+    return out,pd.DataFrame([qrow])
+
+
+def pitcher_offense_lineup_feature_matrix(df):
+    x=pitcher_offense_platoon_feature_matrix(df).copy()
+    for k in ["LU_wOBAx","LU_BBpct","LU_HRpct","LU_ISO","LU_RPA","LU_14_wOBAx","LU_14_BBpct","LU_14_HRpct","LU_14_ISO","LU_vsTeam_wOBAx","LU_vsTeam_BBpct","LU_vsTeam_HRpct","LU_vsTeam_ISO","LU_Median_PA","LU_Batters"]:
+        x[f"{k}_Diff"]=pd.to_numeric(df[f"Home_{k}"],errors="coerce")-pd.to_numeric(df[f"Away_{k}"],errors="coerce")
+    for k in ["LU_Kpct","LU_14_Kpct","LU_vsTeam_Kpct"]:
+        x[f"{k}_Diff"]=pd.to_numeric(df[f"Away_{k}"],errors="coerce")-pd.to_numeric(df[f"Home_{k}"],errors="coerce")
+    return x.replace([np.inf,-np.inf],np.nan)
+
+
+def run_pitcher_offense_lineup_test(master_df,min_prior_games=12,min_pitcher_starts=3,min_platoon_pa=80.0,min_hitter_pa=20.0):
+    pit,quality=build_lineup_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts,min_platoon_pa=min_platoon_pa,min_hitter_pa=min_hitter_pa)
+    if pit.empty: raise ValueError("No lineup-eligible PIT rows were built. Check boxscore/hitter coverage.")
+    # build_lineup_feature_table already returns the strict ≤6h/no-DH subset.
+    base=_fit_feature_model_walkforward_impute(pit,pitcher_offense_platoon_feature_matrix,"v0.15 frozen Pitcher + Offense/Platoon",ridge=7.0)
+    v16=_fit_feature_model_walkforward_impute(pit,pitcher_offense_lineup_feature_matrix,"v0.16 + Actual Lineup (retrospective upper bound)",ridge=8.0)
+    results=[base,v16]
+    table=pd.DataFrame([{k:v for k,v in r.items() if k not in ("hold25","bets","coefficients")} for r in results])
+    seg=[]
+    if not v16.get("Error") and isinstance(v16.get("bets"),pd.DataFrame) and not v16["bets"].empty:
+        b=v16["bets"].copy(); b["Commence_Time"]=pd.to_datetime(b["Commence_Time"],errors="coerce",utc=True); b["Month"]=b["Commence_Time"].dt.strftime("%Y-%m")
+        for name,g in b.groupby("Month"): seg.append({"Segment":name,**summarize_sim_bets(g)})
+        for name,g in [("Favorites",b[b["Odds"]<0]),("Underdogs",b[b["Odds"]>0])]: seg.append({"Segment":name,**summarize_sim_bets(g)})
+    return {"pit":pit,"quality":quality,"table":table,"results":{r.get("Model"):r for r in results},"segments":pd.DataFrame(seg),"coefficients":v16.get("coefficients",pd.DataFrame())}
+
+
 def run_pitcher_integrity_test(master_df,min_prior_games=12,min_pitcher_starts=3):
     pit=build_pitcher_feature_table(master_df,min_prior_team_games=min_prior_games,min_pitcher_starts=min_pitcher_starts)
     if pit.empty:
@@ -6489,6 +6739,67 @@ if mode == "Backtest Lab":
                 hold=res.get("hold25"); bets=res.get("bets")
                 if isinstance(hold,pd.DataFrame) and not hold.empty: st.download_button("Download v0.15 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_holdout_2025.csv",mime="text/csv",key="dl_v15_hold")
                 if isinstance(bets,pd.DataFrame) and not bets.empty: st.download_button("Download v0.15 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_platoon_bets_2025.csv",mime="text/csv",key="dl_v15_bets")
+
+
+    st.divider()
+    st.markdown('<div class="section-kicker">v0.16.0 • ACTUAL LINEUP RESEARCH TEST</div>', unsafe_allow_html=True)
+    st.caption("Frozen v0.15 Pitcher + Offense/Platoon versus the same model plus actual historical batting-order strength on identical lineup-eligible ≤6h, no-doubleheader rows.")
+    st.warning("Integrity note: historical MLB boxscores tell us who actually started, but do not prove that exact lineup was publicly known at the odds snapshot. Treat v0.16 as a retrospective upper-bound test. A pass earns further lineup-timing validation — not immediate live promotion.")
+    st.info("Lineup quality is built only from each hitter's games BEFORE the target game, with fixed small-sample shrinkage. Target-game batting stats are excluded. Zero Odds API credits.")
+    v16_upload=st.file_uploader("Upload Moneyline Master CSV for Lineup Test",type=["csv"],key="lineup_v16_upload")
+    if v16_upload is not None:
+        try:
+            v16_master=pd.read_csv(v16_upload)
+            lc1,lc2,lc3,lc4=st.columns(4)
+            with lc1: v16_team=st.slider("v0.16 prior team games",5,25,12,1,key="v16_team")
+            with lc2: v16_starts=st.slider("v0.16 prior starter starts",1,8,3,1,key="v16_starts")
+            with lc3: v16_pa=st.slider("Minimum prior platoon PA",30,160,80,10,key="v16_pa")
+            with lc4: v16_hpa=st.slider("Minimum prior hitter PA",5,80,20,5,key="v16_hpa")
+            if st.button("Run Actual Lineup Research Test",type="primary",key="run_v16_lineup"):
+                st.session_state["v16_pending"]=True; st.session_state["v16_params"]=(int(v16_team),int(v16_starts),float(v16_pa),float(v16_hpa)); st.session_state.pop("v16_result",None); st.rerun()
+            if st.session_state.get("v16_pending",False):
+                rt,rs,rpa,rhpa=st.session_state.get("v16_params",(v16_team,v16_starts,v16_pa,v16_hpa))
+                st.info("Lineup research started. First run is API-heavy because historical boxscores and hitter-season logs must be cached. Keep this page open; reruns are much faster.")
+                p16=st.progress(5,text="Building frozen v0.15 states and historical lineups…")
+                try:
+                    out=run_pitcher_offense_lineup_test(v16_master,min_prior_games=rt,min_pitcher_starts=rs,min_platoon_pa=rpa,min_hitter_pa=rhpa)
+                    p16.progress(100,text="Actual-lineup comparison complete."); st.session_state["v16_result"]=out; st.session_state["v16_pending"]=False; st.session_state["v16_just_completed"]=True; st.rerun()
+                except Exception as ex:
+                    st.session_state["v16_pending"]=False; st.error(f"Actual lineup test failed: {ex}")
+        except Exception as ex: st.error(f"Could not prepare lineup test: {ex}")
+
+    if "v16_result" in st.session_state:
+        rr=st.session_state["v16_result"] or {}; tt=rr.get("table",pd.DataFrame()); q=rr.get("quality",pd.DataFrame())
+        if st.session_state.pop("v16_just_completed",False): st.success("Actual lineup research test complete — fair same-row comparison below.")
+        if isinstance(q,pd.DataFrame) and not q.empty:
+            z=q.iloc[0]; st.caption(f"Lineup coverage: {int(z.get('PIT_Lineup_Rows',0)):,}/{int(z.get('Strict_v15_Rows',0)):,} strict rows • {int(z.get('Boxscores_Loaded',0)):,}/{int(z.get('Boxscores_Requested',0)):,} boxscores • {int(z.get('Hitter_Seasons_Loaded',0)):,}/{int(z.get('Hitter_Seasons_Requested',0)):,} hitter-seasons")
+        if tt is None or tt.empty: st.error("Lineup test returned no comparison rows.")
+        else:
+            st.markdown("**2025 untouched holdout — identical lineup-eligible rows**")
+            cols=[c for c in ["Model","Games_2025","Model_Weight","Validation_2024_Brier","Market_Brier","Raw_Model_Brier","Cal_Brier","Brier_Improvement","Cal_LogLoss","Bets","Wins","Losses","Units","ROI"] if c in tt.columns]
+            st.dataframe(tt[cols].round({"Model_Weight":2,"Validation_2024_Brier":4,"Market_Brier":4,"Raw_Model_Brier":4,"Cal_Brier":4,"Brier_Improvement":4,"Cal_LogLoss":4,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            try:
+                b=tt[tt["Model"]=="v0.15 frozen Pitcher + Offense/Platoon"].iloc[0]; n=tt[tt["Model"].str.startswith("v0.16")].iloc[0]
+                delta=float(b["Cal_Brier"])-float(n["Cal_Brier"]); vdelta=float(b["Validation_2024_Brier"])-float(n["Validation_2024_Brier"])
+                if delta>=.001 and vdelta>=0: st.success(f"LINEUP RESEARCH PASS: calibrated 2025 Brier improves by {delta:.4f} with non-worse 2024 validation. Next step is a lineup-publication-timing audit before live promotion.")
+                elif delta>0 and vdelta>=-.0005: st.info(f"LINEUP RESEARCH NEUTRAL: small same-row Brier gain ({delta:.4f}). Do not promote until timing integrity is proven.")
+                else: st.warning("LINEUP RESEARCH FAIL: actual lineup information did not cleanly improve the frozen v0.15 champion on the same rows. Do not promote on ROI alone.")
+            except Exception: pass
+            seg=rr.get("segments",pd.DataFrame()); coef=rr.get("coefficients",pd.DataFrame())
+            if isinstance(seg,pd.DataFrame) and not seg.empty:
+                with st.expander("v0.16 2025 betting robustness splits",expanded=True): st.dataframe(seg.round({"Hit":3,"Units":2,"ROI":4}),use_container_width=True,hide_index=True)
+            if isinstance(coef,pd.DataFrame) and not coef.empty:
+                lcoef=coef[coef["Feature"].astype(str).str.contains(r"LU_",regex=True)].copy()
+                with st.expander("Actual-lineup feature coefficients",expanded=False): st.dataframe((lcoef if not lcoef.empty else coef.head(30)).round({"Coefficient":4,"Abs_Coefficient":4}),use_container_width=True,hide_index=True)
+            st.download_button("Download v0.16 Comparison CSV",tt.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_comparison.csv",mime="text/csv",key="dl_v16_compare")
+            if isinstance(q,pd.DataFrame) and not q.empty: st.download_button("Download v0.16 Data Quality CSV",q.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_data_quality.csv",mime="text/csv",key="dl_v16_quality")
+            if isinstance(seg,pd.DataFrame) and not seg.empty: st.download_button("Download v0.16 Segments CSV",seg.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_segments.csv",mime="text/csv",key="dl_v16_segments")
+            if isinstance(coef,pd.DataFrame) and not coef.empty: st.download_button("Download v0.16 Coefficients CSV",coef.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_coefficients.csv",mime="text/csv",key="dl_v16_coeff")
+            res=(rr.get("results") or {}).get("v0.16 + Actual Lineup (retrospective upper bound)",{})
+            if isinstance(res,dict):
+                hold=res.get("hold25"); bets=res.get("bets")
+                if isinstance(hold,pd.DataFrame) and not hold.empty: st.download_button("Download v0.16 2025 Holdout CSV",hold.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_holdout_2025.csv",mime="text/csv",key="dl_v16_hold")
+                if isinstance(bets,pd.DataFrame) and not bets.empty: st.download_button("Download v0.16 2025 Bets CSV",bets.to_csv(index=False).encode("utf-8"),file_name="mlb_pitcher_offense_lineup_bets_2025.csv",mime="text/csv",key="dl_v16_bets")
 
 
     st.divider()

@@ -1,41 +1,31 @@
-MLB Model v0.15.0 — Point-in-Time Offense + Platoon Test
+MLB MODEL v0.16.0 — ACTUAL LINEUP RESEARCH TEST
 
 Purpose
 -------
-Freeze v0.13 Pitcher Model 2.0 and test whether point-in-time team offense and handedness matchup add out-of-sample value.
+Freeze v0.15 Pitcher 2.0 + Offense/Platoon as the research champion and test whether actual historical batting-order strength adds predictive value on the same eligible games.
 
 Protocol
 --------
-- Same Moneyline Master CSV as prior PIT tests.
-- 2023 train -> 2024 validation/blend selection -> 2025 untouched holdout.
-- Strict <=6 hours before first pitch and no doubleheaders.
-- Frozen v0.13 champion is refit on the exact same offense-eligible rows.
-- Same betting thresholds. Promotion is based on Brier/log loss, not ROI.
+- 2023 train
+- 2024 validation chooses model/market blend
+- 2023+2024 refit
+- 2025 untouched holdout
+- <=6 hours to first pitch
+- doubleheaders excluded
+- same moneyline betting thresholds
+- promotion judged on Brier/log loss, not ROI
 
-New inputs
-----------
-- Season-to-date team hitting rates.
-- Prior-14-day offense.
-- K%, BB%, HR/PA, ISO, run/PA, fixed-weight wOBA-like quality.
-- Team hitting versus the opposing starter's throwing hand (L/R), shrunk hard toward overall offense.
-- Platoon split is used only after the configured minimum prior PA; otherwise the model falls back to overall offense and records the coverage.
+Lineup layer
+------------
+- Historical MLB boxscore starting batting orders
+- Individual hitter game logs strictly BEFORE target game
+- Fixed small-sample shrinkage
+- Season-to-date and 14-day hitter quality
+- Weighted batting-order quality
+- Lineup strength relative to team offensive baseline
 
-Data / leakage controls
------------------------
-- Free MLB Stats API only; zero Odds API historical credits.
-- Hitting game logs are filtered to calendar days strictly before the target game.
-- Same-day target-game hitting cannot enter the features.
-- Fixed batting weights and shrinkage constants; no target-season final league averages.
-- Historical starter identity retains the same retrospective caveat documented in v0.12-v0.14.
+IMPORTANT INTEGRITY LIMIT
+-------------------------
+Historical MLB boxscores identify the ACTUAL lineup that played. They do NOT prove that the exact lineup was publicly known at the historical odds snapshot. Therefore v0.16 is a retrospective upper-bound research test, not point-in-time certification. A positive result requires a later lineup-publication-timing audit before live promotion.
 
-Default settings
-----------------
-- Prior team games: 12
-- Prior starter starts: 3
-- Minimum prior platoon PA: 80
-
-Primary output
---------------
-mlb_pitcher_offense_platoon_comparison.csv
-
-If v0.15 does not improve the frozen v0.13 champion cleanly on calibrated 2025 Brier without validation deterioration, reject the offense/platoon layer.
+First run can be slow because boxscores and hitter-season logs are cached. Uses zero Odds API credits.
