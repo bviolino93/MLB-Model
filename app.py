@@ -1,489 +1,887 @@
-import json, math, os, time
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
+import re
+import statistics
+from datetime import timedelta
+from statistics import median
 
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from scipy.stats import norm
 
-APP_VERSION = "1.1.3-TOTALS-INTEGRITY"
-MLB_API = "https://statsapi.mlb.com/api/v1"
-CACHE = Path(".mlb_totals_v112_cache")
-CACHE.mkdir(exist_ok=True)
+import model as engine
 
-st.set_page_config(page_title="MLB Advanced Totals Lab", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
+MODEL_VERSION = getattr(engine, "MODEL_VERSION", "UNKNOWN")
+today_et = engine.today_et
+run_model = engine.run_model
+implied_prob = engine.implied_prob
+expected_value = engine.expected_value
+fair_ml = engine.fair_ml
+
+def fetch_games_for_date(selected_date=None):
+    """Compatibility wrapper so app.py does not crash if GitHub still has the prior model.py."""
+    if hasattr(engine, "fetch_games_for_date"):
+        return engine.fetch_games_for_date(selected_date)
+    # Older production model only had fetch_today_games(). Keep today's slate usable.
+    if hasattr(engine, "fetch_today_games") and (selected_date is None or selected_date == today_et()):
+        return engine.fetch_today_games()
+    raise RuntimeError(
+        "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
+    )
+
+APP_VERSION = "1.2.0-TOTALS-PRODUCTION"
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+ODDS_SPORT_KEY = "baseball_mlb"
+
+st.set_page_config(page_title="MLB Edge", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
+
 st.markdown("""
 <style>
-.stApp{background:linear-gradient(180deg,#071321 0%,#06111f 50%,#050d18 100%);color:#eef5fb}
-.block-container{max-width:980px;padding-top:1rem;padding-bottom:4rem}
-.kicker{font-size:.72rem;font-weight:900;letter-spacing:.18em;color:#7dd3fc;text-transform:uppercase}
-.sub{color:#9aacc0;max-width:760px;line-height:1.55}
-.stButton>button,.stDownloadButton>button{min-height:48px;border-radius:13px;font-weight:800;background:#164e75;color:white;border:1px solid #38bdf8}
-div[data-testid="stMetric"]{background:rgba(255,255,255,.025);border:1px solid rgba(148,163,184,.10);padding:10px;border-radius:12px}
+:root{--bg:#06111f;--panel:#0b1728;--panel2:#0f2035;--text:#f3f7fb;--muted:#8fa3ba;--blue:#7dd3fc;--green:#86efac;--amber:#fde68a;--red:#fda4af}
+.stApp{background:radial-gradient(circle at 15% -5%,rgba(59,130,246,.17),transparent 28%),linear-gradient(180deg,#071321 0%,#06111f 55%,#050d18 100%);color:var(--text)}
+.block-container{max-width:980px!important;padding-top:1rem!important;padding-bottom:4rem!important}
+header[data-testid="stHeader"]{background:rgba(6,17,31,.78);backdrop-filter:blur(14px);border-bottom:1px solid rgba(148,163,184,.08)}
+.hero{padding:17px 4px 9px}.eyebrow{font-size:.69rem;font-weight:950;letter-spacing:.18em;color:#7dd3fc}.title{font-size:2.35rem;font-weight:950;letter-spacing:-.055em;line-height:1;color:#fff}.sub{font-size:.86rem;color:#8fa3ba;margin-top:8px;max-width:720px}.pill{display:inline-flex;margin-top:10px;padding:5px 9px;border-radius:999px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.22);color:#9ef0b6;font-size:.65rem;font-weight:900;letter-spacing:.05em}
+.status{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:10px 12px;margin:8px 0 15px;border-radius:13px;background:rgba(11,23,40,.76);border:1px solid rgba(148,163,184,.10);font-size:.72rem;color:#8fa3ba}.live{color:#86efac;font-weight:900}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#22c55e;margin-right:7px;box-shadow:0 0 0 4px rgba(34,197,94,.10)}
+.kicker{font-size:.67rem;font-weight:950;letter-spacing:.14em;color:#75ccee;text-transform:uppercase;margin:16px 0 8px}
+.best-card{padding:16px;margin:8px 0 14px;border-radius:18px;background:linear-gradient(145deg,rgba(15,38,60,.98),rgba(8,22,38,.99));border:1px solid rgba(34,197,94,.28);box-shadow:0 16px 40px rgba(0,0,0,.20)}.best-top{display:flex;justify-content:space-between;gap:10px}.best-tag{font-size:.62rem;font-weight:950;letter-spacing:.13em;color:#86efac}.best-pick{font-size:1.45rem;font-weight:950;color:#fff;margin-top:3px}.best-game{font-size:.72rem;color:#8fa3ba;margin-top:4px}.badge{padding:5px 8px;border-radius:999px;font-size:.60rem;font-weight:950;white-space:nowrap}.badge-best{color:#a7f3d0;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.25)}.badge-bet{color:#bae6fd;background:rgba(56,189,248,.10);border:1px solid rgba(56,189,248,.22)}.badge-lean{color:#fde68a;background:rgba(234,179,8,.10);border:1px solid rgba(234,179,8,.22)}.badge-pass{color:#aebdcc;background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.15)}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}.metric{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.05)}.metric span{display:block;font-size:.53rem;font-weight:900;letter-spacing:.07em;color:#677f98;text-transform:uppercase}.metric b{display:block;font-size:.78rem;color:#eaf2f9;margin-top:2px}
+.game-card{margin:9px 0;padding:13px 14px;border-radius:16px;background:linear-gradient(180deg,rgba(14,29,49,.97),rgba(9,21,37,.98));border:1px solid rgba(148,163,184,.10)}.game-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.game-time{font-size:.60rem;color:#6f87a0;font-weight:850;letter-spacing:.05em}.match{font-size:.91rem;font-weight:950;color:#eef5fb;margin-top:3px}.sp{font-size:.64rem;color:#8298af;margin-top:3px}.pick{margin-top:10px;padding:10px 11px;border-radius:11px;background:rgba(5,16,30,.62);display:flex;justify-content:space-between;gap:10px;align-items:center}.pick-main{font-size:.92rem;font-weight:950;color:#f7fafc}.pick-sub{font-size:.62rem;color:#7890aa;margin-top:3px}.lineup-ok{color:#86efac}.lineup-wait{color:#fde68a}
+.note{padding:11px 12px;border-radius:12px;background:rgba(59,130,246,.06);border:1px solid rgba(96,165,250,.12);color:#91a7bd;font-size:.72rem;line-height:1.45}
+.single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850!important;background:#123252!important;color:#f8fbff!important;border:1px solid #2d5b82!important;box-shadow:none!important}.stButton>button:hover{background:#174267!important;border-color:#4c86b5!important;color:#fff!important}.stButton>button:focus{color:#fff!important}.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{background:#0f766e!important;color:#fff!important;border-color:#2dd4bf!important}.stButton>button:disabled{background:#17263a!important;color:#8fa3ba!important;border-color:#2a3a4e!important;opacity:1!important}div[data-testid="stRadio"] label,div[data-testid="stRadio"] label p,div[data-testid="stRadio"] span{color:#eef5fb!important;opacity:1!important}div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p{color:#eef5fb!important}div[data-testid="stSelectbox"] label,div[data-testid="stDateInput"] label{color:#dbeafe!important}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
+@media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.detail-grid{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------- generic helpers --------------------
-def sf(x, d=np.nan):
+
+def team_key(name):
+    s = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    aliases = {
+        "oaklandathletics":"athletics", "athletics":"athletics", "laangels":"losangelesangels",
+        "losangelesangels":"losangelesangels", "dbacks":"arizonadiamondbacks",
+        "arizonadiamondbacks":"arizonadiamondbacks", "whitesox":"chicagowhitesox",
+        "chicagowhitesox":"chicagowhitesox", "redsox":"bostonredsox", "bostonredsox":"bostonredsox",
+        "bluejays":"torontobluejays", "torontobluejays":"torontobluejays",
+    }
+    return aliases.get(s, s)
+
+
+def valid_odds(v):
     try:
-        if x in (None,"","-","--"): return d
-        return float(x)
-    except Exception: return d
+        x = float(v)
+        if not math.isfinite(x) or abs(x) < 100:
+            return None
+        return int(round(x))
+    except Exception:
+        return None
 
-def ipdec(x):
+
+def no_vig_pair(a, b):
+    a, b = valid_odds(a), valid_odds(b)
+    if a is None or b is None:
+        return None, None
+    pa, pb = implied_prob(a), implied_prob(b)
+    s = pa + pb
+    return (pa/s, pb/s) if s > 0 else (None, None)
+
+
+@st.cache_data(ttl=75, show_spinner=False)
+def fetch_odds(api_key):
+    if not api_key:
+        return {"events":[],"error":"ODDS_API_KEY is not configured.","quota":{}}
     try:
-        s=str(x)
-        if "." not in s: return float(s)
-        a,b=s.split(".",1); return float(a)+float(b)/3.0
-    except Exception: return 0.0
-
-def valid_odds(o):
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/odds",
+            params={"apiKey":api_key,"regions":"us","markets":"h2h","oddsFormat":"american","dateFormat":"iso"},
+            timeout=25,
+        )
+    except requests.RequestException:
+        return {"events":[],"error":"Could not reach The Odds API.","quota":{}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401:
+        return {"events":[],"error":"The Odds API rejected ODDS_API_KEY (401). Update the Streamlit secret with a valid key.","quota":quota}
+    if r.status_code==429:
+        return {"events":[],"error":"The Odds API credit/rate limit was reached (429).","quota":quota}
+    if r.status_code>=400:
+        return {"events":[],"error":f"The Odds API returned HTTP {r.status_code}.","quota":quota}
     try:
-        o=float(o); return np.isfinite(o) and abs(o)>=100 and o!=0
-    except Exception: return False
+        ev=r.json()
+    except Exception:
+        ev=[]
+    return {"events":ev if isinstance(ev,list) else [],"error":"","quota":quota}
 
-def imp(o):
-    o=float(o)
-    return 100/(o+100) if o>0 else abs(o)/(abs(o)+100)
 
-def profit(o):
-    o=float(o); return o/100 if o>0 else 100/abs(o)
 
-def novig(o,u):
-    a,b=imp(o),imp(u); z=a+b
-    return a/z,b/z
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_odds_event_list(api_key):
+    """Fetch current MLB event IDs only. The provider documents this endpoint as quota-free."""
+    if not api_key:
+        return {"events": [], "error": "ODDS_API_KEY is not configured.", "quota": {}}
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events",
+            params={"apiKey": api_key, "dateFormat": "iso"},
+            timeout=25,
+        )
+    except requests.RequestException:
+        return {"events": [], "error": "Could not reach The Odds API event list.", "quota": {}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401:
+        return {"events": [], "error": "The Odds API rejected ODDS_API_KEY (401).", "quota": quota}
+    if r.status_code>=400:
+        return {"events": [], "error": f"The Odds API event list returned HTTP {r.status_code}.", "quota": quota}
+    try:
+        ev=r.json()
+    except Exception:
+        ev=[]
+    return {"events": ev if isinstance(ev,list) else [], "error": "", "quota": quota}
 
-def cache_json(path, url, params=None):
-    path=Path(path)
-    if path.exists():
-        try: return json.loads(path.read_text())
-        except Exception: pass
-    r=requests.get(url,params=params,timeout=35); r.raise_for_status(); data=r.json()
-    path.write_text(json.dumps(data))
-    return data
 
-# -------------------- historical MLB starter + venue --------------------
-def schedule_cache(season): return CACHE/f"schedule_{season}.json"
-def pitcher_cache(season,pid): return CACHE/f"pitcher_{season}_{pid}.json"
+def fetch_single_game_odds(api_key, game):
+    """Fetch h2h odds for one explicitly selected MLB event."""
+    listing=fetch_odds_event_list(api_key)
+    if listing.get("error"):
+        return listing
+    event=match_event(listing.get("events",[]), game)
+    if not event:
+        return {"events": [], "error": "Could not match this MLB game to The Odds API event list yet.", "quota": listing.get("quota",{})}
+    event_id=event.get("id")
+    if not event_id:
+        return {"events": [], "error": "Matched event did not contain an Odds API event ID.", "quota": listing.get("quota",{})}
+    try:
+        r=requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events/{event_id}/odds",
+            params={"apiKey":api_key,"regions":"us","markets":"h2h","oddsFormat":"american","dateFormat":"iso"},
+            timeout=25,
+        )
+    except requests.RequestException:
+        return {"events": [], "error": "Could not reach The Odds API for this game.", "quota": {}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401:
+        return {"events": [], "error": "The Odds API rejected ODDS_API_KEY (401).", "quota": quota}
+    if r.status_code==429:
+        return {"events": [], "error": "The Odds API credit/rate limit was reached (429).", "quota": quota}
+    if r.status_code>=400:
+        return {"events": [], "error": f"The Odds API returned HTTP {r.status_code} for this game.", "quota": quota}
+    try:
+        ev=r.json()
+    except Exception:
+        ev={}
+    return {"events": [ev] if isinstance(ev,dict) and ev else [], "error": "" if ev else "No live moneyline was returned for this game.", "quota": quota}
 
-def fetch_season_schedule(season):
-    # One free MLB Stats API request per season, cached.
-    return cache_json(schedule_cache(season), f"{MLB_API}/schedule", {
-        "sportId":1,"season":int(season),"gameType":"R","hydrate":"probablePitcher,venue"
-    })
 
-def flatten_schedule(payload):
+@st.cache_data(ttl=75, show_spinner=False)
+def fetch_full_slate_totals(api_key):
+    if not api_key: return {"events":[],"error":"ODDS_API_KEY is not configured.","quota":{}}
+    try:
+        r=requests.get(f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/odds",params={"apiKey":api_key,"regions":"us","markets":"totals","oddsFormat":"american","dateFormat":"iso"},timeout=25)
+    except requests.RequestException:
+        return {"events":[],"error":"Could not reach The Odds API for totals.","quota":{}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code==401: return {"events":[],"error":"The Odds API rejected ODDS_API_KEY (401).","quota":quota}
+    if r.status_code==429: return {"events":[],"error":"The Odds API credit/rate limit was reached (429).","quota":quota}
+    if r.status_code>=400: return {"events":[],"error":f"The Odds API returned HTTP {r.status_code} for totals.","quota":quota}
+    try: ev=r.json()
+    except Exception: ev=[]
+    return {"events":ev if isinstance(ev,list) else [],"error":"","quota":quota}
+
+
+def fetch_single_game_totals(api_key, game):
+    listing=fetch_odds_event_list(api_key)
+    if listing.get("error"): return listing
+    event=match_event(listing.get("events",[]),game)
+    if not event: return {"events":[],"error":"Could not match this MLB game to The Odds API event list yet.","quota":listing.get("quota",{})}
+    event_id=event.get("id")
+    try:
+        r=requests.get(f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/events/{event_id}/odds",params={"apiKey":api_key,"regions":"us","markets":"totals","oddsFormat":"american","dateFormat":"iso"},timeout=25)
+    except requests.RequestException:
+        return {"events":[],"error":"Could not reach The Odds API for this game's total.","quota":{}}
+    quota={"remaining":r.headers.get("x-requests-remaining"),"used":r.headers.get("x-requests-used"),"last":r.headers.get("x-requests-last")}
+    if r.status_code>=400: return {"events":[],"error":f"The Odds API returned HTTP {r.status_code} for this game's total.","quota":quota}
+    try: ev=r.json()
+    except Exception: ev={}
+    return {"events":[ev] if isinstance(ev,dict) and ev else [],"error":"" if ev else "No live total was returned for this game.","quota":quota}
+
+
+def totals_market(event):
+    if not event: return None
     rows=[]
-    for d in payload.get("dates",[]):
-        for g in d.get("games",[]):
-            away=g.get("teams",{}).get("away",{}); home=g.get("teams",{}).get("home",{})
-            rows.append({
-                "MLB_GamePk":g.get("gamePk"),
-                "Venue":g.get("venue",{}).get("name",""),
-                "Away_SP_ID":(away.get("probablePitcher") or {}).get("id"),
-                "Home_SP_ID":(home.get("probablePitcher") or {}).get("id"),
-                "Away_SP":(away.get("probablePitcher") or {}).get("fullName"),
-                "Home_SP":(home.get("probablePitcher") or {}).get("fullName"),
-                "GameNumber":g.get("gameNumber",1),"DoubleHeader":g.get("doubleHeader","N")
-            })
-    return pd.DataFrame(rows)
+    for book in event.get("bookmakers",[]):
+        title=book.get("title") or book.get("key") or "book"
+        for m in book.get("markets",[]):
+            if m.get("key")!="totals": continue
+            by_point={}
+            for o in m.get("outcomes",[]):
+                name=str(o.get("name","")).strip().lower()
+                try: point=float(o.get("point"))
+                except Exception: continue
+                price=valid_odds(o.get("price"))
+                if price is None or name not in ("over","under"): continue
+                by_point.setdefault(point,{})[name]=(price,title)
+            for point,pair in by_point.items():
+                if "over" in pair and "under" in pair: rows.append({"point":point,"over":pair["over"][0],"under":pair["under"][0],"book":title})
+    if not rows: return None
+    counts={}
+    for r in rows: counts[r["point"]]=counts.get(r["point"],0)+1
+    maxn=max(counts.values()); points=sorted([p for p,n in counts.items() if n==maxn]); point=float(statistics.median(points))
+    same=[r for r in rows if abs(r["point"]-point)<1e-9]
+    oc=int(round(statistics.median([r["over"] for r in same]))); uc=int(round(statistics.median([r["under"] for r in same])))
+    ob=max(same,key=lambda r:r["over"]); ub=max(same,key=lambda r:r["under"]); po,pu=no_vig_pair(oc,uc)
+    return {"total":point,"over_best":ob["over"],"under_best":ub["under"],"over_book":ob["book"],"under_book":ub["book"],
+            "over_market_prob":po,"under_market_prob":pu,"books":len(same)}
 
-def fetch_pitcher_log(season,pid):
-    return cache_json(pitcher_cache(season,pid), f"{MLB_API}/people/{int(pid)}/stats", {
-        "stats":"gameLog","group":"pitching","season":int(season)
-    })
 
-def parse_pitcher_log(payload):
-    rows=[]
-    stats=payload.get("stats",[])
-    if not stats: return pd.DataFrame()
-    for s in stats[0].get("splits",[]):
-        st=s.get("stat",{})
-        rows.append({
-            "Date":pd.to_datetime(s.get("date"),errors="coerce",utc=True),
-            "GS":sf(st.get("gamesStarted"),0),"IP":ipdec(st.get("inningsPitched",0)),
-            "ER":sf(st.get("earnedRuns"),0),"H":sf(st.get("hits"),0),"BB":sf(st.get("baseOnBalls"),0),
-            "K":sf(st.get("strikeOuts"),0),"HR":sf(st.get("homeRuns"),0),"Pitches":sf(st.get("numberOfPitches"),np.nan)
+def poisson_total_probs(lam,line):
+    lam=max(.1,float(lam)); line=float(line); probs=[]; p=math.exp(-lam); probs.append(p)
+    for k in range(1,40): p=p*lam/k; probs.append(p)
+    if abs(line-round(line))<1e-9:
+        n=int(round(line)); push=probs[n] if 0<=n<len(probs) else 0.; under=sum(probs[:max(n,0)]); over=max(0.,1.-under-push)
+    else:
+        cutoff=math.floor(line); under=sum(probs[:cutoff+1]); push=0.; over=max(0.,1.-under)
+    s=over+under+push
+    return (over/s,under/s,push/s) if s>0 else (.5,.5,0.)
+
+
+def totals_ev(win,lose,odds):
+    o=float(odds); profit=o/100. if o>0 else 100./abs(o); return float(win)*profit-float(lose)
+
+
+def total_fair_ml(win,lose):
+    d=float(win)+float(lose); return fair_ml(float(win)/d) if d>0 else None
+
+TOTALS_MODEL_WEIGHT = 0.80
+TOTALS_RESIDUAL_SD = 3.92
+TOTALS_MAX_OFFICIAL = 3
+
+def _normal_cdf(x, mean, sd):
+    sd=max(0.25,float(sd))
+    z=(float(x)-float(mean))/(sd*math.sqrt(2.0))
+    return 0.5*(1.0+math.erf(z))
+
+def production_total_probs(model_total, market_total):
+    mean=float(model_total)
+    line=float(market_total)
+    if abs(line-round(line)) < 1e-9:
+        n=int(round(line))
+        under=_normal_cdf(n-0.5, mean, TOTALS_RESIDUAL_SD)
+        over=1.0-_normal_cdf(n+0.5, mean, TOTALS_RESIDUAL_SD)
+        push=max(0.0,1.0-over-under)
+    else:
+        under=_normal_cdf(line, mean, TOTALS_RESIDUAL_SD)
+        over=1.0-under
+        push=0.0
+    s=over+under+push
+    return (over/s,under/s,push/s) if s>0 else (.5,.5,0.)
+
+def totals_grade(edge):
+    edge=float(edge)
+    if edge >= .125:
+        return "BEST BET"
+    if edge >= .075:
+        return "BET"
+    if edge >= .05:
+        return "LEAN"
+    return "PASS"
+
+def build_total_pick(model_total, tm):
+    if not tm:
+        return None
+    calibrated_total = TOTALS_MODEL_WEIGHT*float(model_total) + (1.0-TOTALS_MODEL_WEIGHT)*float(tm["total"])
+    op,up,push = production_total_probs(calibrated_total, tm["total"])
+    d=op+up
+    op_np=op/d if d>0 else .5
+    up_np=up/d if d>0 else .5
+    oe=op_np-float(tm["over_market_prob"])
+    ue=up_np-float(tm["under_market_prob"])
+    if oe >= ue:
+        side="OVER"; prob=op; lose=up; edge=oe; odds=tm["over_best"]; book=tm["over_book"]
+    else:
+        side="UNDER"; prob=up; lose=op; edge=ue; odds=tm["under_best"]; book=tm["under_book"]
+    ev=totals_ev(prob,lose,odds)
+    return {
+        "side":side,"prob":prob,"edge":edge,"ev":ev,"odds":odds,"book":book,
+        "grade":totals_grade(edge),"push":push,"calibrated_total":calibrated_total,
+        "market_total":float(tm["total"]),"books":tm["books"],
+        "over_prob":op,"under_prob":up,"over_edge":oe,"under_edge":ue,
+        "over_odds":tm["over_best"],"under_odds":tm["under_best"],
+        "over_book":tm["over_book"],"under_book":tm["under_book"],
+    }
+
+def event_match(event, game):
+    if team_key(event.get("away_team")) != team_key(game.get("Away")) or team_key(event.get("home_team")) != team_key(game.get("Home")):
+        return None
+    try:
+        e=pd.to_datetime(event.get("commence_time"),utc=True); g=pd.to_datetime(game.get("GameDate"),utc=True)
+        return abs((e-g).total_seconds())
+    except Exception:
+        return 0
+
+
+def match_event(events, game):
+    c=[]
+    for e in events:
+        s=event_match(e,game)
+        if s is not None: c.append((s,e))
+    if not c: return None
+    c.sort(key=lambda z:z[0]); return c[0][1]
+
+
+def moneyline_market(event):
+    if not event: return None
+    away_k, home_k = team_key(event.get("away_team")), team_key(event.get("home_team"))
+    prices={away_k:[],home_k:[]}
+    books={away_k:[],home_k:[]}
+    updates=[]
+    for book in event.get("bookmakers",[]):
+        title=book.get("title") or book.get("key") or "book"
+        for m in book.get("markets",[]):
+            if m.get("key")!="h2h": continue
+            if m.get("last_update"): updates.append(m.get("last_update"))
+            for o in m.get("outcomes",[]):
+                k=team_key(o.get("name")); p=valid_odds(o.get("price"))
+                if k in prices and p is not None:
+                    prices[k].append(p); books[k].append((p,title))
+    if not prices[away_k] or not prices[home_k]: return None
+    away_cons=int(round(statistics.median(prices[away_k]))); home_cons=int(round(statistics.median(prices[home_k])))
+    away_best=max(books[away_k], key=lambda x:x[0]); home_best=max(books[home_k], key=lambda x:x[0])
+    return {
+        "away_consensus":away_cons,"home_consensus":home_cons,
+        "away_best":away_best[0],"home_best":home_best[0],"away_book":away_best[1],"home_book":home_best[1],
+        "books":min(len(prices[away_k]),len(prices[home_k])),"last_update":max(updates) if updates else None,
+    }
+
+
+def model_alpha(confidence, lineup_confirmed):
+    # Research champion selected ~70% model weight. Production starts slightly more conservative until lineups are confirmed.
+    a = 0.70 if lineup_confirmed else 0.60
+    if confidence < 70: a -= 0.10
+    elif confidence < 80: a -= 0.05
+    return max(0.45,min(0.70,a))
+
+
+def thresholds(odds):
+    o=float(odds); b_edge,b_ev,a_edge,a_ev=.025,.045,.045,.075
+    if o<=-200: b_edge+=.010; b_ev+=.010; a_edge+=.010; a_ev+=.015
+    if o>=300: b_edge+=.015; b_ev+=.025; a_edge+=.020; a_ev+=.035
+    return b_edge,b_ev,a_edge,a_ev
+
+
+def grade(prob, odds, confidence, lineup_confirmed):
+    imp=implied_prob(odds); edge=prob-imp; ev=expected_value(prob,odds)
+    b_edge,b_ev,a_edge,a_ev=thresholds(odds)
+    # Official bets require known starters. Unconfirmed lineups may still qualify, but need stronger confidence.
+    official_conf = 78 if lineup_confirmed else 82
+    if odds>=500: verdict="PASS"
+    elif confidence>=official_conf and edge>=a_edge and ev>=a_ev: verdict="BEST BET"
+    elif confidence>=max(70,official_conf-8) and edge>=b_edge and ev>=b_ev: verdict="BET"
+    elif edge>=.010 and ev>=.015: verdict="LEAN"
+    else: verdict="PASS"
+    if odds>=300 and verdict in ("BEST BET","BET"): verdict="LEAN"
+    return verdict,edge,ev,imp
+
+
+
+def smart_card_label(side, confidence, lineup_confirmed):
+    """Edge-driven selection layer; model probabilities/calibration stay unchanged."""
+    if side.get("odds") is None or side.get("edge") is None or side.get("ev") is None:
+        return "MODEL ONLY"
+
+    odds=float(side["odds"])
+    edge=float(side["edge"])
+    legacy=side.get("verdict","PASS")
+
+    # Preserve hard production rejections (invalid/very long prices, etc.).
+    if legacy == "PASS":
+        return "PASS"
+
+    # Thin historical sample for +200 and longer dogs: require materially more edge.
+    if odds >= 200:
+        if lineup_confirmed and confidence >= 82 and edge >= .15 and legacy in ("BEST BET","BET"):
+            return "BEST BET"
+        if lineup_confirmed and confidence >= 80 and edge >= .12 and legacy in ("BEST BET","BET"):
+            return "BET"
+        if edge >= .075:
+            return "LEAN"
+        return "PASS"
+
+    # Frozen price-bucket audit supports edge as the primary gate.
+    # 10%+ = strongest zone, 7.5–10% = bettable, 5–7.5% = lean, <5% = pass.
+    if legacy in ("BEST BET","BET") and edge >= .10:
+        return "BEST BET"
+    if legacy in ("BEST BET","BET") and edge >= .075:
+        return "BET"
+    if edge >= .05:
+        return "LEAN"
+    return "PASS"
+
+
+def smart_score(side, confidence):
+    if side.get("edge") is None or side.get("ev") is None:
+        return -999.0
+    return float(side["edge"])*100 + float(side["ev"])*35 + max(0, confidence-70)*0.03
+
+def cls(v):
+    return {"BEST BET":"badge-best","BET":"badge-bet","LEAN":"badge-lean","PASS":"badge-pass","MODEL ONLY":"badge-lean"}.get(v,"badge-pass")
+
+
+def build_candidates(model_df, games, events):
+    """Build one candidate for every modeled MLB game."""
+    game_map={g.get("GamePk"):g for g in games}
+    out=[]
+    for _,r in model_df.iterrows():
+        g=game_map.get(r["GamePk"],{})
+        event=match_event(events,g)
+        m=moneyline_market(event)
+        confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
+        conf=int(r["Model_Confidence"])
+        alpha=model_alpha(conf,confirmed)
+        market_available=False
+        side_rows=[]
+
+        if m:
+            am,hm=no_vig_pair(m["away_consensus"],m["home_consensus"])
+            if am is not None and hm is not None:
+                market_available=True
+                sides=[
+                    (r["Away"],float(r["Away_WinProb"]),am,m["away_best"],m["away_book"]),
+                    (r["Home"],float(r["Home_WinProb"]),hm,m["home_best"],m["home_book"]),
+                ]
+                for team,raw,market_p,price,book in sides:
+                    cal=market_p+alpha*(raw-market_p); cal=max(.001,min(.999,cal))
+                    verdict,edge,ev,imp=grade(cal,price,conf,confirmed)
+                    side_rows.append({"team":team,"raw":raw,"market_prob":market_p,"prob":cal,"odds":price,"book":book,"verdict":verdict,"edge":edge,"ev":ev,"fair":fair_ml(cal)})
+
+        if not market_available:
+            side_rows=[
+                {"team":r["Away"],"raw":float(r["Away_WinProb"]),"market_prob":None,"prob":float(r["Away_WinProb"]),"odds":None,"book":None,"verdict":"MODEL ONLY","edge":None,"ev":None,"fair":fair_ml(float(r["Away_WinProb"]))},
+                {"team":r["Home"],"raw":float(r["Home_WinProb"]),"market_prob":None,"prob":float(r["Home_WinProb"]),"odds":None,"book":None,"verdict":"MODEL ONLY","edge":None,"ev":None,"fair":fair_ml(float(r["Home_WinProb"]))},
+            ]
+
+        rank={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
+        side_rows.sort(key=lambda x:(rank[x["verdict"]], x["edge"] if x["edge"] is not None else -999, x["ev"] if x["ev"] is not None else -999, x["prob"]),reverse=True)
+        for z in side_rows:
+            z["selection"] = smart_card_label(z, conf, confirmed)
+            z["smart_score"] = smart_score(z, conf)
+        selection_rank={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
+        side_rows.sort(key=lambda z:(selection_rank.get(z.get("selection"),0), z.get("smart_score",-999), z.get("prob",0)), reverse=True)
+        best=side_rows[0]
+        out.append({
+            "GamePk":r["GamePk"],"game":r["Game"],"away":r["Away"],"home":r["Home"],"time":r.get("TimeLabel",g.get("TimeLabel","")),
+            "away_sp":r.get("Away_SP") or "TBD","home_sp":r.get("Home_SP") or "TBD","lineup_confirmed":confirmed,
+            "confidence":conf,"alpha":alpha,"books":m["books"] if market_available else 0,"best":best,"all":side_rows,
+            "away_proj":float(r["Away_Proj_Runs"]),"home_proj":float(r["Home_Proj_Runs"]),
+            "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons",""),"market_available":market_available,
+            "model_row": r.to_dict(),
         })
-    d=pd.DataFrame(rows).dropna(subset=["Date"]).sort_values("Date")
-    return d
-
-def pitcher_summary(log, game_time, min_starts=3):
-    if log is None or log.empty: return None
-    x=log[(log.Date < game_time) & (log.GS>0)].copy()
-    if len(x)<min_starts: return None
-    def calc(z):
-        ip=z.IP.sum(); er=z.ER.sum(); bb=z.BB.sum(); k=z.K.sum(); hr=z.HR.sum(); h=z.H.sum()
-        if ip<=0: return {}
-        era=9*er/ip; k9=9*k/ip; bb9=9*bb/ip; hr9=9*hr/ip; whip=(h+bb)/ip
-        fip=(13*hr+3*bb-2*k)/ip+3.20
-        return {"ERA":era,"K9":k9,"BB9":bb9,"HR9":hr9,"WHIP":whip,"FIP":fip,"KBB9":k9-bb9,"IPGS":ip/max(1,len(z))}
-    allr=calc(x); last5=calc(x.tail(5)); last3=calc(x.tail(3))
-    if not allr: return None
-    last_date=x.Date.max(); rest=max(0,(game_time-last_date).total_seconds()/86400)
-    # Regress volatile rate stats toward fixed league-ish priors.
-    n=len(x); shrink=min(1.0,n/12.0)
-    pri={"ERA":4.20,"FIP":4.20,"K9":8.6,"BB9":3.1,"HR9":1.2,"WHIP":1.30,"KBB9":5.5,"IPGS":5.3}
-    out={"Starts":n,"Rest":rest}
-    for k in pri:
-        v=allr.get(k,pri[k]); out[k]=shrink*v+(1-shrink)*pri[k]
-        out[f"L5_{k}"]=last5.get(k,v) if last5 else v
-        out[f"L3_{k}"]=last3.get(k,v) if last3 else v
+    order={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
+    out.sort(key=lambda x:(order.get(x["best"].get("selection"),0), x["best"].get("smart_score",-999)),reverse=True)
     return out
 
-# Static neutral-to-moderate park multipliers. Research feature, not a live claim.
-PARK={
-"Coors Field":1.10,"Great American Ball Park":1.05,"Fenway Park":1.04,"Yankee Stadium":1.03,"Citizens Bank Park":1.03,
-"Globe Life Field":1.02,"American Family Field":1.02,"Wrigley Field":1.01,"Daikin Park":1.01,"Minute Maid Park":1.01,
-"Nationals Park":1.01,"Rate Field":1.01,"Guaranteed Rate Field":1.01,"Rogers Centre":1.00,"Kauffman Stadium":1.00,
-"Busch Stadium":1.00,"Angel Stadium":1.00,"Sutter Health Park":1.00,"George M. Steinbrenner Field":1.00,
-"loanDepot park":0.99,"Chase Field":0.99,"Progressive Field":0.99,"Target Field":0.99,"Comerica Park":0.98,
-"Dodger Stadium":0.98,"Truist Park":0.98,"Citi Field":0.98,"PNC Park":0.98,"Petco Park":0.97,"T-Mobile Park":0.97,
-"Oracle Park":0.96,"Tropicana Field":0.97
-}
 
-# -------------------- market merge --------------------
-def merge_totals(master, totals):
-    m=master.copy(); t=totals.copy()
-    m["Snapshot_Timestamp"]=pd.to_datetime(m["Snapshot_Timestamp"],utc=True,errors="coerce").dt.floor("s")
-    t["Snapshot_Timestamp"]=pd.to_datetime(t["Snapshot_Timestamp"],utc=True,errors="coerce").dt.floor("s")
-    for c in ["Event_ID"]: m[c]=m[c].astype(str); t[c]=t[c].astype(str)
-    keep=["Event_ID","Snapshot_Timestamp","Total_Line","Over_Odds","Under_Odds","Over_Market_Prob","Under_Market_Prob","Total_Books"]
-    missing=set(keep)-set(t.columns)
-    if missing: raise ValueError("Totals file missing: "+", ".join(sorted(missing)))
-    t=t[keep].drop_duplicates(["Event_ID","Snapshot_Timestamp"],keep="last")
-    return m.merge(t,on=["Event_ID","Snapshot_Timestamp"],how="left")
-
-# -------------------- point-in-time team run features --------------------
-def build_team_pit(df,min_games=12):
-    x=df.copy(); x["Commence_Time"]=pd.to_datetime(x.Commence_Time,utc=True,errors="coerce")
-    x=x[x.Result_Matched.astype(bool)].dropna(subset=["Commence_Time","Away_Team","Home_Team","Away_Score","Home_Score","Final_Total_Runs"]).sort_values(["Commence_Time","Event_ID"])
-    hist={}; rows=[]
-    for _,r in x.iterrows():
-        gt=r.Commence_Time; a=r.Away_Team; h=r.Home_Team
-        def summ(team, venue_side):
-            z=hist.get(team,[])
-            if not z: return None
-            recent10=z[-10:]; recent5=z[-5:]
-            side=[q for q in z if q["side"]==venue_side]
-            return {
-                "N":len(z),"RF":np.mean([q["rf"] for q in z]),"RA":np.mean([q["ra"] for q in z]),
-                "TOT":np.mean([q["rf"]+q["ra"] for q in z]),"STD":np.std([q["rf"]+q["ra"] for q in z],ddof=1) if len(z)>2 else 3.0,
-                "L10_RF":np.mean([q["rf"] for q in recent10]),"L10_RA":np.mean([q["ra"] for q in recent10]),"L10_TOT":np.mean([q["rf"]+q["ra"] for q in recent10]),
-                "L5_RF":np.mean([q["rf"] for q in recent5]),"L5_RA":np.mean([q["ra"] for q in recent5]),"L5_TOT":np.mean([q["rf"]+q["ra"] for q in recent5]),
-                "SIDE_RF":np.mean([q["rf"] for q in side]) if len(side)>=5 else np.nan,
-                "SIDE_RA":np.mean([q["ra"] for q in side]) if len(side)>=5 else np.nan,
-                "Rest":max(0,(gt-z[-1]["time"]).total_seconds()/86400)
-            }
-        aa=summ(a,"away"); hh=summ(h,"home")
-        if aa and hh:
-            rec=r.to_dict()
-            for k,v in aa.items(): rec[f"Away_{k}"]=v
-            for k,v in hh.items(): rec[f"Home_{k}"]=v
-            rec["PIT_Eligible"]=(aa["N"]>=min_games and hh["N"]>=min_games)
-            rows.append(rec)
-        ascore=float(r.Away_Score); hscore=float(r.Home_Score)
-        hist.setdefault(a,[]).append({"time":gt,"rf":ascore,"ra":hscore,"side":"away"})
-        hist.setdefault(h,[]).append({"time":gt,"rf":hscore,"ra":ascore,"side":"home"})
-    return pd.DataFrame(rows)
-
-TEAM_FEATURES=[
-"Away_RF","Away_RA","Away_TOT","Away_STD","Away_L10_RF","Away_L10_RA","Away_L10_TOT","Away_L5_RF","Away_L5_RA","Away_L5_TOT","Away_SIDE_RF","Away_SIDE_RA","Away_Rest",
-"Home_RF","Home_RA","Home_TOT","Home_STD","Home_L10_RF","Home_L10_RA","Home_L10_TOT","Home_L5_RF","Home_L5_RA","Home_L5_TOT","Home_SIDE_RF","Home_SIDE_RA","Home_Rest"]
-SP_KEYS=["ERA","FIP","K9","BB9","HR9","WHIP","KBB9","IPGS","L5_ERA","L5_FIP","L5_KBB9","L3_ERA","L3_FIP","Rest","Starts"]
-
-def attach_context(pit,min_starts=3):
-    # Schedule lookups
-    sched=[]
-    for s in sorted(pd.to_numeric(pit.Season,errors="coerce").dropna().astype(int).unique()):
-        try: sched.append(flatten_schedule(fetch_season_schedule(s)))
-        except Exception as e: st.warning(f"MLB schedule {s} could not be loaded: {e}")
-    if not sched: return pd.DataFrame(), pd.DataFrame([{"PIT_Rows":len(pit),"Context_Rows":0}])
-    sch=pd.concat(sched,ignore_index=True).drop_duplicates("MLB_GamePk")
-    d=pit.copy(); d["MLB_GamePk"]=pd.to_numeric(d.MLB_GamePk,errors="coerce")
-    d=d.merge(sch,on="MLB_GamePk",how="left",suffixes=("","_sched"))
-    pairs=set()
-    for _,r in d.iterrows():
-        s=int(r.Season)
-        for c in ["Away_SP_ID","Home_SP_ID"]:
-            if pd.notna(r.get(c)): pairs.add((s,int(r[c])))
-    logs={}; errs=[]; prog=st.progress(0); status=st.empty()
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        fut={ex.submit(fetch_pitcher_log,s,p):(s,p) for s,p in sorted(pairs)}
-        for i,f in enumerate(as_completed(fut),1):
-            key=fut[f]
-            try: logs[key]=parse_pitcher_log(f.result())
-            except Exception as e: errs.append(f"{key}:{e}")
-            prog.progress(i/max(1,len(fut))); status.caption(f"Free MLB starter histories • {i}/{len(fut)}")
-    prog.empty(); status.empty()
-    rows=[]
-    for _,r in d.iterrows():
-        gt=pd.to_datetime(r.Commence_Time,utc=True,errors="coerce")
-        if pd.isna(gt): continue
-        try: s=int(r.Season); aid=int(r.Away_SP_ID); hid=int(r.Home_SP_ID)
-        except Exception: continue
-        a=pitcher_summary(logs.get((s,aid)),gt,min_starts); h=pitcher_summary(logs.get((s,hid)),gt,min_starts)
-        if a is None or h is None: continue
-        rec=r.to_dict()
-        for k,v in a.items(): rec[f"Away_SP_{k}"]=v
-        for k,v in h.items(): rec[f"Home_SP_{k}"]=v
-        rec["Park_Factor"]=PARK.get(str(r.get("Venue","")),1.0)
-        rows.append(rec)
-    q={"PIT_Rows":len(pit),"Schedule_Matched":int(d.Away_SP_ID.notna().sum()),"Starter_Seasons":len(pairs),"Starter_Errors":len(errs),"Context_Rows":len(rows)}
-    return pd.DataFrame(rows),pd.DataFrame([q])
-
-# -------------------- models --------------------
-def ridge_fit(X,y,l2=12.0):
-    X=np.asarray(X,float); y=np.asarray(y,float)
-    mu=np.nanmean(X,axis=0); sd=np.nanstd(X,axis=0); sd=np.where(sd<1e-8,1,sd)
-    xx=np.where(np.isfinite(X),X,mu); z=(xx-mu)/sd; A=np.c_[np.ones(len(z)),z]
-    I=np.eye(A.shape[1]); I[0,0]=0; b=np.linalg.solve(A.T@A+l2*I,A.T@y)
-    return b,mu,sd
-
-def ridge_pred(model,X):
-    b,mu,sd=model; X=np.asarray(X,float); xx=np.where(np.isfinite(X),X,mu); z=(xx-mu)/sd
-    return np.c_[np.ones(len(z)),z]@b
-
-def basic_matrix(d):
-    cols=["Away_RF","Away_RA","Away_L10_RF","Away_L10_RA","Home_RF","Home_RA","Home_L10_RF","Home_L10_RA","Away_Rest","Home_Rest"]
-    return d[cols].apply(pd.to_numeric,errors="coerce")
-
-def advanced_matrix(d):
-    x=d[TEAM_FEATURES].apply(pd.to_numeric,errors="coerce").copy()
-    # matchup summaries that let the model learn offense-vs-prevention interactions
-    x["Season_Matchup_Runs"]=(pd.to_numeric(d.Away_RF,errors="coerce")+pd.to_numeric(d.Home_RA,errors="coerce")+pd.to_numeric(d.Home_RF,errors="coerce")+pd.to_numeric(d.Away_RA,errors="coerce"))/2
-    x["Recent10_Matchup_Runs"]=(pd.to_numeric(d.Away_L10_RF,errors="coerce")+pd.to_numeric(d.Home_L10_RA,errors="coerce")+pd.to_numeric(d.Home_L10_RF,errors="coerce")+pd.to_numeric(d.Away_L10_RA,errors="coerce"))/2
-    x["Recent5_Matchup_Runs"]=(pd.to_numeric(d.Away_L5_RF,errors="coerce")+pd.to_numeric(d.Home_L5_RA,errors="coerce")+pd.to_numeric(d.Home_L5_RF,errors="coerce")+pd.to_numeric(d.Away_L5_RA,errors="coerce"))/2
-    for side in ["Away","Home"]:
-        for k in SP_KEYS:
-            x[f"{side}_SP_{k}"]=pd.to_numeric(d[f"{side}_SP_{k}"],errors="coerce")
-    x["Combined_SP_FIP"]=pd.to_numeric(d.Away_SP_FIP,errors="coerce")+pd.to_numeric(d.Home_SP_FIP,errors="coerce")
-    x["Combined_SP_ERA"]=pd.to_numeric(d.Away_SP_ERA,errors="coerce")+pd.to_numeric(d.Home_SP_ERA,errors="coerce")
-    x["Combined_SP_IPGS"]=pd.to_numeric(d.Away_SP_IPGS,errors="coerce")+pd.to_numeric(d.Home_SP_IPGS,errors="coerce")
-    x["Combined_SP_HR9"]=pd.to_numeric(d.Away_SP_HR9,errors="coerce")+pd.to_numeric(d.Home_SP_HR9,errors="coerce")
-    x["Park_Factor"]=pd.to_numeric(d.Park_Factor,errors="coerce")
-    return x.replace([np.inf,-np.inf],np.nan)
-
-def empirical_probs(pred,line,resids):
-    # Distribution is learned from training residuals rather than assuming a perfect normal.
-    vals=pred+resids
-    if abs(float(line)-round(float(line)))<1e-9:
-        po=float(np.mean(vals>line)); pu=float(np.mean(vals<line)); pp=max(0.0,1-po-pu)
-    else:
-        po=float(np.mean(vals>line)); pu=1-po; pp=0.0
-    return po,pu,pp
-
-def evaluate_model(d, matrix_fn, label, l2=12.0):
-    d=d.copy().reset_index(drop=True); X=matrix_fn(d); y=pd.to_numeric(d.Final_Total_Runs,errors="coerce")
-    s=pd.to_numeric(d.Season,errors="coerce"); tr=s==2023; va=s==2024; ho=s==2025
-    if min(tr.sum(),va.sum(),ho.sum())<150: raise ValueError(f"Insufficient 2023/24/25 rows for {label}: {tr.sum()}/{va.sum()}/{ho.sum()}")
-    m=ridge_fit(X.loc[tr],y.loc[tr],l2); p23=ridge_pred(m,X.loc[tr]); resid=(y.loc[tr].to_numpy()-p23)
-    p24=ridge_pred(m,X.loc[va]); line24=pd.to_numeric(d.loc[va, "Total_Line"],errors="coerce").to_numpy(); y24=y.loc[va].to_numpy()
-    bestw=0; best=1e9
-    for w in np.arange(0,1.01,.1):
-        q=w*p24+(1-w)*line24; rm=float(np.sqrt(np.mean((q-y24)**2)))
-        if rm<best: best=rm; bestw=float(w)
-    # refit 2023+24 after selecting weight
-    dev=tr|va; m2=ridge_fit(X.loc[dev],y.loc[dev],l2); pdev=ridge_pred(m2,X.loc[dev]); resdev=y.loc[dev].to_numpy()-pdev
-    p25=ridge_pred(m2,X.loc[ho]); line25=pd.to_numeric(d.loc[ho,"Total_Line"],errors="coerce").to_numpy(); y25=y.loc[ho].to_numpy(); cal=bestw*p25+(1-bestw)*line25
-    out=d.loc[ho].copy(); out["Raw_Model_Total"]=p25; out["Calibrated_Total"]=cal; out["Model_Weight"]=bestw
-    sides=[]; edges=[]; evs=[]; results=[]; units=[]; probs=[]
-    for r,pred in zip(out.itertuples(),cal):
-        po,pu,pp=empirical_probs(float(pred),float(r.Total_Line),resdev)
-        try: om,um=novig(r.Over_Odds,r.Under_Odds)
-        except Exception: om,um=r.Over_Market_Prob,r.Under_Market_Prob
-        eo=po-float(om); eu=pu-float(um)
-        if eo>=eu: side="OVER"; pr=po; edge=eo; odds=float(r.Over_Odds)
-        else: side="UNDER"; pr=pu; edge=eu; odds=float(r.Under_Odds)
-        ev=pr*profit(odds)-(1-pr-pp)
-        actual=float(r.Final_Total_Runs); ln=float(r.Total_Line); push=actual==ln
-        win=(actual>ln) if side=="OVER" else (actual<ln)
-        unit=0.0 if push else (profit(odds) if win else -1.0)
-        sides.append(side); edges.append(edge); evs.append(ev); results.append("PUSH" if push else ("WIN" if win else "LOSS")); units.append(unit); probs.append(pr)
-    out["Side"]=sides; out["Bet_Prob"]=probs; out["Edge"]=edges; out["EV"]=evs; out["Result"]=results; out["Units"]=units
-    metrics={"Model":label,"2024_Selected_Model_Weight":bestw,"2024_Validation_RMSE":best,"2025_Games":len(out),
-             "2025_Market_RMSE":float(np.sqrt(np.mean((line25-y25)**2))),"2025_Raw_RMSE":float(np.sqrt(np.mean((p25-y25)**2))),
-             "2025_Calibrated_RMSE":float(np.sqrt(np.mean((cal-y25)**2))),"Residual_SD_Dev":float(np.std(resdev,ddof=1))}
-    buckets=[]
-    for e0 in [0,.025,.05,.075,.10,.125,.15]:
-        b=out[(out.Edge>=e0)&(out.EV>=0)].copy()
-        buckets.append({"Model":label,"Min_Edge":e0,"Bets":len(b),"Wins":int((b.Result=="WIN").sum()),"Losses":int((b.Result=="LOSS").sum()),"Pushes":int((b.Result=="PUSH").sum()),"Units":float(b.Units.sum()),"ROI":float(b.Units.sum()/len(b)) if len(b) else np.nan})
-    return metrics,pd.DataFrame(buckets),out
+def _diag_num(v):
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except Exception:
+            pass
+    return v
 
 
-# -------------------- integrity audit helpers --------------------
-def fit_advanced_frozen(d, l2=18.0):
-    d=d.copy().reset_index(drop=True)
-    X=advanced_matrix(d)
-    y=pd.to_numeric(d.Final_Total_Runs,errors="coerce")
-    s=pd.to_numeric(d.Season,errors="coerce")
-    tr=s==2023; va=s==2024; dev=tr|va; ho=s==2025
-    if min(tr.sum(),va.sum(),ho.sum())<100:
-        raise ValueError(f"Insufficient rows for frozen audit: {tr.sum()}/{va.sum()}/{ho.sum()}")
-    m=ridge_fit(X.loc[tr],y.loc[tr],l2)
-    p24=ridge_pred(m,X.loc[va]); line24=pd.to_numeric(d.loc[va,'Total_Line'],errors='coerce').to_numpy(); y24=y.loc[va].to_numpy()
-    bestw=0.0; best=1e9
-    for w in np.arange(0,1.01,.1):
-        q=w*p24+(1-w)*line24
-        rm=float(np.sqrt(np.mean((q-y24)**2)))
-        if rm<best: best=rm; bestw=float(w)
-    m2=ridge_fit(X.loc[dev],y.loc[dev],l2)
-    pdev=ridge_pred(m2,X.loc[dev]); resdev=y.loc[dev].to_numpy()-pdev
-    return {"model":m2,"weight":bestw,"resids":resdev,"validation_rmse":best,"columns":list(X.columns)}
-
-def score_holdout(fit, hold_df, label):
-    h=hold_df.copy().reset_index(drop=True)
-    Xh=advanced_matrix(h)
-    p=ridge_pred(fit['model'],Xh)
-    lines=pd.to_numeric(h.Total_Line,errors='coerce').to_numpy()
-    y=pd.to_numeric(h.Final_Total_Runs,errors='coerce').to_numpy()
-    cal=fit['weight']*p+(1-fit['weight'])*lines
-    rows=[]
-    for i,r in enumerate(h.itertuples()):
-        pred=float(cal[i]); line=float(r.Total_Line)
-        po,pu,pp=empirical_probs(pred,line,fit['resids'])
-        try: om,um=novig(r.Over_Odds,r.Under_Odds)
-        except Exception: om,um=float(r.Over_Market_Prob),float(r.Under_Market_Prob)
-        eo,eu=po-om,pu-um
-        if eo>=eu: side='OVER'; pr=po; edge=eo; odds=float(r.Over_Odds)
-        else: side='UNDER'; pr=pu; edge=eu; odds=float(r.Under_Odds)
-        ev=pr*profit(odds)-(1-pr-pp)
-        actual=float(r.Final_Total_Runs); push=(actual==line)
-        win=(actual>line) if side=='OVER' else (actual<line)
-        unit=0.0 if push else (profit(odds) if win else -1.0)
-        rows.append((side,pr,edge,ev,'PUSH' if push else ('WIN' if win else 'LOSS'),unit))
-    h['Raw_Model_Total']=p; h['Calibrated_Total']=cal
-    h[['Side','Bet_Prob','Edge','EV','Result','Units']]=pd.DataFrame(rows,index=h.index)
-    met={
-        'Test':label,'Games':len(h),'Model_Weight':fit['weight'],
-        'Market_RMSE':float(np.sqrt(np.mean((lines-y)**2))),
-        'Raw_RMSE':float(np.sqrt(np.mean((p-y)**2))),
-        'Calibrated_RMSE':float(np.sqrt(np.mean((cal-y)**2))),
+def game_diagnostics_df(x, slate_date):
+    """One-row export with the live model inputs/outputs for a selected game."""
+    r = dict(x.get("model_row") or {})
+    away = next(z for z in x["all"] if z["team"] == x["away"])
+    home = next(z for z in x["all"] if z["team"] == x["home"])
+    row = {
+        "Slate_Date": str(slate_date),
+        "GamePk": x.get("GamePk"),
+        "Game": x.get("game"),
+        "Time": x.get("time"),
+        "Away": x.get("away"),
+        "Home": x.get("home"),
+        "Away_SP": x.get("away_sp"),
+        "Home_SP": x.get("home_sp"),
+        "Lineup_Status": x.get("lineup_status"),
+        "Lineups_Confirmed": x.get("lineup_confirmed"),
+        "Model_Confidence": x.get("confidence"),
+        "Confidence_Reasons": x.get("confidence_reasons"),
+        "Market_Available": x.get("market_available"),
+        "Model_Weight": x.get("alpha") if x.get("market_available") else None,
+        "Market_Weight": (1-x.get("alpha")) if x.get("market_available") else None,
+        "Books_In_Consensus": x.get("books"),
+        "Away_Raw_Model_Prob": away.get("raw"),
+        "Home_Raw_Model_Prob": home.get("raw"),
+        "Away_Calibrated_Prob": away.get("prob") if x.get("market_available") else None,
+        "Home_Calibrated_Prob": home.get("prob") if x.get("market_available") else None,
+        "Away_Market_NoVig_Prob": away.get("market_prob"),
+        "Home_Market_NoVig_Prob": home.get("market_prob"),
+        "Away_Best_Odds": away.get("odds"),
+        "Home_Best_Odds": home.get("odds"),
+        "Away_Best_Book": away.get("book"),
+        "Home_Best_Book": home.get("book"),
+        "Away_Edge": away.get("edge"),
+        "Home_Edge": home.get("edge"),
+        "Away_EV": away.get("ev"),
+        "Home_EV": home.get("ev"),
+        "Away_Fair_ML": away.get("fair"),
+        "Home_Fair_ML": home.get("fair"),
+        "Away_Card_Label": away.get("selection"),
+        "Home_Card_Label": home.get("selection"),
+        "Away_Proj_Runs": x.get("away_proj"),
+        "Home_Proj_Runs": x.get("home_proj"),
+        "Model_Version": MODEL_VERSION,
+        "App_Version": APP_VERSION,
     }
-    b=h[(h.Edge>=.075)&(h.EV>=0)].copy()
-    met.update({'Bets_7_5pct':len(b),'Wins':int((b.Result=='WIN').sum()),'Losses':int((b.Result=='LOSS').sum()),'Pushes':int((b.Result=='PUSH').sum()),'Units':float(b.Units.sum()),'ROI':float(b.Units.sum()/len(b)) if len(b) else np.nan})
-    return met,h
+    # Preserve the most useful engine-level diagnostic inputs when available.
+    wanted = [
+        "Away_SP_Hand","Home_SP_Hand","Away_SP_Quality","Home_SP_Quality",
+        "Away_SP_Starts","Home_SP_Starts","Away_SP_SeasonERA","Home_SP_SeasonERA",
+        "Away_SP_SeasonFIP","Home_SP_SeasonFIP","Away_SP_RecentERA","Home_SP_RecentERA",
+        "Away_SP_RecentFIP","Home_SP_RecentFIP","Away_SP_ExpIP","Home_SP_ExpIP",
+        "Away_Base_Offense","Home_Base_Offense","Away_Platoon_Factor","Home_Platoon_Factor",
+        "Away_Lineup_Factor","Home_Lineup_Factor","Away_Lineup_Used","Home_Lineup_Used",
+        "Away_Offense","Home_Offense",
+    ]
+    for k in wanted:
+        if k in r:
+            row[k] = _diag_num(r.get(k))
+    return pd.DataFrame([row])
 
-def neutralize_starters(h):
-    z=h.copy()
-    for c in z.columns:
-        if c.startswith('Away_SP_') or c.startswith('Home_SP_'):
-            z[c]=np.nan
-    return z
 
-def scramble_starters(h, seed=113):
-    z=h.copy(); rng=np.random.default_rng(seed)
-    for prefix in ['Away_SP_','Home_SP_']:
-        cols=[c for c in z.columns if c.startswith(prefix)]
-        if cols:
-            idx=rng.permutation(len(z))
-            z.loc[:,cols]=z.loc[:,cols].to_numpy()[idx]
-    return z
-
-def opponent_starters(h):
-    z=h.copy()
-    a=[c for c in z.columns if c.startswith('Away_SP_')]
-    for ac in a:
-        hc='Home_SP_'+ac[len('Away_SP_'):]
-        if hc in z.columns:
-            av=z[ac].copy(); z[ac]=z[hc].values; z[hc]=av.values
-    return z
-
-def remove_park(h):
-    z=h.copy(); z['Park_Factor']=1.0; return z
-
-def remove_recent_runs(h):
-    z=h.copy()
-    for c in z.columns:
-        if '_L10_' in c or '_L5_' in c:
-            z[c]=np.nan
-    return z
-
-def segment_table(hold):
+def slate_export_df(candidates):
     rows=[]
-    def add(name,x):
-        if x.empty: return
-        bets=x[(x.Edge>=.075)&(x.EV>=0)]
-        rows.append({'Segment':name,'Games':len(x),'Bets':len(bets),'Wins':int((bets.Result=='WIN').sum()),'Losses':int((bets.Result=='LOSS').sum()),'Pushes':int((bets.Result=='PUSH').sum()),'Units':float(bets.Units.sum()),'ROI':float(bets.Units.sum()/len(bets)) if len(bets) else np.nan,'Avg_Edge':float(bets.Edge.mean()) if len(bets) else np.nan})
-    add('OVER',hold[hold.Side=='OVER']); add('UNDER',hold[hold.Side=='UNDER'])
-    for lo,hi,label in [(0,7.99,'Total <=7.5'),(8,8.99,'Total 8-8.5'),(9,9.99,'Total 9-9.5'),(10,99,'Total 10+')]:
-        add(label,hold[(hold.Total_Line>=lo)&(hold.Total_Line<=hi)])
-    t=pd.to_datetime(hold.Commence_Time,utc=True,errors='coerce')
-    for m in sorted(t.dt.month.dropna().unique()):
-        add(pd.Timestamp(2025,int(m),1).strftime('%B'),hold[t.dt.month==m])
+    for x in candidates:
+        b=x["best"]
+        rows.append({
+            "Game":x["game"],"Time":x["time"],
+            "Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean",
+            "Odds":b["odds"],"Book":b["book"],"Edge_Driven_Card":b.get("selection"),
+            "Legacy_Grade":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,
+            "Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],
+            "Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],
+            "Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,
+            "Model_Version":MODEL_VERSION
+        })
     return pd.DataFrame(rows)
 
-# -------------------- UI --------------------
-st.markdown('<div class="kicker">MLB MODEL • TOTALS INTEGRITY AUDIT</div>',unsafe_allow_html=True)
-st.title('v1.1.3 Advanced Totals Integrity Audit')
-st.markdown('<div class="sub">This freezes v1.1.2 and tries to break it. Correct 2023/2024 data determine the model and market blend; 2025 is then attacked with tighter timing, starter placebos, park ablation, recent-run ablation, and segment checks. No Odds API calls.</div>',unsafe_allow_html=True)
-st.warning('Promotion standard: correct-context totals should beat the market on 2025, while wrong/scrambled starter tests should materially deteriorate. Betting ROI is secondary to predictive RMSE and robustness.')
+st.markdown(f"""
+<div class="hero">
+  <div class="eyebrow">MLB EDGE • PRODUCTION</div>
+  <div class="title">MLB Edge</div>
+  <div class="sub">Moneyline and totals now run as separate production markets. Totals use the validated pitcher + run-environment core with an 80% model / 20% market blend, conservative edge tiers, and a maximum of three official totals plays.</div>
+  <div class="pill">MODEL LIVE • {APP_VERSION}</div>
+</div>
+""", unsafe_allow_html=True)
 
-master_file=st.file_uploader('1. Upload mlb_moneyline_master_2023_2025.csv',type=['csv'],key='master113')
-totals_file=st.file_uploader('2. Upload mlb_historical_totals_market_2023_2025.csv',type=['csv'],key='totals113')
-if master_file and totals_file:
-    master=pd.read_csv(master_file); totals=pd.read_csv(totals_file)
-    try: merged=merge_totals(master,totals)
-    except Exception as e: st.error(str(e)); st.stop()
-    merged=merged[merged.Total_Line.notna()].copy()
-    c1,c2,c3=st.columns(3); c1.metric('Priced master games',f'{len(merged):,}'); c2.metric('2025 games',f"{(pd.to_numeric(merged.Season,errors='coerce')==2025).sum():,}"); c3.metric('Odds API credits','0')
-    min_games=st.slider('Minimum prior team games',8,25,12,key='mg113')
-    min_starts=st.slider('Minimum prior starter starts',2,8,3,key='ms113')
-    if st.button('Run Totals Integrity Audit',key='run113'):
+try:
+    api_key=st.secrets.get("ODDS_API_KEY","")
+except Exception:
+    api_key=""
+
+st.markdown('<div class="kicker">Slate Controls</div>', unsafe_allow_html=True)
+ctrl1,ctrl2,ctrl3=st.columns([3,2,2])
+with ctrl1:
+    slate_date=st.date_input("Slate date",value=today_et(),min_value=today_et(),max_value=today_et()+timedelta(days=14),help="Current/upcoming MLB dates only.")
+with ctrl2:
+    st.caption("Moneyline market")
+    load_market=st.button("Load Full Slate ML Odds",use_container_width=True)
+with ctrl3:
+    st.caption("Totals market")
+    load_totals_market=st.button("Load Full Slate Totals Odds",use_container_width=True)
+st.caption("Nothing calls The Odds API automatically. Moneyline and totals are separate manual pulls so you control credits.")
+
+free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
+if free_refresh:
+    st.cache_data.clear()
+    st.rerun()
+
+if "odds_payload" not in st.session_state:
+    st.session_state.odds_payload={"events":[],"error":"","quota":{}}
+    st.session_state.odds_loaded=False
+    st.session_state.odds_loaded_at=None
+    st.session_state.odds_scope=None
+
+if "totals_payload" not in st.session_state:
+    st.session_state.totals_payload={"events":[],"error":"","quota":{}}
+    st.session_state.totals_loaded=False
+    st.session_state.totals_scope=None
+
+if load_market:
+    fetch_odds.clear()
+    st.session_state.odds_payload=fetch_odds(api_key)
+    st.session_state.odds_loaded=True
+    st.session_state.odds_loaded_at=pd.Timestamp.now(tz="America/New_York")
+    st.session_state.odds_scope="full slate"
+
+if load_totals_market:
+    fetch_full_slate_totals.clear()
+    st.session_state.totals_payload=fetch_full_slate_totals(api_key)
+    st.session_state.totals_loaded=True
+    st.session_state.totals_scope="full slate totals"
+
+odds_payload=st.session_state.odds_payload if st.session_state.get("odds_loaded") else {"events":[],"error":"","quota":{}}
+totals_payload=st.session_state.totals_payload if st.session_state.get("totals_loaded") else {"events":[],"error":"","quota":{}}
+
+with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
+    games=fetch_games_for_date(slate_date)
+    model_df=run_model(games) if games else pd.DataFrame()
+    candidates=build_candidates(model_df,games,odds_payload.get("events",[])) if not model_df.empty else []
+
+quota=odds_payload.get("quota",{})
+if st.session_state.get("odds_loaded"):
+    qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Live odds loaded manually"
+else:
+    qtxt="Market not loaded • 0 Odds API credits used"
+priced_games=sum(1 for x in candidates if x.get("market_available"))
+st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {slate_date.strftime("%b %-d")} • {len(candidates)} games modeled • {priced_games} with live prices</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+
+if odds_payload.get("error"):
+    st.error(odds_payload["error"])
+
+if not st.session_state.get("odds_loaded"):
+    st.info("Model-only mode. In **Single Game**, choose a matchup and load only that game's odds. In **Full Slate**, use the full-slate button above. No Odds API call has been made yet.")
+
+if not games:
+    st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
+    st.stop()
+
+if not candidates:
+    st.warning("The model could not produce game rows for today.")
+else:
+    st.markdown('<div class="kicker">Mode</div>', unsafe_allow_html=True)
+    mode = st.radio(
+        "View mode",
+        ["🎯 Single Game", "📋 Full Slate"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="production_view_mode",
+    )
+
+    def start_sort(x):
         try:
-            with st.spinner('Building point-in-time team run environment…'):
-                pit=build_team_pit(merged,min_games=min_games)
-                pit=pit[pit.PIT_Eligible].copy(); pit['Hours_To_First_Pitch']=pd.to_numeric(pit.Hours_To_First_Pitch,errors='coerce')
-                pit=pit[(pit.Hours_To_First_Pitch>=0)&(pit.Hours_To_First_Pitch<=6)].copy()
-            with st.spinner('Attaching historical starters and park context…'):
-                ctx,quality=attach_context(pit,min_starts=min_starts)
-            if ctx.empty: raise ValueError('No starter-context rows were built.')
-            if 'DoubleHeader' in ctx.columns: ctx=ctx[ctx.DoubleHeader.astype(str).eq('N')].copy()
-            fit=fit_advanced_frozen(ctx,l2=18.0)
-            h=ctx[pd.to_numeric(ctx.Season,errors='coerce')==2025].copy()
-            tests=[]; holds={}
-            for label,hh in [
-                ('Correct context <=6h',h),
-                ('Correct context <=3h',h[pd.to_numeric(h.Hours_To_First_Pitch,errors='coerce')<=3]),
-                ('Correct context <=1h',h[pd.to_numeric(h.Hours_To_First_Pitch,errors='coerce')<=1]),
-                ('Scrambled 2025 starters',scramble_starters(h)),
-                ('Opponent starters',opponent_starters(h)),
-                ('No starter information',neutralize_starters(h)),
-                ('No park factor',remove_park(h)),
-                ('No recent run environment',remove_recent_runs(h)),
-            ]:
-                if len(hh)<40: continue
-                met,ho=score_holdout(fit,hh,label); tests.append(met); holds[label]=ho
-            summary=pd.DataFrame(tests)
-            correct=holds.get('Correct context <=6h',pd.DataFrame())
-            segments=segment_table(correct) if not correct.empty else pd.DataFrame()
-            st.session_state['v113_summary']=summary; st.session_state['v113_segments']=segments; st.session_state['v113_hold']=correct; st.session_state['v113_quality']=quality
-        except Exception as e: st.exception(e)
+            g=next(g for g in games if g.get("GamePk")==x["GamePk"])
+            return pd.to_datetime(g.get("GameDate"),utc=True)
+        except Exception:
+            return pd.Timestamp.max.tz_localize("UTC")
 
-    summary=st.session_state.get('v113_summary')
-    if isinstance(summary,pd.DataFrame) and not summary.empty:
-        st.subheader('Integrity Stress Tests')
-        st.dataframe(summary,use_container_width=True,hide_index=True)
-        try:
-            corr=summary[summary.Test=='Correct context <=6h'].iloc[0]
-            scr=summary[summary.Test=='Scrambled 2025 starters'].iloc[0]
-            opp=summary[summary.Test=='Opponent starters'].iloc[0]
-            passes=(corr.Calibrated_RMSE<corr.Market_RMSE and scr.Calibrated_RMSE>corr.Calibrated_RMSE and opp.Calibrated_RMSE>corr.Calibrated_RMSE)
-            if passes: st.success('INTEGRITY SIGNAL PASSES CORE PLACEBO CHECKS — correct context beats market and both scrambled/opponent starter tests deteriorate. Review timing and segment stability before promotion.')
-            else: st.error('INTEGRITY SIGNAL DOES NOT CLEANLY PASS — do not promote totals yet.')
-        except Exception: pass
-        seg=st.session_state.get('v113_segments')
-        if isinstance(seg,pd.DataFrame) and not seg.empty:
-            st.subheader('2025 Robustness Segments')
-            st.dataframe(seg,use_container_width=True,hide_index=True)
-        q=st.session_state.get('v113_quality')
-        if isinstance(q,pd.DataFrame):
-            with st.expander('Data quality'): st.dataframe(q,use_container_width=True,hide_index=True)
-        c1,c2,c3=st.columns(3)
-        c1.download_button('Download Audit Summary',summary.to_csv(index=False).encode(),'mlb_totals_v113_integrity_summary.csv','text/csv')
-        c2.download_button('Download Segments',st.session_state['v113_segments'].to_csv(index=False).encode(),'mlb_totals_v113_segments.csv','text/csv')
-        c3.download_button('Download Correct Holdout',st.session_state['v113_hold'].to_csv(index=False).encode(),'mlb_totals_v113_holdout_2025.csv','text/csv')
+    if mode == "🎯 Single Game":
+        chrono = sorted(candidates, key=start_sort)
+        labels = [f"{x['time']} • {x['away']} @ {x['home']}" for x in chrono]
+        selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup")
+        x = chrono[labels.index(selected_label)]
+        selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
-st.caption('Zero Odds API calls. Uses the uploaded historical Moneyline Master + historical totals market and the free cached MLB Stats API starter histories.')
+        st.caption("Selecting a matchup does **not** call the odds API. Tap below only when you want this game's live moneyline.")
+        pull_single = st.button("Load / Refresh Odds for This Game", use_container_width=True, type="primary")
+        if pull_single:
+            payload = fetch_single_game_odds(api_key, selected_game)
+            st.session_state.odds_payload = payload
+            st.session_state.odds_loaded = True
+            st.session_state.odds_loaded_at = pd.Timestamp.now(tz="America/New_York")
+            st.session_state.odds_scope = f"single game: {x['away']} @ {x['home']}"
+            st.rerun()
+
+        if st.session_state.get("odds_loaded") and st.session_state.get("odds_scope"):
+            st.caption(f"Loaded odds scope: **{st.session_state.odds_scope}**")
+
+        b = x["best"]
+        away_side = next(z for z in x["all"] if z["team"] == x["away"])
+        home_side = next(z for z in x["all"] if z["team"] == x["home"])
+        lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
+
+        st.markdown('<div class="kicker">Single Game Analysis</div>', unsafe_allow_html=True)
+        if x["market_available"]:
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">{b['selection']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="metrics"><div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div><div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div><div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div></div>''', unsafe_allow_html=True)
+        else:
+            fav = away_side if away_side['prob'] >= home_side['prob'] else home_side
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">MODEL VIEW</div><div class="best-pick">{fav['team']} {fav['prob']*100:.1f}%</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Live moneyline not available</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['away']} fair</span><b>{away_side['fair']:+d}</b></div><div class="metric"><span>{x['home']} fair</span><b>{home_side['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model confidence {x['confidence']}/100 • No BET/LEAN verdict without a live price</div></div>''', unsafe_allow_html=True)
+            st.info("This game is modeled and selectable. A betting verdict appears automatically when a valid two-way moneyline is available.")
+
+        st.markdown('<div class="kicker">Matchup Detail</div>', unsafe_allow_html=True)
+        st.markdown(f'''<div class="single-summary"><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div><div class="detail-grid"><div class="detail"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div><div class="detail"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div><div class="detail"><span>Projected runs</span><b>{x['away_proj']:.2f} – {x['home_proj']:.2f}</b></div><div class="detail"><span>{x['away']} fair ML</span><b>{away_side['fair']:+d}</b></div><div class="detail"><span>{x['home']} fair ML</span><b>{home_side['fair']:+d}</b></div><div class="detail"><span>Model confidence</span><b>{x['confidence']}/100</b></div></div></div>''', unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Both Sides</div>', unsafe_allow_html=True)
+        for side in [away_side, home_side]:
+            if x['market_available']:
+                headline=f"{side['team']} ML {side['odds']:+d}"
+                subtitle=f"{side['book']} • Fair {side['fair']:+d}"
+                details=f'''<div class="metrics"><div class="metric"><span>Win chance</span><b>{side['prob']*100:.1f}%</b></div><div class="metric"><span>Market no-vig</span><b>{side['market_prob']*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{side['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{side['ev']*100:+.1f}%</b></div></div>'''
+            else:
+                headline=side['team']
+                subtitle=f"Fair line {side['fair']:+d} • Waiting for market"
+                details=f'''<div class="metrics"><div class="metric"><span>Model win chance</span><b>{side['prob']*100:.1f}%</b></div><div class="metric"><span>Fair line</span><b>{side['fair']:+d}</b></div></div>'''
+            st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="pick-main">{headline}</div><div class="pick-sub">{subtitle}</div></div><div class="badge {cls(side['selection'])}">{side['selection']}</div></div>{details}</div>''', unsafe_allow_html=True)
+
+        if x['market_available']:
+            st.caption(f"{x['lineup_status']}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market.")
+        else:
+            st.caption(f"{x['lineup_status']}. Model-only projection shown until a valid live moneyline is available.")
+        if x.get("confidence_reasons"):
+            st.caption(f"Data notes: {x['confidence_reasons']}")
+
+        st.markdown('<div class="kicker">Totals</div>', unsafe_allow_html=True)
+        st.caption("Production totals are separate from moneyline. The market is only pulled when you tap the button below.")
+        pull_total=st.button("Load / Refresh Total for This Game",use_container_width=True,key=f"pull_total_{x['GamePk']}")
+        if pull_total:
+            st.session_state.totals_payload=fetch_single_game_totals(api_key,selected_game)
+            st.session_state.totals_loaded=True
+            st.session_state.totals_scope=f"single game total: {x['away']} @ {x['home']}"
+            st.rerun()
+
+        row_for_total=model_df.loc[model_df["GamePk"]==x["GamePk"]].iloc[0].to_dict()
+        tctx=engine.totals_projection(row_for_total) if hasattr(engine,"totals_projection") else {"Projected_Total":x['away_proj']+x['home_proj'],"Base_Total":x['away_proj']+x['home_proj'],"Park_Factor":1.,"Weather_Factor":1.,"Weather_Available":False}
+        tev=match_event(totals_payload.get("events",[]),selected_game) if st.session_state.get("totals_loaded") else None
+        tm=totals_market(tev)
+        raw_total=float(tctx["Projected_Total"])
+
+        if tm:
+            tp=build_total_pick(raw_total,tm)
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park/weather are context only.</div></div>''',unsafe_allow_html=True)
+        else:
+            temp_txt = f'{float(tctx["Temp"]):.0f}°F' if tctx.get("Temp") is not None and pd.notna(tctx.get("Temp")) else "—"
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS MODEL VIEW</div><div class="best-pick">Projected total {raw_total:.2f}</div><div class="best-game">Load this game's total only when you want an official market grade.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Projected total</span><b>{raw_total:.2f}</b></div><div class="metric"><span>Park context</span><b>{float(tctx.get("Park_Factor",1.0)):.3f}</b></div><div class="metric"><span>Temperature</span><b>{temp_txt}</b></div><div class="metric"><span>Lineups</span><b>{"CONFIRMED" if x["lineup_confirmed"] else "WAIT"}</b></div></div></div>''',unsafe_allow_html=True)
+
+        st.markdown('<div class="kicker">Game Data</div>', unsafe_allow_html=True)
+        if "show_single_downloads" not in st.session_state:
+            st.session_state.show_single_downloads = False
+        if not st.session_state.show_single_downloads:
+            if st.button("Open Game Downloads", key="open_single_downloads", use_container_width=True):
+                st.session_state.show_single_downloads = True
+                st.rerun()
+        else:
+            diag = game_diagnostics_df(x, slate_date)
+            st.caption("Download the selected matchup's model inputs and outputs. Send this CSV to ChatGPT when you want a detailed 'why the model likes this side' breakdown.")
+            st.download_button(
+                "Download Selected Game Diagnostics CSV",
+                diag.to_csv(index=False).encode("utf-8"),
+                file_name=f"mlb_game_diagnostics_{x['GamePk']}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key=f"download_diag_{x['GamePk']}",
+            )
+            if st.button("Close Downloads", key="close_single_downloads", use_container_width=True):
+                st.session_state.show_single_downloads = False
+                st.rerun()
+
+    else:
+        official=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection") in ("BEST BET","BET")], key=lambda x:x["best"].get("smart_score",-999), reverse=True)[:5]
+        secondary=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection")=="LEAN"], key=lambda x:x["best"].get("smart_score",-999), reverse=True)
+        priced=[x for x in candidates if x["market_available"]]
+
+        if not priced:
+            st.markdown('<div class="kicker">Today\'s Model View</div>',unsafe_allow_html=True)
+            st.info("Live odds are not loaded. The slate remains fully selectable in model-only mode; load full-slate odds only when you want priced recommendations.")
+        else:
+            st.markdown('<div class="kicker">Today\'s Plays</div>',unsafe_allow_html=True)
+            plays=official + secondary
+            if not plays:
+                st.info("No game currently reaches the 5% LEAN threshold. The model is passing the slate at these prices.")
+            else:
+                st.caption(f"{len(official)} official bet{'s' if len(official)!=1 else ''} • {len(secondary)} lean{'s' if len(secondary)!=1 else ''}. BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%. No minimum number of bets is forced.")
+                rank=1
+                for x in plays[:8]:
+                    b=x["best"]
+                    is_official=b["selection"] in ("BEST BET","BET")
+                    rank_label=f"#{rank}" if is_official else "WATCH"
+                    if is_official:
+                        rank+=1
+                    st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{rank_label} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • Win {b['prob']*100:.1f}%</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div></div>''',unsafe_allow_html=True)
+
+        other_games=[x for x in sorted(candidates,key=start_sort) if x["best"].get("selection") not in ("BEST BET","BET","LEAN")]
+        st.markdown('<div class="kicker">Other Games</div>',unsafe_allow_html=True)
+        st.caption(f"{len(other_games)} game{'s' if len(other_games)!=1 else ''} currently outside the play list. Expand any matchup for the full model view.")
+        for x in other_games:
+            b=x["best"]
+            with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['selection']}",expanded=False):
+                if x['market_available']:
+                    pick_html=f"<div class='pick'><div><div class='pick-main'>{b['team']} ML {b['odds']:+d}</div><div class='pick-sub'>Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>"
+                    cap=f"Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market."
+                else:
+                    away_side=next(z for z in x['all'] if z['team']==x['away'])
+                    home_side=next(z for z in x['all'] if z['team']==x['home'])
+                    pick_html=f"<div class='pick'><div><div class='pick-main'>Model: {x['away']} {away_side['prob']*100:.1f}% • {x['home']} {home_side['prob']*100:.1f}%</div><div class='pick-sub'>Fair lines {x['away']} {away_side['fair']:+d} • {x['home']} {home_side['fair']:+d} • live moneyline unavailable</div></div></div>"
+                    cap="Model-only projection; no betting verdict until a valid live market is available."
+                st.markdown(f'''<div class="game-card" style="margin-top:0"><div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div>{pick_html}</div>''',unsafe_allow_html=True)
+                st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
+                if x.get("confidence_reasons"):
+                    st.caption(f"Data notes: {x['confidence_reasons']}")
+        st.markdown('<div class="kicker">Totals Plays</div>', unsafe_allow_html=True)
+        if not st.session_state.get("totals_loaded"):
+            st.info("Totals odds are not loaded. Use **Load Full Slate Totals Odds** only when you want priced totals recommendations.")
+        else:
+            total_rows=[]
+            for cx in sorted(candidates,key=start_sort):
+                mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
+                if mr.empty:
+                    continue
+                ctx=engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine,"totals_projection") else {"Projected_Total":cx['away_proj']+cx['home_proj']}
+                game_obj=next((g for g in games if g.get("GamePk")==cx["GamePk"]),None)
+                ev=match_event(totals_payload.get("events",[]),game_obj) if game_obj else None
+                tm=totals_market(ev)
+                if not tm:
+                    continue
+                tp=build_total_pick(float(ctx["Projected_Total"]),tm)
+                total_rows.append((cx,tp,ctx))
+
+            official_totals=sorted(
+                [z for z in total_rows if z[1]["grade"] in ("BEST BET","BET")],
+                key=lambda z:(z[1]["edge"],z[1]["ev"]),
+                reverse=True
+            )[:TOTALS_MAX_OFFICIAL]
+            lean_totals=sorted(
+                [z for z in total_rows if z[1]["grade"]=="LEAN"],
+                key=lambda z:(z[1]["edge"],z[1]["ev"]),
+                reverse=True
+            )
+
+            st.caption(f"Maximum {TOTALS_MAX_OFFICIAL} official totals plays. BEST BET starts at 12.5% edge, BET at 7.5%, LEAN at 5%. No minimum number of bets is forced.")
+            if not official_totals and not lean_totals:
+                st.info("No total currently reaches the 5% LEAN threshold.")
+            else:
+                rank=1
+                for cx,tp,ctx in official_totals + lean_totals[:5]:
+                    official=tp["grade"] in ("BEST BET","BET")
+                    label=f"#{rank}" if official else "WATCH"
+                    if official:
+                        rank+=1
+                    st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{label} • {cx["time"]}</div><div class="match">{cx["away"]} @ {cx["home"]}</div><div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="pick"><div><div class="pick-main">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="pick-sub">{tp["book"]} • Edge {tp["edge"]*100:+.1f}% • EV {tp["ev"]*100:+.1f}% • Raw model {float(ctx["Projected_Total"]):.2f} • Calibrated {tp["calibrated_total"]:.2f}</div></div><div class="{"lineup-ok" if cx["lineup_confirmed"] else "lineup-wait"}" style="font-size:.60rem;font-weight:900">{"LINEUPS ✓" if cx["lineup_confirmed"] else "LINEUPS WAIT"}</div></div></div>''',unsafe_allow_html=True)
+
+            other_totals=[z for z in total_rows if z[1]["grade"]=="PASS"]
+            with st.expander(f"Other totals — {len(other_totals)} PASS",expanded=False):
+                for cx,tp,ctx in other_totals:
+                    st.write(f'{cx["time"]} • {cx["away"]} @ {cx["home"]} — {tp["side"]} {tp["market_total"]:.1f} • edge {tp["edge"]*100:+.1f}% • model {float(ctx["Projected_Total"]):.2f}')
+
+        st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
+        if "show_slate_downloads" not in st.session_state:
+            st.session_state.show_slate_downloads = False
+        if not st.session_state.show_slate_downloads:
+            if st.button("Open Full Slate Downloads", key="open_slate_downloads", use_container_width=True):
+                st.session_state.show_slate_downloads = True
+                st.rerun()
+        else:
+            export_df = slate_export_df(candidates)
+            st.download_button(
+                "Download Today's Moneyline Board",
+                export_df.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_production_moneyline_board.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_full_slate_board",
+            )
+            if st.button("Close Downloads", key="close_slate_downloads", use_container_width=True):
+                st.session_state.show_slate_downloads = False
+                st.rerun()
+
+st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
+st.markdown("""
+<div class="note"><b>Production scope:</b> moneyline + totals. Moneyline keeps the frozen starting-pitcher + offense/platoon + lineup engine. Totals use the same live baseball core, an 80% model / 20% market calibration informed by 2024 validation, and the historical residual spread from the totals audit. Bullpen remains excluded; park/weather are context only because park failed to improve the integrity audit. Run lines remain excluded. Diagnostics Download keeps the same edge-driven bet-selection thresholds and adds closable download panels plus selected-game diagnostic export: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Moneyline and totals are separate requests so you control which market consumes credits. Single Game and Full Slate each support explicit totals pulls. Totals grading is BEST BET at 12.5%+ edge, BET at 7.5%+, LEAN at 5%+, with at most three official totals plays per slate. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
+""",unsafe_allow_html=True)
+
+with st.expander("Research basis & limitations",expanded=False):
+    st.write("The research sequence rejected a team-only moneyline model, isolated a starting-pitcher signal through placebo/causality tests, improved it with Pitcher Model 2.0, rejected bullpen, and promoted offense/platoon plus lineup information. Totals then failed in the simple baseline, passed after adding pitcher + run-environment structure, and survived scrambled/no-starter integrity checks before this production promotion.")
+    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary.")
+    st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")

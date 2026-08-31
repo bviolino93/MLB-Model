@@ -621,15 +621,36 @@ def totals_weather_info(venue, game_date):
 
 
 def totals_projection(row):
-    # Research-only total projection; does not alter the frozen moneyline engine.
-    base_total=safe_float(row.get("Away_Proj_Runs"),BASE_RUNS_PER_TEAM)+safe_float(row.get("Home_Proj_Runs"),BASE_RUNS_PER_TEAM)
-    venue=row.get("Venue",""); park=PARKS.get(venue,{})
-    park_factor=safe_float(park.get("factor"),1.0)
-    wx=totals_weather_info(venue,row.get("GameDate")); weather_factor=safe_float(wx.get("Factor"),1.0)
-    projected=clamp(base_total*park_factor*weather_factor,5.5,14.5)
-    return {"Base_Total":float(base_total),"Projected_Total":float(projected),"Park_Factor":float(park_factor),"Park_Known":bool(park),
-            "Weather_Factor":float(weather_factor),"Weather_Available":bool(wx.get("Available")),"Temp":wx.get("Temp"),"Wind":wx.get("Wind"),
-            "Humidity":wx.get("Humidity"),"Precip":wx.get("Precip")}
+    """Production totals core.
+
+    The validated historical totals work found the durable signal in starting-pitcher
+    quality plus team run environment. Park did not improve the integrity audit, so
+    park/weather are informational only here rather than hard multipliers.
+    """
+    base_total = (
+        safe_float(row.get("Away_Proj_Runs"), BASE_RUNS_PER_TEAM)
+        + safe_float(row.get("Home_Proj_Runs"), BASE_RUNS_PER_TEAM)
+    )
+    venue = row.get("Venue", "")
+    park = PARKS.get(venue, {})
+    park_factor = safe_float(park.get("factor"), 1.0)
+    wx = totals_weather_info(venue, row.get("GameDate"))
+
+    projected = clamp(base_total, 5.5, 14.5)
+
+    return {
+        "Base_Total": float(base_total),
+        "Projected_Total": float(projected),
+        "Park_Factor": float(park_factor),
+        "Park_Known": bool(park),
+        "Weather_Factor": float(safe_float(wx.get("Factor"), 1.0)),
+        "Weather_Available": bool(wx.get("Available")),
+        "Temp": wx.get("Temp"),
+        "Wind": wx.get("Wind"),
+        "Humidity": wx.get("Humidity"),
+        "Precip": wx.get("Precip"),
+        "Production_Note": "Park/weather shown as context only; not multiplied into the production total.",
+    }
 
 def reset_dynamic_caches():
     # Keep static person/team metadata, but refresh game feeds so lineups can appear during the day.
