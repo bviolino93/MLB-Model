@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.0.8-CLEAR-CARD"
+APP_VERSION = "1.0.9-DIAGNOSTICS-DOWNLOAD"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -332,11 +332,103 @@ def build_candidates(model_df, games, events):
             "confidence":conf,"alpha":alpha,"books":m["books"] if market_available else 0,"best":best,"all":side_rows,
             "away_proj":float(r["Away_Proj_Runs"]),"home_proj":float(r["Home_Proj_Runs"]),
             "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons",""),"market_available":market_available,
+            "model_row": r.to_dict(),
         })
     order={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
     out.sort(key=lambda x:(order.get(x["best"].get("selection"),0), x["best"].get("smart_score",-999)),reverse=True)
     return out
 
+
+def _diag_num(v):
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except Exception:
+            pass
+    return v
+
+
+def game_diagnostics_df(x, slate_date):
+    """One-row export with the live model inputs/outputs for a selected game."""
+    r = dict(x.get("model_row") or {})
+    away = next(z for z in x["all"] if z["team"] == x["away"])
+    home = next(z for z in x["all"] if z["team"] == x["home"])
+    row = {
+        "Slate_Date": str(slate_date),
+        "GamePk": x.get("GamePk"),
+        "Game": x.get("game"),
+        "Time": x.get("time"),
+        "Away": x.get("away"),
+        "Home": x.get("home"),
+        "Away_SP": x.get("away_sp"),
+        "Home_SP": x.get("home_sp"),
+        "Lineup_Status": x.get("lineup_status"),
+        "Lineups_Confirmed": x.get("lineup_confirmed"),
+        "Model_Confidence": x.get("confidence"),
+        "Confidence_Reasons": x.get("confidence_reasons"),
+        "Market_Available": x.get("market_available"),
+        "Model_Weight": x.get("alpha") if x.get("market_available") else None,
+        "Market_Weight": (1-x.get("alpha")) if x.get("market_available") else None,
+        "Books_In_Consensus": x.get("books"),
+        "Away_Raw_Model_Prob": away.get("raw"),
+        "Home_Raw_Model_Prob": home.get("raw"),
+        "Away_Calibrated_Prob": away.get("prob") if x.get("market_available") else None,
+        "Home_Calibrated_Prob": home.get("prob") if x.get("market_available") else None,
+        "Away_Market_NoVig_Prob": away.get("market_prob"),
+        "Home_Market_NoVig_Prob": home.get("market_prob"),
+        "Away_Best_Odds": away.get("odds"),
+        "Home_Best_Odds": home.get("odds"),
+        "Away_Best_Book": away.get("book"),
+        "Home_Best_Book": home.get("book"),
+        "Away_Edge": away.get("edge"),
+        "Home_Edge": home.get("edge"),
+        "Away_EV": away.get("ev"),
+        "Home_EV": home.get("ev"),
+        "Away_Fair_ML": away.get("fair"),
+        "Home_Fair_ML": home.get("fair"),
+        "Away_Card_Label": away.get("selection"),
+        "Home_Card_Label": home.get("selection"),
+        "Away_Proj_Runs": x.get("away_proj"),
+        "Home_Proj_Runs": x.get("home_proj"),
+        "Model_Version": MODEL_VERSION,
+        "App_Version": APP_VERSION,
+    }
+    # Preserve the most useful engine-level diagnostic inputs when available.
+    wanted = [
+        "Away_SP_Hand","Home_SP_Hand","Away_SP_Quality","Home_SP_Quality",
+        "Away_SP_Starts","Home_SP_Starts","Away_SP_SeasonERA","Home_SP_SeasonERA",
+        "Away_SP_SeasonFIP","Home_SP_SeasonFIP","Away_SP_RecentERA","Home_SP_RecentERA",
+        "Away_SP_RecentFIP","Home_SP_RecentFIP","Away_SP_ExpIP","Home_SP_ExpIP",
+        "Away_Base_Offense","Home_Base_Offense","Away_Platoon_Factor","Home_Platoon_Factor",
+        "Away_Lineup_Factor","Home_Lineup_Factor","Away_Lineup_Used","Home_Lineup_Used",
+        "Away_Offense","Home_Offense",
+    ]
+    for k in wanted:
+        if k in r:
+            row[k] = _diag_num(r.get(k))
+    return pd.DataFrame([row])
+
+
+def slate_export_df(candidates):
+    rows=[]
+    for x in candidates:
+        b=x["best"]
+        rows.append({
+            "Game":x["game"],"Time":x["time"],
+            "Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean",
+            "Odds":b["odds"],"Book":b["book"],"Edge_Driven_Card":b.get("selection"),
+            "Legacy_Grade":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,
+            "Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],
+            "Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],
+            "Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,
+            "Model_Version":MODEL_VERSION
+        })
+    return pd.DataFrame(rows)
 
 st.markdown(f"""
 <div class="hero">
@@ -483,6 +575,28 @@ else:
         if x.get("confidence_reasons"):
             st.caption(f"Data notes: {x['confidence_reasons']}")
 
+        st.markdown('<div class="kicker">Game Data</div>', unsafe_allow_html=True)
+        if "show_single_downloads" not in st.session_state:
+            st.session_state.show_single_downloads = False
+        if not st.session_state.show_single_downloads:
+            if st.button("Open Game Downloads", key="open_single_downloads", use_container_width=True):
+                st.session_state.show_single_downloads = True
+                st.rerun()
+        else:
+            diag = game_diagnostics_df(x, slate_date)
+            st.caption("Download the selected matchup's model inputs and outputs. Send this CSV to ChatGPT when you want a detailed 'why the model likes this side' breakdown.")
+            st.download_button(
+                "Download Selected Game Diagnostics CSV",
+                diag.to_csv(index=False).encode("utf-8"),
+                file_name=f"mlb_game_diagnostics_{x['GamePk']}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key=f"download_diag_{x['GamePk']}",
+            )
+            if st.button("Close Downloads", key="close_single_downloads", use_container_width=True):
+                st.session_state.show_single_downloads = False
+                st.rerun()
+
     else:
         official=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection") in ("BEST BET","BET")], key=lambda x:x["best"].get("smart_score",-999), reverse=True)[:5]
         secondary=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection")=="LEAN"], key=lambda x:x["best"].get("smart_score",-999), reverse=True)
@@ -525,15 +639,30 @@ else:
                 st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
                 if x.get("confidence_reasons"):
                     st.caption(f"Data notes: {x['confidence_reasons']}")
-        export=[]
-        for x in candidates:
-            b=x["best"]
-            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean","Odds":b["odds"],"Book":b["book"],"Edge_Driven_Card":b.get("selection"),"Legacy_Grade":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,"Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,"Model_Version":MODEL_VERSION})
-        st.download_button("Download Today's Moneyline Board",pd.DataFrame(export).to_csv(index=False).encode("utf-8"),file_name="mlb_production_moneyline_board.csv",mime="text/csv",use_container_width=True)
+        st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
+        if "show_slate_downloads" not in st.session_state:
+            st.session_state.show_slate_downloads = False
+        if not st.session_state.show_slate_downloads:
+            if st.button("Open Full Slate Downloads", key="open_slate_downloads", use_container_width=True):
+                st.session_state.show_slate_downloads = True
+                st.rerun()
+        else:
+            export_df = slate_export_df(candidates)
+            st.download_button(
+                "Download Today's Moneyline Board",
+                export_df.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_production_moneyline_board.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_full_slate_board",
+            )
+            if st.button("Close Downloads", key="close_slate_downloads", use_container_width=True):
+                st.session_state.show_slate_downloads = False
+                st.rerun()
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Clear Card keeps the same edge-driven bet-selection thresholds but simplifies the presentation: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded. Diagnostics Download keeps the same edge-driven bet-selection thresholds and adds closable download panels plus selected-game diagnostic export: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Single Game can load only the selected matchup; Full Slate has a separate manual pull. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
