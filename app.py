@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.2.0-TOTALS-PRODUCTION"
+APP_VERSION = "1.2.0.1-TOTALS-RUNTIME-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -225,9 +225,15 @@ def totals_market(event):
     maxn=max(counts.values()); points=sorted([p for p,n in counts.items() if n==maxn]); point=float(statistics.median(points))
     same=[r for r in rows if abs(r["point"]-point)<1e-9]
     oc=int(round(statistics.median([r["over"] for r in same]))); uc=int(round(statistics.median([r["under"] for r in same])))
-    ob=max(same,key=lambda r:r["over"]); ub=max(same,key=lambda r:r["under"]); po,pu=no_vig_pair(oc,uc)
+    ob=max(same,key=lambda r:r["over"]); ub=max(same,key=lambda r:r["under"])
+    po,pu=no_vig_pair(oc,uc)
+    # Defensive fallback: a malformed book/consensus pair should never crash the full slate.
+    if po is None or pu is None:
+        po,pu=no_vig_pair(ob["over"],ub["under"])
+    if po is None or pu is None:
+        return None
     return {"total":point,"over_best":ob["over"],"under_best":ub["under"],"over_book":ob["book"],"under_book":ub["book"],
-            "over_market_prob":po,"under_market_prob":pu,"books":len(same)}
+            "over_market_prob":float(po),"under_market_prob":float(pu),"books":len(same)}
 
 
 def poisson_total_probs(lam,line):
@@ -285,13 +291,21 @@ def totals_grade(edge):
 def build_total_pick(model_total, tm):
     if not tm:
         return None
-    calibrated_total = TOTALS_MODEL_WEIGHT*float(model_total) + (1.0-TOTALS_MODEL_WEIGHT)*float(tm["total"])
-    op,up,push = production_total_probs(calibrated_total, tm["total"])
+    try:
+        market_total=float(tm["total"])
+        mpo=float(tm.get("over_market_prob"))
+        mpu=float(tm.get("under_market_prob"))
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not all(math.isfinite(v) for v in (market_total,mpo,mpu)):
+        return None
+    calibrated_total = TOTALS_MODEL_WEIGHT*float(model_total) + (1.0-TOTALS_MODEL_WEIGHT)*market_total
+    op,up,push = production_total_probs(calibrated_total, market_total)
     d=op+up
     op_np=op/d if d>0 else .5
     up_np=up/d if d>0 else .5
-    oe=op_np-float(tm["over_market_prob"])
-    ue=up_np-float(tm["under_market_prob"])
+    oe=op_np-mpo
+    ue=up_np-mpu
     if oe >= ue:
         side="OVER"; prob=op; lose=up; edge=oe; odds=tm["over_best"]; book=tm["over_book"]
     else:
@@ -740,7 +754,10 @@ else:
 
         if tm:
             tp=build_total_pick(raw_total,tm)
-            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park/weather are context only.</div></div>''',unsafe_allow_html=True)
+            if tp is None:
+                st.warning("A totals market was returned, but its price pair was incomplete/invalid. Refresh the total or try again later.")
+            else:
+                st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park/weather are context only.</div></div>''',unsafe_allow_html=True)
         else:
             temp_txt = f'{float(tctx["Temp"]):.0f}°F' if tctx.get("Temp") is not None and pd.notna(tctx.get("Temp")) else "—"
             st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS MODEL VIEW</div><div class="best-pick">Projected total {raw_total:.2f}</div><div class="best-game">Load this game's total only when you want an official market grade.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Projected total</span><b>{raw_total:.2f}</b></div><div class="metric"><span>Park context</span><b>{float(tctx.get("Park_Factor",1.0)):.3f}</b></div><div class="metric"><span>Temperature</span><b>{temp_txt}</b></div><div class="metric"><span>Lineups</span><b>{"CONFIRMED" if x["lineup_confirmed"] else "WAIT"}</b></div></div></div>''',unsafe_allow_html=True)
@@ -825,6 +842,8 @@ else:
                 if not tm:
                     continue
                 tp=build_total_pick(float(ctx["Projected_Total"]),tm)
+                if tp is None:
+                    continue
                 total_rows.append((cx,tp,ctx))
 
             official_totals=sorted(
