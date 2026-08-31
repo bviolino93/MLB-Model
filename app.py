@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 from scipy.stats import norm
 
-APP_VERSION = "1.1.2-ADVANCED-TOTALS"
+APP_VERSION = "1.1.3-TOTALS-INTEGRITY"
 MLB_API = "https://statsapi.mlb.com/api/v1"
 CACHE = Path(".mlb_totals_v112_cache")
 CACHE.mkdir(exist_ok=True)
@@ -312,59 +312,178 @@ def evaluate_model(d, matrix_fn, label, l2=12.0):
         buckets.append({"Model":label,"Min_Edge":e0,"Bets":len(b),"Wins":int((b.Result=="WIN").sum()),"Losses":int((b.Result=="LOSS").sum()),"Pushes":int((b.Result=="PUSH").sum()),"Units":float(b.Units.sum()),"ROI":float(b.Units.sum()/len(b)) if len(b) else np.nan})
     return metrics,pd.DataFrame(buckets),out
 
-# -------------------- UI --------------------
-st.markdown('<div class="kicker">MLB MODEL • TOTALS RESEARCH 2.0</div>',unsafe_allow_html=True)
-st.title("Advanced Totals Validation Lab")
-st.markdown('<div class="sub">The first totals baseline failed. This version freezes that result and tests a more baseball-specific totals model using point-in-time team scoring/prevention, recent run environment, starting-pitcher skill/workload, park context, and an empirical run-total distribution. 2023 trains, 2024 selects market blend, and 2025 remains the holdout.</div>',unsafe_allow_html=True)
-st.warning("Research only. Historical MLB starter identity is retrospective, so this is an upper-bound starter test rather than proof that every starter was known at the exact odds snapshot. Weather and bullpen are intentionally NOT added yet; they only earn a test if this core model improves out-of-sample.")
 
-master_file=st.file_uploader("1. Upload mlb_moneyline_master_2023_2025.csv",type=["csv"],key="master")
-totals_file=st.file_uploader("2. Upload mlb_historical_totals_market_2023_2025.csv",type=["csv"],key="totals")
+# -------------------- integrity audit helpers --------------------
+def fit_advanced_frozen(d, l2=18.0):
+    d=d.copy().reset_index(drop=True)
+    X=advanced_matrix(d)
+    y=pd.to_numeric(d.Final_Total_Runs,errors="coerce")
+    s=pd.to_numeric(d.Season,errors="coerce")
+    tr=s==2023; va=s==2024; dev=tr|va; ho=s==2025
+    if min(tr.sum(),va.sum(),ho.sum())<100:
+        raise ValueError(f"Insufficient rows for frozen audit: {tr.sum()}/{va.sum()}/{ho.sum()}")
+    m=ridge_fit(X.loc[tr],y.loc[tr],l2)
+    p24=ridge_pred(m,X.loc[va]); line24=pd.to_numeric(d.loc[va,'Total_Line'],errors='coerce').to_numpy(); y24=y.loc[va].to_numpy()
+    bestw=0.0; best=1e9
+    for w in np.arange(0,1.01,.1):
+        q=w*p24+(1-w)*line24
+        rm=float(np.sqrt(np.mean((q-y24)**2)))
+        if rm<best: best=rm; bestw=float(w)
+    m2=ridge_fit(X.loc[dev],y.loc[dev],l2)
+    pdev=ridge_pred(m2,X.loc[dev]); resdev=y.loc[dev].to_numpy()-pdev
+    return {"model":m2,"weight":bestw,"resids":resdev,"validation_rmse":best,"columns":list(X.columns)}
+
+def score_holdout(fit, hold_df, label):
+    h=hold_df.copy().reset_index(drop=True)
+    Xh=advanced_matrix(h)
+    p=ridge_pred(fit['model'],Xh)
+    lines=pd.to_numeric(h.Total_Line,errors='coerce').to_numpy()
+    y=pd.to_numeric(h.Final_Total_Runs,errors='coerce').to_numpy()
+    cal=fit['weight']*p+(1-fit['weight'])*lines
+    rows=[]
+    for i,r in enumerate(h.itertuples()):
+        pred=float(cal[i]); line=float(r.Total_Line)
+        po,pu,pp=empirical_probs(pred,line,fit['resids'])
+        try: om,um=novig(r.Over_Odds,r.Under_Odds)
+        except Exception: om,um=float(r.Over_Market_Prob),float(r.Under_Market_Prob)
+        eo,eu=po-om,pu-um
+        if eo>=eu: side='OVER'; pr=po; edge=eo; odds=float(r.Over_Odds)
+        else: side='UNDER'; pr=pu; edge=eu; odds=float(r.Under_Odds)
+        ev=pr*profit(odds)-(1-pr-pp)
+        actual=float(r.Final_Total_Runs); push=(actual==line)
+        win=(actual>line) if side=='OVER' else (actual<line)
+        unit=0.0 if push else (profit(odds) if win else -1.0)
+        rows.append((side,pr,edge,ev,'PUSH' if push else ('WIN' if win else 'LOSS'),unit))
+    h['Raw_Model_Total']=p; h['Calibrated_Total']=cal
+    h[['Side','Bet_Prob','Edge','EV','Result','Units']]=pd.DataFrame(rows,index=h.index)
+    met={
+        'Test':label,'Games':len(h),'Model_Weight':fit['weight'],
+        'Market_RMSE':float(np.sqrt(np.mean((lines-y)**2))),
+        'Raw_RMSE':float(np.sqrt(np.mean((p-y)**2))),
+        'Calibrated_RMSE':float(np.sqrt(np.mean((cal-y)**2))),
+    }
+    b=h[(h.Edge>=.075)&(h.EV>=0)].copy()
+    met.update({'Bets_7_5pct':len(b),'Wins':int((b.Result=='WIN').sum()),'Losses':int((b.Result=='LOSS').sum()),'Pushes':int((b.Result=='PUSH').sum()),'Units':float(b.Units.sum()),'ROI':float(b.Units.sum()/len(b)) if len(b) else np.nan})
+    return met,h
+
+def neutralize_starters(h):
+    z=h.copy()
+    for c in z.columns:
+        if c.startswith('Away_SP_') or c.startswith('Home_SP_'):
+            z[c]=np.nan
+    return z
+
+def scramble_starters(h, seed=113):
+    z=h.copy(); rng=np.random.default_rng(seed)
+    for prefix in ['Away_SP_','Home_SP_']:
+        cols=[c for c in z.columns if c.startswith(prefix)]
+        if cols:
+            idx=rng.permutation(len(z))
+            z.loc[:,cols]=z.loc[:,cols].to_numpy()[idx]
+    return z
+
+def opponent_starters(h):
+    z=h.copy()
+    a=[c for c in z.columns if c.startswith('Away_SP_')]
+    for ac in a:
+        hc='Home_SP_'+ac[len('Away_SP_'):]
+        if hc in z.columns:
+            av=z[ac].copy(); z[ac]=z[hc].values; z[hc]=av.values
+    return z
+
+def remove_park(h):
+    z=h.copy(); z['Park_Factor']=1.0; return z
+
+def remove_recent_runs(h):
+    z=h.copy()
+    for c in z.columns:
+        if '_L10_' in c or '_L5_' in c:
+            z[c]=np.nan
+    return z
+
+def segment_table(hold):
+    rows=[]
+    def add(name,x):
+        if x.empty: return
+        bets=x[(x.Edge>=.075)&(x.EV>=0)]
+        rows.append({'Segment':name,'Games':len(x),'Bets':len(bets),'Wins':int((bets.Result=='WIN').sum()),'Losses':int((bets.Result=='LOSS').sum()),'Pushes':int((bets.Result=='PUSH').sum()),'Units':float(bets.Units.sum()),'ROI':float(bets.Units.sum()/len(bets)) if len(bets) else np.nan,'Avg_Edge':float(bets.Edge.mean()) if len(bets) else np.nan})
+    add('OVER',hold[hold.Side=='OVER']); add('UNDER',hold[hold.Side=='UNDER'])
+    for lo,hi,label in [(0,7.99,'Total <=7.5'),(8,8.99,'Total 8-8.5'),(9,9.99,'Total 9-9.5'),(10,99,'Total 10+')]:
+        add(label,hold[(hold.Total_Line>=lo)&(hold.Total_Line<=hi)])
+    t=pd.to_datetime(hold.Commence_Time,utc=True,errors='coerce')
+    for m in sorted(t.dt.month.dropna().unique()):
+        add(pd.Timestamp(2025,int(m),1).strftime('%B'),hold[t.dt.month==m])
+    return pd.DataFrame(rows)
+
+# -------------------- UI --------------------
+st.markdown('<div class="kicker">MLB MODEL • TOTALS INTEGRITY AUDIT</div>',unsafe_allow_html=True)
+st.title('v1.1.3 Advanced Totals Integrity Audit')
+st.markdown('<div class="sub">This freezes v1.1.2 and tries to break it. Correct 2023/2024 data determine the model and market blend; 2025 is then attacked with tighter timing, starter placebos, park ablation, recent-run ablation, and segment checks. No Odds API calls.</div>',unsafe_allow_html=True)
+st.warning('Promotion standard: correct-context totals should beat the market on 2025, while wrong/scrambled starter tests should materially deteriorate. Betting ROI is secondary to predictive RMSE and robustness.')
+
+master_file=st.file_uploader('1. Upload mlb_moneyline_master_2023_2025.csv',type=['csv'],key='master113')
+totals_file=st.file_uploader('2. Upload mlb_historical_totals_market_2023_2025.csv',type=['csv'],key='totals113')
 if master_file and totals_file:
     master=pd.read_csv(master_file); totals=pd.read_csv(totals_file)
     try: merged=merge_totals(master,totals)
     except Exception as e: st.error(str(e)); st.stop()
     merged=merged[merged.Total_Line.notna()].copy()
-    c1,c2,c3=st.columns(3); c1.metric("Priced master games",f"{len(merged):,}"); c2.metric("2025 games",f"{(pd.to_numeric(merged.Season,errors='coerce')==2025).sum():,}"); c3.metric("Odds API credits","0")
-    min_games=st.slider("Minimum prior team games",8,25,12)
-    min_starts=st.slider("Minimum prior starter starts",2,8,3)
-    max_hours=st.select_slider("Maximum hours before first pitch",options=[3,6,12,18],value=6)
-    if st.button("Run Advanced Totals Test"):
+    c1,c2,c3=st.columns(3); c1.metric('Priced master games',f'{len(merged):,}'); c2.metric('2025 games',f"{(pd.to_numeric(merged.Season,errors='coerce')==2025).sum():,}"); c3.metric('Odds API credits','0')
+    min_games=st.slider('Minimum prior team games',8,25,12,key='mg113')
+    min_starts=st.slider('Minimum prior starter starts',2,8,3,key='ms113')
+    if st.button('Run Totals Integrity Audit',key='run113'):
         try:
-            with st.spinner("Building point-in-time team run environment…"):
+            with st.spinner('Building point-in-time team run environment…'):
                 pit=build_team_pit(merged,min_games=min_games)
-                pit=pit[pit.PIT_Eligible].copy()
-                pit["Hours_To_First_Pitch"]=pd.to_numeric(pit.Hours_To_First_Pitch,errors="coerce")
-                pit=pit[(pit.Hours_To_First_Pitch>=0)&(pit.Hours_To_First_Pitch<=max_hours)].copy()
-            with st.spinner("Attaching historical starters and park context from the free MLB Stats API…"):
+                pit=pit[pit.PIT_Eligible].copy(); pit['Hours_To_First_Pitch']=pd.to_numeric(pit.Hours_To_First_Pitch,errors='coerce')
+                pit=pit[(pit.Hours_To_First_Pitch>=0)&(pit.Hours_To_First_Pitch<=6)].copy()
+            with st.spinner('Attaching historical starters and park context…'):
                 ctx,quality=attach_context(pit,min_starts=min_starts)
-            if ctx.empty: raise ValueError("No starter-context rows were built. Check MLB API coverage/cache.")
-            # remove known doubleheaders when schedule metadata is present
-            if "DoubleHeader" in ctx.columns: ctx=ctx[ctx.DoubleHeader.astype(str).eq("N")].copy()
-            # Use identical rows for benchmark and advanced model.
-            baseline_metrics,baseline_buckets,baseline_hold=evaluate_model(ctx,basic_matrix,"Frozen simple totals baseline",l2=10)
-            advanced_metrics,advanced_buckets,advanced_hold=evaluate_model(ctx,advanced_matrix,"v1.1.2 Pitcher + Run Environment + Park",l2=18)
-            metrics=pd.DataFrame([baseline_metrics,advanced_metrics]); buckets=pd.concat([baseline_buckets,advanced_buckets],ignore_index=True)
-            st.session_state["v112_metrics"]=metrics; st.session_state["v112_buckets"]=buckets; st.session_state["v112_hold"]=advanced_hold; st.session_state["v112_quality"]=quality
-        except Exception as e:
-            st.exception(e)
+            if ctx.empty: raise ValueError('No starter-context rows were built.')
+            if 'DoubleHeader' in ctx.columns: ctx=ctx[ctx.DoubleHeader.astype(str).eq('N')].copy()
+            fit=fit_advanced_frozen(ctx,l2=18.0)
+            h=ctx[pd.to_numeric(ctx.Season,errors='coerce')==2025].copy()
+            tests=[]; holds={}
+            for label,hh in [
+                ('Correct context <=6h',h),
+                ('Correct context <=3h',h[pd.to_numeric(h.Hours_To_First_Pitch,errors='coerce')<=3]),
+                ('Correct context <=1h',h[pd.to_numeric(h.Hours_To_First_Pitch,errors='coerce')<=1]),
+                ('Scrambled 2025 starters',scramble_starters(h)),
+                ('Opponent starters',opponent_starters(h)),
+                ('No starter information',neutralize_starters(h)),
+                ('No park factor',remove_park(h)),
+                ('No recent run environment',remove_recent_runs(h)),
+            ]:
+                if len(hh)<40: continue
+                met,ho=score_holdout(fit,hh,label); tests.append(met); holds[label]=ho
+            summary=pd.DataFrame(tests)
+            correct=holds.get('Correct context <=6h',pd.DataFrame())
+            segments=segment_table(correct) if not correct.empty else pd.DataFrame()
+            st.session_state['v113_summary']=summary; st.session_state['v113_segments']=segments; st.session_state['v113_hold']=correct; st.session_state['v113_quality']=quality
+        except Exception as e: st.exception(e)
 
-    metrics=st.session_state.get("v112_metrics")
-    if isinstance(metrics,pd.DataFrame) and not metrics.empty:
-        st.subheader("2025 Holdout Comparison")
-        st.dataframe(metrics,use_container_width=True,hide_index=True)
-        a=metrics.iloc[-1]; b=metrics.iloc[0]
-        pass_rmse=float(a["2025_Calibrated_RMSE"]) < float(b["2025_Calibrated_RMSE"]) and float(a["2025_Calibrated_RMSE"]) < float(a["2025_Market_RMSE"])
-        if pass_rmse: st.success("CORE TOTALS SIGNAL PASSES PREDICTIVE TEST — advanced calibrated RMSE beat both the frozen baseline and the market on 2025. Now inspect betting buckets before promotion.")
-        else: st.error("CORE TOTALS SIGNAL FAILS PROMOTION — do not add weather/bullpen or official totals bets yet.")
-        st.subheader("Betting Edge Buckets")
-        st.dataframe(st.session_state["v112_buckets"],use_container_width=True,hide_index=True)
-        q=st.session_state.get("v112_quality")
+    summary=st.session_state.get('v113_summary')
+    if isinstance(summary,pd.DataFrame) and not summary.empty:
+        st.subheader('Integrity Stress Tests')
+        st.dataframe(summary,use_container_width=True,hide_index=True)
+        try:
+            corr=summary[summary.Test=='Correct context <=6h'].iloc[0]
+            scr=summary[summary.Test=='Scrambled 2025 starters'].iloc[0]
+            opp=summary[summary.Test=='Opponent starters'].iloc[0]
+            passes=(corr.Calibrated_RMSE<corr.Market_RMSE and scr.Calibrated_RMSE>corr.Calibrated_RMSE and opp.Calibrated_RMSE>corr.Calibrated_RMSE)
+            if passes: st.success('INTEGRITY SIGNAL PASSES CORE PLACEBO CHECKS — correct context beats market and both scrambled/opponent starter tests deteriorate. Review timing and segment stability before promotion.')
+            else: st.error('INTEGRITY SIGNAL DOES NOT CLEANLY PASS — do not promote totals yet.')
+        except Exception: pass
+        seg=st.session_state.get('v113_segments')
+        if isinstance(seg,pd.DataFrame) and not seg.empty:
+            st.subheader('2025 Robustness Segments')
+            st.dataframe(seg,use_container_width=True,hide_index=True)
+        q=st.session_state.get('v113_quality')
         if isinstance(q,pd.DataFrame):
-            with st.expander("Data quality"): st.dataframe(q,use_container_width=True,hide_index=True)
+            with st.expander('Data quality'): st.dataframe(q,use_container_width=True,hide_index=True)
         c1,c2,c3=st.columns(3)
-        c1.download_button("Download Comparison",metrics.to_csv(index=False).encode(),"mlb_totals_v112_comparison.csv","text/csv")
-        c2.download_button("Download Edge Buckets",st.session_state["v112_buckets"].to_csv(index=False).encode(),"mlb_totals_v112_edge_buckets.csv","text/csv")
-        c3.download_button("Download 2025 Holdout",st.session_state["v112_hold"].to_csv(index=False).encode(),"mlb_totals_v112_holdout_2025.csv","text/csv")
+        c1.download_button('Download Audit Summary',summary.to_csv(index=False).encode(),'mlb_totals_v113_integrity_summary.csv','text/csv')
+        c2.download_button('Download Segments',st.session_state['v113_segments'].to_csv(index=False).encode(),'mlb_totals_v113_segments.csv','text/csv')
+        c3.download_button('Download Correct Holdout',st.session_state['v113_hold'].to_csv(index=False).encode(),'mlb_totals_v113_holdout_2025.csv','text/csv')
 
-st.caption("Zero Odds API calls. This lab only uses the two uploaded historical files plus the free MLB Stats API, with local caching for starter histories.")
+st.caption('Zero Odds API calls. Uses the uploaded historical Moneyline Master + historical totals market and the free cached MLB Stats API starter histories.')
