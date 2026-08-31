@@ -9,7 +9,7 @@ import streamlit as st
 
 from model import MODEL_VERSION, fetch_today_games, run_model, implied_prob, expected_value, fair_ml, TEAM_IDS, load_team_ids
 
-APP_VERSION = "1.0.1-UX-RESTORE"
+APP_VERSION = "1.0.2-ALL-GAMES"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -165,41 +165,54 @@ def grade(prob, odds, confidence, lineup_confirmed):
 
 
 def cls(v):
-    return {"BEST BET":"badge-best","BET":"badge-bet","LEAN":"badge-lean","PASS":"badge-pass"}.get(v,"badge-pass")
+    return {"BEST BET":"badge-best","BET":"badge-bet","LEAN":"badge-lean","PASS":"badge-pass","MODEL ONLY":"badge-lean"}.get(v,"badge-pass")
 
 
 def build_candidates(model_df, games, events):
+    """Build one candidate for every modeled MLB game."""
     game_map={g.get("GamePk"):g for g in games}
     out=[]
     for _,r in model_df.iterrows():
         g=game_map.get(r["GamePk"],{})
-        event=match_event(events,g); m=moneyline_market(event)
-        if not m: continue
-        am,hm=no_vig_pair(m["away_consensus"],m["home_consensus"])
-        if am is None: continue
+        event=match_event(events,g)
+        m=moneyline_market(event)
         confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
-        conf=int(r["Model_Confidence"]); alpha=model_alpha(conf,confirmed)
-        sides=[
-            (r["Away"],float(r["Away_WinProb"]),am,m["away_best"],m["away_book"]),
-            (r["Home"],float(r["Home_WinProb"]),hm,m["home_best"],m["home_book"]),
-        ]
+        conf=int(r["Model_Confidence"])
+        alpha=model_alpha(conf,confirmed)
+        market_available=False
         side_rows=[]
-        for team,raw,market_p,price,book in sides:
-            cal=market_p+alpha*(raw-market_p); cal=max(.001,min(.999,cal))
-            verdict,edge,ev,imp=grade(cal,price,conf,confirmed)
-            side_rows.append({"team":team,"raw":raw,"market_prob":market_p,"prob":cal,"odds":price,"book":book,"verdict":verdict,"edge":edge,"ev":ev,"fair":fair_ml(cal)})
-        rank={"BEST BET":4,"BET":3,"LEAN":2,"PASS":1}
-        side_rows.sort(key=lambda x:(rank[x["verdict"]],x["edge"],x["ev"],x["prob"]),reverse=True)
+
+        if m:
+            am,hm=no_vig_pair(m["away_consensus"],m["home_consensus"])
+            if am is not None and hm is not None:
+                market_available=True
+                sides=[
+                    (r["Away"],float(r["Away_WinProb"]),am,m["away_best"],m["away_book"]),
+                    (r["Home"],float(r["Home_WinProb"]),hm,m["home_best"],m["home_book"]),
+                ]
+                for team,raw,market_p,price,book in sides:
+                    cal=market_p+alpha*(raw-market_p); cal=max(.001,min(.999,cal))
+                    verdict,edge,ev,imp=grade(cal,price,conf,confirmed)
+                    side_rows.append({"team":team,"raw":raw,"market_prob":market_p,"prob":cal,"odds":price,"book":book,"verdict":verdict,"edge":edge,"ev":ev,"fair":fair_ml(cal)})
+
+        if not market_available:
+            side_rows=[
+                {"team":r["Away"],"raw":float(r["Away_WinProb"]),"market_prob":None,"prob":float(r["Away_WinProb"]),"odds":None,"book":None,"verdict":"MODEL ONLY","edge":None,"ev":None,"fair":fair_ml(float(r["Away_WinProb"]))},
+                {"team":r["Home"],"raw":float(r["Home_WinProb"]),"market_prob":None,"prob":float(r["Home_WinProb"]),"odds":None,"book":None,"verdict":"MODEL ONLY","edge":None,"ev":None,"fair":fair_ml(float(r["Home_WinProb"]))},
+            ]
+
+        rank={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
+        side_rows.sort(key=lambda x:(rank[x["verdict"]], x["edge"] if x["edge"] is not None else -999, x["ev"] if x["ev"] is not None else -999, x["prob"]),reverse=True)
         best=side_rows[0]
         out.append({
             "GamePk":r["GamePk"],"game":r["Game"],"away":r["Away"],"home":r["Home"],"time":r.get("TimeLabel",g.get("TimeLabel","")),
             "away_sp":r.get("Away_SP") or "TBD","home_sp":r.get("Home_SP") or "TBD","lineup_confirmed":confirmed,
-            "confidence":conf,"alpha":alpha,"books":m["books"],"best":best,"all":side_rows,
+            "confidence":conf,"alpha":alpha,"books":m["books"] if market_available else 0,"best":best,"all":side_rows,
             "away_proj":float(r["Away_Proj_Runs"]),"home_proj":float(r["Home_Proj_Runs"]),
-            "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons","")
+            "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons",""),"market_available":market_available,
         })
-    order={"BEST BET":4,"BET":3,"LEAN":2,"PASS":1}
-    out.sort(key=lambda x:(order[x["best"]["verdict"]],x["best"]["edge"],x["best"]["ev"]),reverse=True)
+    order={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
+    out.sort(key=lambda x:(order[x["best"]["verdict"]], x["best"]["edge"] if x["best"]["edge"] is not None else -999, x["best"]["ev"] if x["best"]["ev"] is not None else -999),reverse=True)
     return out
 
 
@@ -230,7 +243,8 @@ with st.spinner("Loading today's MLB slate, starters, lineups and market…"):
 
 quota=odds_payload.get("quota",{})
 qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Current consensus moneyline"
-st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {len(games)} games found</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+priced_games=sum(1 for x in candidates if x.get("market_available"))
+st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {len(candidates)} games modeled • {priced_games} with live prices</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
@@ -240,7 +254,7 @@ if not games:
     st.stop()
 
 if not candidates:
-    st.warning("The model loaded the slate, but no games could be matched to a two-way moneyline market yet. Refresh closer to game time if lines are not posted.")
+    st.warning("The model could not produce game rows for today.")
 else:
     st.markdown('<div class="kicker">Mode</div>', unsafe_allow_html=True)
     mode = st.radio(
@@ -269,50 +283,32 @@ else:
         lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
 
         st.markdown('<div class="kicker">Single Game Analysis</div>', unsafe_allow_html=True)
-        st.markdown(f'''
-        <div class="best-card">
-          <div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-          <div class="metrics">
-            <div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div>
-            <div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div>
-            <div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div>
-            <div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div>
-          </div>
-          <div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div>
-        </div>
-        ''', unsafe_allow_html=True)
+        if x["market_available"]:
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">{b['verdict']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div><div class="metrics"><div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div><div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div><div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div></div>''', unsafe_allow_html=True)
+        else:
+            fav = away_side if away_side['prob'] >= home_side['prob'] else home_side
+            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">MODEL VIEW</div><div class="best-pick">{fav['team']} {fav['prob']*100:.1f}%</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Live moneyline not available</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['away']} fair</span><b>{away_side['fair']:+d}</b></div><div class="metric"><span>{x['home']} fair</span><b>{home_side['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model confidence {x['confidence']}/100 • No BET/LEAN verdict without a live price</div></div>''', unsafe_allow_html=True)
+            st.info("This game is modeled and selectable. A betting verdict appears automatically when a valid two-way moneyline is available.")
 
         st.markdown('<div class="kicker">Matchup Detail</div>', unsafe_allow_html=True)
-        st.markdown(f'''
-        <div class="single-summary">
-          <div class="match">{x['away']} @ {x['home']}</div>
-          <div class="sp">{x['away_sp']} vs {x['home_sp']}</div>
-          <div class="detail-grid">
-            <div class="detail"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div>
-            <div class="detail"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div>
-            <div class="detail"><span>Projected runs</span><b>{x['away_proj']:.2f} – {x['home_proj']:.2f}</b></div>
-            <div class="detail"><span>{x['away']} fair ML</span><b>{away_side['fair']:+d}</b></div>
-            <div class="detail"><span>{x['home']} fair ML</span><b>{home_side['fair']:+d}</b></div>
-            <div class="detail"><span>Model confidence</span><b>{x['confidence']}/100</b></div>
-          </div>
-        </div>
-        ''', unsafe_allow_html=True)
+        st.markdown(f'''<div class="single-summary"><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div><div class="detail-grid"><div class="detail"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div><div class="detail"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div><div class="detail"><span>Projected runs</span><b>{x['away_proj']:.2f} – {x['home_proj']:.2f}</b></div><div class="detail"><span>{x['away']} fair ML</span><b>{away_side['fair']:+d}</b></div><div class="detail"><span>{x['home']} fair ML</span><b>{home_side['fair']:+d}</b></div><div class="detail"><span>Model confidence</span><b>{x['confidence']}/100</b></div></div></div>''', unsafe_allow_html=True)
 
         st.markdown('<div class="kicker">Both Sides</div>', unsafe_allow_html=True)
         for side in [away_side, home_side]:
-            st.markdown(f'''
-            <div class="game-card">
-              <div class="game-head"><div><div class="pick-main">{side['team']} ML {side['odds']:+d}</div><div class="pick-sub">{side['book']} • Fair {side['fair']:+d}</div></div><div class="badge {cls(side['verdict'])}">{side['verdict']}</div></div>
-              <div class="metrics">
-                <div class="metric"><span>Win chance</span><b>{side['prob']*100:.1f}%</b></div>
-                <div class="metric"><span>Market no-vig</span><b>{side['market_prob']*100:.1f}%</b></div>
-                <div class="metric"><span>Edge</span><b>{side['edge']*100:+.1f}%</b></div>
-                <div class="metric"><span>EV</span><b>{side['ev']*100:+.1f}%</b></div>
-              </div>
-            </div>
-            ''', unsafe_allow_html=True)
+            if x['market_available']:
+                headline=f"{side['team']} ML {side['odds']:+d}"
+                subtitle=f"{side['book']} • Fair {side['fair']:+d}"
+                details=f'''<div class="metrics"><div class="metric"><span>Win chance</span><b>{side['prob']*100:.1f}%</b></div><div class="metric"><span>Market no-vig</span><b>{side['market_prob']*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{side['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{side['ev']*100:+.1f}%</b></div></div>'''
+            else:
+                headline=side['team']
+                subtitle=f"Fair line {side['fair']:+d} • Waiting for market"
+                details=f'''<div class="metrics"><div class="metric"><span>Model win chance</span><b>{side['prob']*100:.1f}%</b></div><div class="metric"><span>Fair line</span><b>{side['fair']:+d}</b></div></div>'''
+            st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="pick-main">{headline}</div><div class="pick-sub">{subtitle}</div></div><div class="badge {cls(side['verdict'])}">{side['verdict']}</div></div>{details}</div>''', unsafe_allow_html=True)
 
-        st.caption(f"{x['lineup_status']}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market.")
+        if x['market_available']:
+            st.caption(f"{x['lineup_status']}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market.")
+        else:
+            st.caption(f"{x['lineup_status']}. Model-only projection shown until a valid live moneyline is available.")
         if x.get("confidence_reasons"):
             st.caption(f"Data notes: {x['confidence_reasons']}")
 
@@ -352,20 +348,23 @@ else:
         for x in sorted(candidates,key=start_sort):
             b=x["best"]
             with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['verdict']}",expanded=False):
-                st.markdown(f'''
-                <div class="game-card" style="margin-top:0">
-                  <div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>
-                  <div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>
-                </div>
-                ''',unsafe_allow_html=True)
-                st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market. {x['lineup_status']}.")
+                if x['market_available']:
+                    pick_html=f"<div class='pick'><div><div class='pick-main'>{b['team']} ML {b['odds']:+d}</div><div class='pick-sub'>Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>"
+                    cap=f"Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market."
+                else:
+                    away_side=next(z for z in x['all'] if z['team']==x['away'])
+                    home_side=next(z for z in x['all'] if z['team']==x['home'])
+                    pick_html=f"<div class='pick'><div><div class='pick-main'>Model: {x['away']} {away_side['prob']*100:.1f}% • {x['home']} {home_side['prob']*100:.1f}%</div><div class='pick-sub'>Fair lines {x['away']} {away_side['fair']:+d} • {x['home']} {home_side['fair']:+d} • live moneyline unavailable</div></div></div>"
+                    cap="Model-only projection; no betting verdict until a valid live market is available."
+                st.markdown(f'''<div class="game-card" style="margin-top:0"><div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['verdict'])}">{b['verdict']}</div></div>{pick_html}</div>''',unsafe_allow_html=True)
+                st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
                 if x.get("confidence_reasons"):
                     st.caption(f"Data notes: {x['confidence_reasons']}")
 
         export=[]
         for x in candidates:
             b=x["best"]
-            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML","Odds":b["odds"],"Book":b["book"],"Verdict":b["verdict"],"Calibrated_Prob":b["prob"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Model_Weight":x["alpha"],"Model_Version":MODEL_VERSION})
+            export.append({"Game":x["game"],"Time":x["time"],"Pick":f"{b['team']} ML" if x["market_available"] else f"{b['team']} model lean","Odds":b["odds"],"Book":b["book"],"Verdict":b["verdict"],"Calibrated_Prob":b["prob"] if x["market_available"] else None,"Model_Prob":b["raw"],"Edge":b["edge"],"EV":b["ev"],"Fair_ML":b["fair"],"Confidence":x["confidence"],"Lineups_Confirmed":x["lineup_confirmed"],"Market_Available":x["market_available"],"Model_Weight":x["alpha"] if x["market_available"] else None,"Model_Version":MODEL_VERSION})
         st.download_button("Download Today's Moneyline Board",pd.DataFrame(export).to_csv(index=False).encode("utf-8"),file_name="mlb_production_moneyline_board.csv",mime="text/csv",use_container_width=True)
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
