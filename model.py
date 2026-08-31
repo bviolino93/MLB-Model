@@ -107,10 +107,19 @@ def load_team_ids():
     return TEAM_IDS
 
 
-def fetch_today_games():
+def fetch_games_for_date(selected_date=None):
+    """Fetch the free MLB schedule for a selected current/upcoming date.
+
+    This function never calls The Odds API and therefore never consumes odds credits.
+    """
     if not TEAM_IDS:
         load_team_ids()
-    day = today_et().strftime("%Y-%m-%d")
+    if selected_date is None:
+        selected_date = today_et()
+    try:
+        day = pd.Timestamp(selected_date).date().strftime("%Y-%m-%d")
+    except Exception:
+        day = today_et().strftime("%Y-%m-%d")
     data = get_json(
         f"{MLB_API}/v1/schedule",
         {"sportId": 1, "date": day, "hydrate": "probablePitcher,venue"},
@@ -147,6 +156,11 @@ def fetch_today_games():
                 "DoubleHeader": g.get("doubleHeader", "N"),
             })
     return games
+
+
+def fetch_today_games():
+    """Backward-compatible alias for today's slate."""
+    return fetch_games_for_date(today_et())
 
 
 def pitcher_hand(player_id):

@@ -1,15 +1,16 @@
 import math
 import re
 import statistics
+from datetime import timedelta
 from statistics import median
 
 import pandas as pd
 import requests
 import streamlit as st
 
-from model import MODEL_VERSION, fetch_today_games, run_model, implied_prob, expected_value, fair_ml, TEAM_IDS, load_team_ids
+from model import MODEL_VERSION, fetch_games_for_date, today_et, run_model, implied_prob, expected_value, fair_ml, TEAM_IDS, load_team_ids
 
-APP_VERSION = "1.0.2-ALL-GAMES"
+APP_VERSION = "1.0.3-MANUAL-MARKET-DATE"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -230,27 +231,59 @@ try:
 except Exception:
     api_key=""
 
-c1,c2=st.columns([4,1])
-with c2:
-    if st.button("↻ Refresh",use_container_width=True):
-        fetch_odds.clear(); st.cache_data.clear(); st.rerun()
+st.markdown('<div class="kicker">Slate Controls</div>', unsafe_allow_html=True)
+ctrl1,ctrl2=st.columns([3,2])
+with ctrl1:
+    slate_date=st.date_input(
+        "Slate date",
+        value=today_et(),
+        min_value=today_et(),
+        max_value=today_et()+timedelta(days=14),
+        help="Current/upcoming MLB dates only. Historical odds are never requested by this production app.",
+    )
+with ctrl2:
+    st.caption("Live odds are manual. Opening or changing the date uses 0 Odds API credits.")
+    load_market=st.button("Load / Refresh Live Odds",use_container_width=True,help="This is the only control that calls The Odds API and can use credits.")
 
-with st.spinner("Loading today's MLB slate, starters, lineups and market…"):
-    games=fetch_today_games()
+free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
+if free_refresh:
+    st.cache_data.clear()
+    st.rerun()
+
+if "odds_payload" not in st.session_state:
+    st.session_state.odds_payload={"events":[],"error":"","quota":{}}
+    st.session_state.odds_loaded=False
+    st.session_state.odds_loaded_at=None
+
+if load_market:
+    fetch_odds.clear()
+    st.session_state.odds_payload=fetch_odds(api_key)
+    st.session_state.odds_loaded=True
+    st.session_state.odds_loaded_at=pd.Timestamp.now(tz="America/New_York")
+
+odds_payload=st.session_state.odds_payload if st.session_state.get("odds_loaded") else {"events":[],"error":"","quota":{}}
+
+with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
+    games=fetch_games_for_date(slate_date)
     model_df=run_model(games) if games else pd.DataFrame()
-    odds_payload=fetch_odds(api_key)
     candidates=build_candidates(model_df,games,odds_payload.get("events",[])) if not model_df.empty else []
 
 quota=odds_payload.get("quota",{})
-qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Current consensus moneyline"
+if st.session_state.get("odds_loaded"):
+    qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Live odds loaded manually"
+else:
+    qtxt="Market not loaded • 0 Odds API credits used"
 priced_games=sum(1 for x in candidates if x.get("market_available"))
-st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {len(candidates)} games modeled • {priced_games} with live prices</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {slate_date.strftime("%b %-d")} • {len(candidates)} games modeled • {priced_games} with live prices</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
 
+if not st.session_state.get("odds_loaded"):
+    st.info("Model-only mode. Tap **Load / Refresh Live Odds** when you want current prices, edge/EV and official BET/LEAN/PASS grades. No Odds API call has been made yet.")
+
 if not games:
-    st.info("No MLB games were returned for today.")
+    st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
     st.stop()
 
 if not candidates:
@@ -332,6 +365,12 @@ else:
         ''',unsafe_allow_html=True)
 
         st.markdown('<div class="kicker">Official Card</div>',unsafe_allow_html=True)
+        if official:
+            dogs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]>0)
+            favs=sum(1 for x in official if x["best"]["odds"] is not None and x["best"]["odds"]<0)
+            st.caption(f"Card mix: {dogs} underdog{'s' if dogs!=1 else ''} • {favs} favorite{'s' if favs!=1 else ''}. The model does not force side balance; only prices that clear the same thresholds appear.")
+            if dogs==len(official) and len(official)>=3:
+                st.warning("All current official qualifiers are underdogs. That means no favorite cleared the production thresholds at these prices; it is not an instruction to blindly bet every dog.")
         if not official:
             st.info("No moneyline cleared the official BET threshold right now. The strongest available lean is shown above.")
         else:
@@ -369,7 +408,7 @@ else:
 
 st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
 st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded from v1.0.</div>
+<div class="note"><b>Production scope:</b> moneyline only. Starting pitcher + offense/platoon are the core signal. Confirmed batting orders strengthen the live projection; if lineups are not confirmed, the model leans more heavily on the market. Bullpen is neutral because the historical bullpen layer failed to improve the frozen holdout champion. Run lines and totals are intentionally excluded from v1.0. Live Odds API pulls are manual-only; date changes and model-only views consume zero Odds API credits.</div>
 """,unsafe_allow_html=True)
 
 with st.expander("Research basis & limitations",expanded=False):
