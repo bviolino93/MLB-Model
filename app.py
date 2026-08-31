@@ -8,9 +8,27 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from model import MODEL_VERSION, fetch_games_for_date, today_et, run_model, implied_prob, expected_value, fair_ml, TEAM_IDS, load_team_ids
+import model as engine
 
-APP_VERSION = "1.0.3-MANUAL-MARKET-DATE"
+MODEL_VERSION = getattr(engine, "MODEL_VERSION", "UNKNOWN")
+today_et = engine.today_et
+run_model = engine.run_model
+implied_prob = engine.implied_prob
+expected_value = engine.expected_value
+fair_ml = engine.fair_ml
+
+def fetch_games_for_date(selected_date=None):
+    """Compatibility wrapper so app.py does not crash if GitHub still has the prior model.py."""
+    if hasattr(engine, "fetch_games_for_date"):
+        return engine.fetch_games_for_date(selected_date)
+    # Older production model only had fetch_today_games(). Keep today's slate usable.
+    if hasattr(engine, "fetch_today_games") and (selected_date is None or selected_date == today_et()):
+        return engine.fetch_today_games()
+    raise RuntimeError(
+        "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
+    )
+
+APP_VERSION = "1.0.3.1-IMPORT-COMPAT-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
