@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.2.0.1-TOTALS-RUNTIME-FIX"
+APP_VERSION = "1.2.0.2-TOTALS-MARKET-TIE-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -221,11 +221,28 @@ def totals_market(event):
                 if "over" in pair and "under" in pair: rows.append({"point":point,"over":pair["over"][0],"under":pair["under"][0],"book":title})
     if not rows: return None
     counts={}
-    for r in rows: counts[r["point"]]=counts.get(r["point"],0)+1
-    maxn=max(counts.values()); points=sorted([p for p,n in counts.items() if n==maxn]); point=float(statistics.median(points))
-    same=[r for r in rows if abs(r["point"]-point)<1e-9]
-    oc=int(round(statistics.median([r["over"] for r in same]))); uc=int(round(statistics.median([r["under"] for r in same])))
-    ob=max(same,key=lambda r:r["over"]); ub=max(same,key=lambda r:r["under"])
+    for r in rows:
+        counts[r["point"]]=counts.get(r["point"],0)+1
+    if not counts:
+        return None
+    maxn=max(counts.values())
+    candidate_points=sorted([p for p,n in counts.items() if n==maxn])
+    # Never average two tied market totals into a synthetic line (e.g. 8.0 and 8.5 -> 8.25).
+    # Pick an actual quoted point closest to the median of all quoted book totals.
+    all_points=sorted(r["point"] for r in rows)
+    center=float(statistics.median(all_points))
+    point=min(candidate_points,key=lambda p:(abs(float(p)-center),float(p)))
+    same=[r for r in rows if abs(float(r["point"])-float(point))<1e-9]
+    if not same:
+        return None
+    over_prices=[r["over"] for r in same if valid_odds(r.get("over")) is not None]
+    under_prices=[r["under"] for r in same if valid_odds(r.get("under")) is not None]
+    if not over_prices or not under_prices:
+        return None
+    oc=int(round(statistics.median(over_prices)))
+    uc=int(round(statistics.median(under_prices)))
+    ob=max(same,key=lambda r:r["over"])
+    ub=max(same,key=lambda r:r["under"])
     po,pu=no_vig_pair(oc,uc)
     # Defensive fallback: a malformed book/consensus pair should never crash the full slate.
     if po is None or pu is None:
