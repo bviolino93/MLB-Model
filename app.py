@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.2-LINEUP-STATUS-AUTO"
+APP_VERSION = "3.2.3-TRACKER-LINEUP-SYNC"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1725,6 +1725,15 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     white-space:normal !important;
 }
 
+
+/* ===== v3.2.3 tracker/lineup sync ===== */
+.tracker-gate-diag{
+    margin-top:3px;
+    color:#6f8ca6;
+    font-size:.54rem;
+    font-weight:800;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -2440,8 +2449,13 @@ def build_candidates(model_df, games, events):
         g=game_map.get(r["GamePk"],{})
         event=match_event(events,g) if is_pregame(g) else None
         m=moneyline_market(event) if is_pregame(g) else None
-        confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
+        engine_confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
         lineup_label, lineup_feed = lineup_feed_status(r["GamePk"]) if is_pregame(g) else ("", {})
+        feed_confirmed = bool(lineup_feed.get("teams_ready", 0) >= 2)
+        # One source of truth for Board grading and Tracker qualification:
+        # confirmed if either the engine has loaded both lineups OR the fresh MLB
+        # batting-order feed shows both teams ready.
+        confirmed = bool(engine_confirmed or feed_confirmed)
         conf=int(r["Model_Confidence"])
         alpha=model_alpha(conf,confirmed)
         market_available=False
@@ -2478,6 +2492,8 @@ def build_candidates(model_df, games, events):
             "GamePk":r["GamePk"],"game":r["Game"],"away":r["Away"],"home":r["Home"],"time":r.get("TimeLabel",g.get("TimeLabel","")),
             "away_sp":r.get("Away_SP") or "TBD","home_sp":r.get("Home_SP") or "TBD","lineup_confirmed":confirmed,
             "lineup_display": ("LINEUPS CONFIRMED" if confirmed else lineup_label),
+            "engine_lineup_confirmed": engine_confirmed,
+            "feed_lineup_confirmed": feed_confirmed,
             "away_lineup_count": int(lineup_feed.get("away_count", 0)),
             "home_lineup_count": int(lineup_feed.get("home_count", 0)),
             "lineup_teams_ready": int(lineup_feed.get("teams_ready", 0)),
@@ -2522,7 +2538,7 @@ def game_diagnostics_df(x, slate_date):
         "Away_SP": x.get("away_sp"),
         "Home_SP": x.get("home_sp"),
         "Lineup_Status": x.get("lineup_status"),
-        "Lineups_Confirmed": x.get("lineup_confirmed"),
+        "Lineups_Confirmed": bool(x.get("lineup_confirmed") or x.get("feed_lineup_confirmed") or int(x.get("lineup_teams_ready") or 0) >= 2),
         "Model_Confidence": x.get("confidence"),
         "Confidence_Reasons": x.get("confidence_reasons"),
         "Market_Available": x.get("market_available"),
@@ -2690,13 +2706,34 @@ def tracker_qualification(candidate, market_type):
     """
     if not candidate or not candidate.get("pregame"):
         return False, "not pregame"
-    if TRACKER_REQUIRE_CONFIRMED_LINEUPS and not candidate.get("lineup_confirmed"):
-        return False, "lineups not confirmed"
+    effective_lineups_confirmed = bool(
+        candidate.get("lineup_confirmed")
+        or candidate.get("feed_lineup_confirmed")
+        or int(candidate.get("lineup_teams_ready") or 0) >= 2
+    )
+    if TRACKER_REQUIRE_CONFIRMED_LINEUPS and not effective_lineups_confirmed:
+        return False, f'lineups not confirmed ({int(candidate.get("lineup_teams_ready") or 0)}/2)'
     conf = int(candidate.get("confidence") or 0)
     min_conf = TRACKER_MIN_CONFIDENCE_TOTAL if str(market_type).upper() == "TOTAL" else TRACKER_MIN_CONFIDENCE_ML
     if conf < min_conf:
         return False, f"confidence {conf} < {min_conf}"
     return True, "qualified"
+
+
+def tracker_candidate_status(candidate, market_type):
+    """Small UI/debug helper: return the exact forward-tracker gate status."""
+    qualified, reason = tracker_qualification(candidate, market_type)
+    return {
+        "qualified": bool(qualified),
+        "reason": reason,
+        "confidence": int(candidate.get("confidence") or 0),
+        "lineups_confirmed": bool(
+            candidate.get("lineup_confirmed")
+            or candidate.get("feed_lineup_confirmed")
+            or int(candidate.get("lineup_teams_ready") or 0) >= 2
+        ),
+    }
+
 
 def track_current_official_recommendations(candidates, games, slate_date):
     """Freeze the first official ML signal for each game. Never overwrite later line moves."""
@@ -2730,7 +2767,7 @@ def track_current_official_recommendations(candidates, games, slate_date):
             "Fair_Line": b.get("fair"),
             "Model_Weight": x.get("alpha"),
             "Market_Weight": 1 - float(x.get("alpha", 0)) if x.get("alpha") is not None else None,
-            "Lineups_Confirmed": x.get("lineup_confirmed"),
+            "Lineups_Confirmed": bool(x.get("lineup_confirmed") or x.get("feed_lineup_confirmed") or int(x.get("lineup_teams_ready") or 0) >= 2),
             "Model_Confidence": x.get("confidence"),
             "App_Version": APP_VERSION,
             "Model_Version": MODEL_VERSION,
@@ -2784,7 +2821,7 @@ def track_current_total_recommendations(candidates, games, model_df, totals_payl
             "Fair_Line": None,
             "Model_Weight": TOTALS_MODEL_WEIGHT,
             "Market_Weight": 1 - TOTALS_MODEL_WEIGHT,
-            "Lineups_Confirmed": x.get("lineup_confirmed"),
+            "Lineups_Confirmed": bool(x.get("lineup_confirmed") or x.get("feed_lineup_confirmed") or int(x.get("lineup_teams_ready") or 0) >= 2),
             "Model_Confidence": x.get("confidence"),
             "App_Version": APP_VERSION,
             "Model_Version": MODEL_VERSION,
@@ -4079,12 +4116,19 @@ else:
                     if not cx.get("lineup_confirmed")
                     else 'Both starting lineups loaded • lineup adjustment active'
                 )
+                tracker_diag = tracker_candidate_status(cx, "MONEYLINE")
+                tracker_text = (
+                    "Tracker ready"
+                    if tracker_diag["qualified"]
+                    else f'Tracker waiting: {tracker_diag["reason"]}'
+                )
                 html = (
                     f'<div class="combo-card"><div class="combo-head"><div>'
                     f'<div class="combo-time">{cx["time"]} • {lineup_label}</div>'
                     f'<div class="combo-match">{cx["away"]} @ {cx["home"]}</div>'
                     f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
-                    f'<div class="lineup-feed-diag">{lineup_diag}</div></div></div>'
+                    f'<div class="lineup-feed-diag">{lineup_diag}</div>'
+                    f'<div class="tracker-gate-diag">{tracker_text}</div></div></div>'
                     f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
                     f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {grade_class(ml_grade)}">{ml_grade}</div></div>'
                     f'<div class="market-row"><div class="market-name">TOTAL</div><div><div class="market-main">{total_main}</div>'
