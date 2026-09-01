@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "2.0.0-FIVE-TAB-NAV"
+APP_VERSION = "2.0.1-FULL-WIDTH-NAV"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1237,6 +1237,98 @@ div[class*="st-key-main_navigation"] label:nth-child(5)::before {
     div[class*="st-key-main_navigation"] {padding-left:8px !important;padding-right:8px !important}
     div[class*="st-key-main_navigation"] label::before {width:23px !important;height:23px !important}
     div[class*="st-key-main_navigation"] label p {font-size:.54rem !important}
+}
+
+
+/* v2.0.1 — full-width native-style bottom navigation */
+div[class*="st-key-main_navigation"] {
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    max-width: none !important;
+    min-height: 78px !important;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom)) !important;
+    border-radius: 0 !important;
+    background: rgba(5,17,29,.995) !important;
+    border-top: 1px solid #29445d !important;
+    box-shadow: 0 -10px 28px rgba(0,0,0,.30) !important;
+}
+
+/* Fill the entire bottom width instead of centering inside a constrained wrapper */
+div[class*="st-key-main_navigation"] [role="radiogroup"] {
+    width: 100% !important;
+    max-width: none !important;
+    grid-template-columns: repeat(5, 1fr) !important;
+    gap: 0 !important;
+    margin: 0 !important;
+}
+
+/* Remove every Streamlit radio-control visual */
+div[class*="st-key-main_navigation"] input,
+div[class*="st-key-main_navigation"] label > div:first-child,
+div[class*="st-key-main_navigation"] [data-baseweb="radio"],
+div[class*="st-key-main_navigation"] [role="radio"] > div:first-child,
+div[class*="st-key-main_navigation"] svg[data-testid="stMarkdownIcon"] {
+    display: none !important;
+}
+
+/* Pure tab targets: no circular control, no selected pill/card */
+div[class*="st-key-main_navigation"] label {
+    min-height: 58px !important;
+    padding: 5px 2px 3px !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+/* Active state comes only from icon + label color, like the mockup */
+div[class*="st-key-main_navigation"] label::before {
+    width: 26px !important;
+    height: 26px !important;
+    margin-bottom: 3px !important;
+    background-color: #6f8397 !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked)::before {
+    background-color: #3da5ff !important;
+    filter: drop-shadow(0 0 8px rgba(61,165,255,.30)) !important;
+}
+div[class*="st-key-main_navigation"] label p {
+    color: #74889c !important;
+    font-size: .58rem !important;
+    font-weight: 720 !important;
+    letter-spacing: 0 !important;
+    text-transform: none !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) p {
+    color: #3da5ff !important;
+    font-weight: 850 !important;
+}
+
+/* Reserve exact space for the fixed bar */
+.block-container {
+    padding-bottom: 108px !important;
+}
+
+@media(max-width:700px){
+    div[class*="st-key-main_navigation"]{
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+    }
+    div[class*="st-key-main_navigation"] label::before{
+        width:24px !important;
+        height:24px !important;
+    }
+    div[class*="st-key-main_navigation"] label p{
+        font-size:.55rem !important;
+    }
 }
 
 </style>
