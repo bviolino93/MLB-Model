@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.3.1-QUALIFIED-TRACKER"
+APP_VERSION = "1.4.0-SIMPLE-UI"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1091,7 +1091,7 @@ st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">MLB Edge</div>
-  <div class="sub">Moneyline and totals now run as separate production markets. Totals use the validated pitcher + run-environment core with an 80% model / 20% market blend, conservative edge tiers, and a maximum of three official totals plays.</div>
+  <div class="sub">Simple daily MLB betting board. Choose a date, load odds only when you want them, and keep upcoming games separate from games already in progress.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -1167,14 +1167,15 @@ else:
     qtxt="Market not loaded • 0 Odds API credits used"
 priced_games=sum(1 for x in candidates if x.get("market_available") and x.get("pregame"))
 pregame_games=sum(1 for x in candidates if x.get("pregame"))
-started_games=sum(1 for x in candidates if x.get("game_state") in ("LIVE","FINAL"))
-st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {slate_date.strftime("%b %-d")} • {pregame_games} pregame • {priced_games} priced • {started_games} started/final</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+live_games=sum(1 for x in candidates if x.get("game_state")=="LIVE")
+final_games=sum(1 for x in candidates if x.get("game_state")=="FINAL")
+st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MLB EDGE</span> &nbsp; {slate_date.strftime("%b %-d")} • {pregame_games} upcoming • {live_games} live • {final_games} final</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
 
 if not st.session_state.get("odds_loaded"):
-    st.info("Model-only mode. In **Single Game**, choose a matchup and load only that game's odds. In **Full Slate**, use the full-slate button above. No Odds API call has been made yet.")
+    st.info("No odds loaded yet. Browse model projections for free, then load single-game or full-slate odds only when you want current prices.")
 
 if not games:
     st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
@@ -1183,7 +1184,7 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
-    st.markdown('<div class="kicker">Forward Performance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Tools</div>', unsafe_allow_html=True)
     tracker_df = load_tracker()
     perf = tracker_performance_summary(tracker_df)
     perf_record = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
@@ -1226,7 +1227,7 @@ else:
         with c2:
             tracker_df = load_tracker()
             st.download_button(
-                "Download Tracker Backup CSV",
+                "Download Performance Tracker",
                 data=tracker_df.to_csv(index=False).encode("utf-8"),
                 file_name="mlb_model_recommendation_tracker.csv",
                 mime="text/csv",
@@ -1268,7 +1269,7 @@ else:
     st.markdown('<div class="kicker">Mode</div>', unsafe_allow_html=True)
     mode = st.radio(
         "View mode",
-        ["🎯 Single Game", "📋 Full Slate"],
+        ["Single Game", "Full Slate"],
         horizontal=True,
         label_visibility="collapsed",
         key="production_view_mode",
@@ -1281,14 +1282,27 @@ else:
         except Exception:
             return pd.Timestamp.max.tz_localize("UTC")
 
-    if mode == "🎯 Single Game":
+    if mode == "Single Game":
         chrono = sorted(candidates, key=start_sort)
-        labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in chrono]
+        upcoming_single = [x for x in chrono if x.get("pregame")]
+        started_single = [x for x in chrono if x.get("game_state") in ("LIVE","FINAL")]
+        single_group = st.radio(
+            "Game status",
+            ["Upcoming", "In Progress / Final"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="single_status_group",
+        )
+        single_pool = upcoming_single if single_group == "Upcoming" else started_single
+        if not single_pool:
+            st.info("No games in this section.")
+            st.stop()
+        labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
         selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup")
-        x = chrono[labels.index(selected_label)]
+        x = single_pool[labels.index(selected_label)]
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
-        st.caption("Selecting a matchup does **not** call the odds API. Tap below only when you want this game's live moneyline.")
+        st.caption("Browse for free. Load this game's odds only when you want the current market.")
         selected_state = game_state(selected_game)
         if selected_state != "PREGAME":
             st.warning(game_state_label(selected_game) + ". Historical/pregame prices are not shown as actionable live bets.")
@@ -1315,7 +1329,7 @@ else:
         lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
         _trk_ok, _trk_reason = tracker_qualification(x, "MONEYLINE")
 
-        st.markdown('<div class="kicker">Single Game Analysis</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kicker">Moneyline</div>', unsafe_allow_html=True)
         if x.get("market_available") and (x.get("best") or {}).get("selection") in ("BET","BEST BET"):
             if _trk_ok:
                 st.caption("📌 Tracker status: **QUALIFIED** — this recommendation is eligible to be frozen in forward performance.")
@@ -1385,7 +1399,7 @@ else:
         total_download_row = totals_download_row(row_for_total, tctx, tp if tm and 'tp' in locals() else None)
         total_download_df = pd.DataFrame([total_download_row])
         st.download_button(
-            "Download This Game's Totals CSV",
+            "Download Totals Detail",
             data=total_download_df.to_csv(index=False).encode("utf-8"),
             file_name=f"mlb_game_totals_{x['GamePk']}.csv",
             mime="text/csv",
@@ -1529,7 +1543,7 @@ else:
             if totals_export_rows:
                 totals_export_df = pd.DataFrame(totals_export_rows)
                 st.download_button(
-                    "Download Full Slate Totals CSV",
+                    "Download Totals Analysis",
                     data=totals_export_df.to_csv(index=False).encode("utf-8"),
                     file_name=f"mlb_totals_board_{slate_date.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
@@ -1537,6 +1551,23 @@ else:
                     key="download_full_totals_csv",
                 )
                 st.caption("Exports the totals board already in memory. No additional Odds API credits are used.")
+
+        st.markdown('<div class="kicker">In Progress / Final</div>', unsafe_allow_html=True)
+        live_now = [x for x in candidates if x.get("game_state") == "LIVE"]
+        final_now = [x for x in candidates if x.get("game_state") == "FINAL"]
+        if not live_now and not final_now:
+            st.caption("No games have started yet.")
+        else:
+            if live_now:
+                for cx in sorted(live_now, key=start_sort):
+                    st.markdown(
+                        f'<div class="game-card"><div class="game-head"><div><div class="game-time">LIVE</div><div class="match">{cx["away"]} @ {cx["home"]}</div><div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div><div class="badge badge-pass">LIVE</div></div></div>',
+                        unsafe_allow_html=True,
+                    )
+            if final_now:
+                with st.expander(f"Final games — {len(final_now)}", expanded=False):
+                    for cx in sorted(final_now, key=start_sort):
+                        st.write(f'{cx["time"]} • {cx["away"]} @ {cx["home"]} — FINAL')
 
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
         if "show_slate_downloads" not in st.session_state:
