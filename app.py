@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.5.1-COMBINED-UPCOMING"
+APP_VERSION = "1.5.3-LIVE-SCORES"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -754,33 +754,51 @@ def totals_download_row(game_row, total_ctx, total_pick):
 
 
 def game_state(game):
-    """Return one of PREGAME / LIVE / FINAL / OTHER using MLB schedule status first."""
+    """Return PREGAME / LIVE / FINAL / OTHER.
+
+    Safety rule: stale MLB Preview/Scheduled status can never keep a game actionable
+    after its scheduled first-pitch time. Explicit delay/postponement states are the
+    only exception.
+    """
     if not game:
         return "OTHER"
+
     abstract = str(game.get("AbstractGameState") or "").strip().lower()
     detailed = str(game.get("DetailedState") or "").strip().lower()
     code = str(game.get("StatusCode") or "").strip().upper()
 
-    if abstract == "live" or any(x in detailed for x in ("in progress","manager challenge","review","warmup")):
-        return "LIVE"
+    # Terminal / active MLB states always win.
     if abstract == "final" or any(x in detailed for x in ("final","completed","game over")):
         return "FINAL"
+    if abstract == "live" or any(x in detailed for x in ("in progress","manager challenge","review","warmup")):
+        return "LIVE"
 
-    # MLB codes that are normally pregame/scheduled states.
-    if abstract == "preview" or code in {"S","P"} or any(x in detailed for x in ("scheduled","pre-game","pregame","delayed start")):
+    # Explicit delay/postponement should not be forced live merely because the
+    # original scheduled start time passed.
+    explicit_delay = any(
+        x in detailed for x in (
+            "delayed", "delay", "postponed", "suspended", "rain delay",
+            "weather delay", "delayed start"
+        )
+    )
+    if explicit_delay:
         return "PREGAME"
 
-    # Time fallback protects us if MLB status is stale/missing.
+    # Time is the hard safety gate for all other stale Preview/Scheduled states.
     try:
         start = pd.to_datetime(game.get("GameDate"), utc=True)
         now = pd.Timestamp.now(tz="UTC")
-        # Once first pitch time has arrived, never expose a pregame betting grade
-        # unless MLB explicitly still reports a preview/delayed-start state.
         if now >= start:
             return "LIVE"
         return "PREGAME"
     except Exception:
-        return "OTHER"
+        pass
+
+    # Only fall back to MLB Preview/Scheduled if time parsing failed.
+    if abstract == "preview" or code in {"S","P"} or any(x in detailed for x in ("scheduled","pre-game","pregame")):
+        return "PREGAME"
+
+    return "OTHER"
 
 def is_pregame(game):
     return game_state(game) == "PREGAME"
@@ -788,12 +806,71 @@ def is_pregame(game):
 def game_state_label(game):
     state = game_state(game)
     if state == "LIVE":
-        return "LIVE — betting recommendations disabled"
+        return "STARTED / LIVE — betting recommendations disabled"
     if state == "FINAL":
         return "FINAL — betting recommendations disabled"
     if state == "PREGAME":
         return "PREGAME"
     return "STATUS UNKNOWN"
+
+
+def live_score_text(game):
+    if not game:
+        return ""
+    away = game.get("Away") or "Away"
+    home = game.get("Home") or "Home"
+    a = game.get("Away_Score")
+    h = game.get("Home_Score")
+    if a is None or h is None:
+        return f"{away} @ {home}"
+    try:
+        return f"{away} {int(a)} — {home} {int(h)}"
+    except Exception:
+        return f"{away} {a} — {home} {h}"
+
+def inning_status_text(game):
+    """Human-friendly inning/outs label using the free MLB linescore."""
+    if not game:
+        return ""
+    state = game_state(game)
+    if state == "FINAL":
+        return "FINAL"
+    if state != "LIVE":
+        return game_state_label(game)
+
+    ordinal = game.get("Current_Inning_Ordinal")
+    inning = game.get("Current_Inning")
+    inning_state = str(game.get("Inning_State") or "").strip()
+    inning_half = str(game.get("Inning_Half") or "").strip()
+
+    # Prefer MLB's inningState (Top/Middle/Bottom/End) when present.
+    half = inning_state or inning_half
+    if not half and inning:
+        half = f"Inning {inning}"
+
+    if ordinal and half:
+        if ordinal.lower() not in half.lower():
+            label = f"{half} {ordinal}"
+        else:
+            label = half
+    elif ordinal:
+        label = str(ordinal)
+    elif half:
+        label = half
+    elif inning:
+        label = f"Inning {inning}"
+    else:
+        label = "LIVE"
+
+    outs = game.get("Outs")
+    try:
+        outs = int(outs)
+        if outs >= 0 and str(half).lower() not in ("middle", "end"):
+            label += f" • {outs} out" + ("" if outs == 1 else "s")
+    except Exception:
+        pass
+    return label
+
 
 def event_match(event, game):
     if not is_pregame(game):
@@ -1479,9 +1556,9 @@ slate_date=st.date_input(
 )
 load_all_odds=st.button("Update Odds — Moneyline + Totals",use_container_width=True,type="primary")
 st.caption("Manual only. This button refreshes both moneyline and totals markets together. Nothing calls The Odds API automatically.")
-st.caption("Started games move out of the betting board automatically.")
+st.caption("Started games move out of the betting board automatically. Live scores/innings use the free MLB Stats API.")
 
-free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
+free_refresh=st.button("Refresh Schedule + Live Scores (free)",use_container_width=True)
 if free_refresh:
     st.cache_data.clear()
     st.rerun()
@@ -1667,6 +1744,18 @@ else:
         selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup")
         x = single_pool[labels.index(selected_label)]
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
+
+        if single_group == "In Progress / Final":
+            state_now = game_state(selected_game)
+            status_now = inning_status_text(selected_game)
+            st.markdown(
+                f'<div class="best-card"><div class="best-top"><div>'
+                f'<div class="best-tag">{status_now}</div>'
+                f'<div class="best-pick">{live_score_text(selected_game)}</div>'
+                f'<div class="best-game">{x["away_sp"]} vs {x["home_sp"]}</div>'
+                f'</div><div class="badge badge-pass">{state_now}</div></div></div>',
+                unsafe_allow_html=True,
+            )
 
         st.caption("Browse for free. Update both markets for this matchup only when you want current prices.")
         selected_state = game_state(selected_game)
@@ -1867,13 +1956,31 @@ else:
 
         st.markdown('<div class="kicker">In Progress / Final</div>', unsafe_allow_html=True)
         if live_now:
-            with st.expander(f"Live games — {len(live_now)}", expanded=False):
+            with st.expander(f"Live games — {len(live_now)}", expanded=True):
                 for cx in live_now:
-                    st.write(f'LIVE • {cx["away"]} @ {cx["home"]}')
+                    g = next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    score = live_score_text(g)
+                    inning = inning_status_text(g)
+                    st.markdown(
+                        f'<div class="game-card"><div class="game-head"><div>'
+                        f'<div class="game-time">{inning}</div>'
+                        f'<div class="match">{score}</div>'
+                        f'<div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
+                        f'</div><div class="badge badge-pass">LIVE</div></div></div>',
+                        unsafe_allow_html=True,
+                    )
         if final_now:
             with st.expander(f"Final games — {len(final_now)}", expanded=False):
                 for cx in final_now:
-                    st.write(f'FINAL • {cx["away"]} @ {cx["home"]}')
+                    g = next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    st.markdown(
+                        f'<div class="game-card"><div class="game-head"><div>'
+                        f'<div class="game-time">FINAL</div>'
+                        f'<div class="match">{live_score_text(g)}</div>'
+                        f'<div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
+                        f'</div><div class="badge badge-pass">FINAL</div></div></div>',
+                        unsafe_allow_html=True,
+                    )
         if not live_now and not final_now:
             st.caption("No games have started yet.")
 

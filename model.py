@@ -160,7 +160,7 @@ def fetch_games_for_date(selected_date=None):
         day = today_et().strftime("%Y-%m-%d")
     data = get_json(
         f"{MLB_API}/v1/schedule",
-        {"sportId": 1, "date": day, "hydrate": "probablePitcher,venue"},
+        {"sportId": 1, "date": day, "hydrate": "probablePitcher,venue,linescore"},
         cache_key=("schedule", day),
     )
     games = []
@@ -195,6 +195,13 @@ def fetch_games_for_date(selected_date=None):
                 "AbstractGameState": (g.get("status", {}) or {}).get("abstractGameState", ""),
                 "DetailedState": (g.get("status", {}) or {}).get("detailedState", ""),
                 "StatusCode": (g.get("status", {}) or {}).get("statusCode", ""),
+                "Away_Score": away.get("score"),
+                "Home_Score": home.get("score"),
+                "Current_Inning": (g.get("linescore", {}) or {}).get("currentInning"),
+                "Current_Inning_Ordinal": (g.get("linescore", {}) or {}).get("currentInningOrdinal"),
+                "Inning_State": (g.get("linescore", {}) or {}).get("inningState"),
+                "Inning_Half": (g.get("linescore", {}) or {}).get("inningHalf"),
+                "Outs": (g.get("linescore", {}) or {}).get("outs"),
             })
     return games
 
