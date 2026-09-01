@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.8.0-VISUAL-BET-TRACKER"
+APP_VERSION = "1.8.2-PROFESSIONAL-NAV"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -538,6 +538,97 @@ div[data-testid="stAlert"][data-baseweb="notification"] {
   .top-play-main{font-size:.89rem}
 }
 
+
+/* v1.8.1 bottom navigation */
+div[class*="st-key-main_navigation"] {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    z-index: 999999 !important;
+    margin: 0 !important;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom)) !important;
+    background: rgba(7, 21, 36, .985) !important;
+    border-top: 1px solid #263e56 !important;
+    box-shadow: 0 -10px 28px rgba(0,0,0,.32) !important;
+}
+div[class*="st-key-main_navigation"] [role="radiogroup"] {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    max-width: 760px !important;
+    margin: 0 auto !important;
+}
+div[class*="st-key-main_navigation"] label {
+    min-height: 52px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 7px 3px !important;
+    border: 1px solid transparent !important;
+    border-radius: 13px !important;
+    background: transparent !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) {
+    background: #102b46 !important;
+    border-color: #3477ab !important;
+}
+div[class*="st-key-main_navigation"] label p {
+    color: #94a7ba !important;
+    font-size: .72rem !important;
+    font-weight: 850 !important;
+    white-space: nowrap !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) p {
+    color: #76c5ff !important;
+}
+div[class*="st-key-main_navigation"] input {
+    display: none !important;
+}
+.block-container {
+    padding-bottom: 110px !important;
+}
+
+/* actual occupied bases */
+.diamond-mini i.occupied {
+    background: #fbbf24 !important;
+    border-color: #fbbf24 !important;
+    box-shadow: 0 0 10px rgba(251,191,36,.28) !important;
+}
+.diamond-mini .base-second { left:15px !important; top:0 !important; }
+.diamond-mini .base-third { left:0 !important; top:15px !important; }
+.diamond-mini .base-first { right:0 !important; top:15px !important; }
+.diamond-mini .base-home { left:15px !important; bottom:0 !important; }
+
+/* quieter status chip, cleaner run axis */
+.track-pill {
+    font-size: .55rem !important;
+    padding: 5px 8px !important;
+}
+.run-axis span:last-child {
+    right: auto !important;
+}
+
+
+/* v1.8.2 professional bottom navigation */
+div[class*="st-key-main_navigation"] label {
+    min-height: 48px !important;
+    border-radius: 10px !important;
+}
+div[class*="st-key-main_navigation"] label p {
+    font-size: .74rem !important;
+    letter-spacing: .02em !important;
+    text-transform: uppercase !important;
+    font-weight: 900 !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) {
+    background: #0f2942 !important;
+    border-color: #3d6f98 !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) p {
+    color: #8fd0ff !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -972,6 +1063,9 @@ def fetch_fresh_scoreboard(date_text):
                 "Inning_State": linescore.get("inningState"),
                 "Inning_Half": linescore.get("inningHalf"),
                 "Outs": linescore.get("outs"),
+                "On_First": bool((linescore.get("offense", {}) or {}).get("first")),
+                "On_Second": bool((linescore.get("offense", {}) or {}).get("second")),
+                "On_Third": bool((linescore.get("offense", {}) or {}).get("third")),
                 "AbstractGameState": status.get("abstractGameState", ""),
                 "DetailedState": status.get("detailedState", ""),
                 "StatusCode": status.get("statusCode", ""),
@@ -1764,13 +1858,13 @@ def _total_visual(rec, game):
         if side == "UNDER":
             ratio = runs / max(expected_to_now, 0.75)
             if runs >= line:
-                status, status_cls = "AT RISK", "track-risk"
+                status, status_cls = "NEEDS SCORING", "track-risk"
             elif ratio <= 0.90:
                 status, status_cls = "TRACKING WELL", "track-good"
             elif ratio <= 1.20:
-                status, status_cls = "NEUTRAL", "track-neutral"
+                status, status_cls = "ON PACE", "track-neutral"
             else:
-                status, status_cls = "AT RISK", "track-risk"
+                status, status_cls = "NEEDS SCORING", "track-risk"
         else:
             ratio = runs / max(expected_to_now, 0.75)
             if runs > line:
@@ -1778,9 +1872,9 @@ def _total_visual(rec, game):
             elif ratio >= 1.10:
                 status, status_cls = "TRACKING WELL", "track-good"
             elif ratio >= 0.80:
-                status, status_cls = "NEUTRAL", "track-neutral"
+                status, status_cls = "ON PACE", "track-neutral"
             else:
-                status, status_cls = "BEHIND PACE", "track-risk"
+                status, status_cls = "NEEDS SCORING", "track-risk"
 
     scale_max = max(line * 1.65, runs + 2, 12)
     fill_pct = max(0, min(100, runs / scale_max * 100))
@@ -1797,7 +1891,7 @@ def _total_visual(rec, game):
         f'<div class="run-fill {status_cls}" style="width:{fill_pct:.1f}%"></div>'
         f'<div class="line-marker" style="left:{line_pct:.1f}%"></div>'
         f'</div>'
-        f'<div class="run-axis"><span>0</span><span style="left:{line_pct:.1f}%">{line:g}</span><span>{scale_max:.0f}+</span></div>'
+        f'<div class="run-axis"><span>0</span><span style="left:{line_pct:.1f}%">{line:g}</span></div>'
     )
     return html, status_cls, status
 
@@ -1882,7 +1976,12 @@ def _visual_tracked_card(rec, game):
         f'<div class="score-teams">{_score_rows(game)}</div>'
         f'<div class="live-meta"><div class="live-dot-wrap"><span class="mini-dot"></span>{state_label}</div>'
         f'<div class="inning-meta">{inning}</div></div>'
-        f'<div class="diamond-mini"><i></i><i></i><i></i><i></i></div>'
+        f'<div class="diamond-mini">'
+        f'<i class="base-second {"occupied" if game.get("On_Second") else ""}"></i>'
+        f'<i class="base-third {"occupied" if game.get("On_Third") else ""}"></i>'
+        f'<i class="base-first {"occupied" if game.get("On_First") else ""}"></i>'
+        f'<i class="base-home"></i>'
+        f'</div>'
         f'</div>'
         f'<div class="visual-divider"></div>'
         f'{bet_html}'
@@ -2014,7 +2113,7 @@ st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">MLB Edge</div>
-  <div class="sub">Betting board, live scores, and model performance — separated so each view stays simple.</div>
+  <div class="sub">Upcoming recommendations, live tracking, and model performance.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -2101,19 +2200,18 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
-    st.markdown('<div class="kicker">Navigation</div>', unsafe_allow_html=True)
     main_view = st.radio(
         "Navigation",
-        ["Betting Board", "Bet Tracker", "Performance"],
+        ["Board", "Tracker", "Performance"],
         horizontal=True,
         label_visibility="collapsed",
         key="main_navigation",
     )
 
-    if main_view == "Bet Tracker":
+    if main_view == "Tracker":
         tracker_df = load_tracker()
         render_live_scoreboard(games, fresh_scoreboard, tracker_df)
-        st.caption("Live tracking is visual only; the app does not generate in-game betting recommendations.")
+        st.caption("Visual tracking only — no in-game recommendations.")
         st.stop()
 
     if main_view == "Performance":
@@ -2142,7 +2240,7 @@ else:
         single_group = "Upcoming"
         single_pool = upcoming_single
         if not single_pool:
-            st.info("No upcoming games remain. Use the **Bet Tracker** tab for games already underway or final.")
+            st.info("No upcoming games remain. Use the **Tracker** tab for games already underway or final.")
             st.stop()
         labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
         st.markdown('<div class="kicker">Matchup</div>', unsafe_allow_html=True)
@@ -2180,9 +2278,9 @@ else:
         st.markdown('<div class="kicker">Moneyline</div>', unsafe_allow_html=True)
         if x.get("market_available") and (x.get("best") or {}).get("selection") in ("BET","BEST BET"):
             if _trk_ok:
-                st.caption("📌 Tracker status: **QUALIFIED** — this recommendation is eligible to be frozen in forward performance.")
+                st.caption("Tracker status: **QUALIFIED** — this recommendation is eligible to be frozen in forward performance.")
             else:
-                st.caption(f"🕒 Tracker status: **EARLY SIGNAL** — not yet counted in headline performance ({_trk_reason}).")
+                st.caption(f"Tracker status: **EARLY SIGNAL** — not yet counted in headline performance ({_trk_reason}).")
         if x["market_available"]:
             st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">{b['selection']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="metrics"><div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div><div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div><div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div></div>''', unsafe_allow_html=True)
         else:
