@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.0-AUTO-FREE-DATA"
+APP_VERSION = "3.2.1-BANNER-EMBED"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1540,17 +1540,51 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
 }
 
 
-/* v3.1.1 self-contained embedded logo */
+/* v3.2.1 embedded brand banner */
 .ninth-brand-header{
+    position:relative;
     display:grid;
-    grid-template-columns:92px minmax(0,1fr);
-    gap:12px;
+    grid-template-columns:128px minmax(0,1fr);
+    gap:18px;
     align-items:center;
-    margin:2px 0 8px;
+    margin:4px 0 14px;
+    padding:18px 18px 18px 16px;
+    border-radius:26px;
+    overflow:hidden;
+    background:
+        radial-gradient(circle at 16% 28%, rgba(0,185,255,.30), transparent 28%),
+        radial-gradient(circle at 84% 78%, rgba(0,185,255,.12), transparent 24%),
+        linear-gradient(90deg, rgba(2,12,31,.98) 0%, rgba(3,23,56,.98) 48%, rgba(2,12,28,.98) 100%);
+    border:1px solid rgba(71,139,255,.22);
+    box-shadow:0 18px 42px rgba(0,0,0,.32), inset 0 0 0 1px rgba(255,255,255,.02);
+}
+.ninth-brand-header::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    background:
+        linear-gradient(135deg, transparent 0%, rgba(56,189,248,.08) 34%, transparent 35%),
+        repeating-linear-gradient(90deg, transparent 0 46px, rgba(71,139,255,.05) 46px 47px);
+    opacity:.55;
+}
+.ninth-brand-header::after{
+    content:"";
+    position:absolute;
+    right:-74px;
+    top:-72px;
+    width:240px;
+    height:240px;
+    border-radius:50%;
+    pointer-events:none;
+    background:radial-gradient(circle, rgba(34,211,238,.22) 0%, rgba(34,211,238,.08) 48%, transparent 70%);
+    filter:blur(8px);
 }
 .ninth-brand-mark{
-    width:92px;
-    height:92px;
+    position:relative;
+    z-index:1;
+    width:128px;
+    height:128px;
     display:flex;
     align-items:center;
     justify-content:center;
@@ -1559,7 +1593,53 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     width:100%;
     height:100%;
     object-fit:contain;
-    filter:drop-shadow(0 10px 22px rgba(0,0,0,.22));
+    filter:drop-shadow(0 16px 28px rgba(0,0,0,.34));
+}
+.branded-hero-copy{
+    position:relative;
+    z-index:1;
+    padding:0 !important;
+}
+.ninth-brand-header .eyebrow{
+    font-size:.68rem !important;
+    font-weight:950 !important;
+    letter-spacing:.22em !important;
+    color:#82ddff !important;
+    margin-bottom:4px !important;
+}
+.ninth-brand-header .title{
+    font-size:clamp(2.15rem, 5vw, 3.9rem) !important;
+    line-height:.95 !important;
+    letter-spacing:-.06em !important;
+    font-weight:1000 !important;
+    color:#f4f8ff !important;
+    text-shadow:0 10px 26px rgba(0,0,0,.30);
+}
+.ninth-brand-header .title .signal{
+    background:linear-gradient(180deg, #f7fbff 0%, #bfdcff 42%, #1da8ff 100%);
+    -webkit-background-clip:text;
+    background-clip:text;
+    color:transparent;
+}
+.ninth-brand-header .sub{
+    font-size:.92rem !important;
+    color:#c8d7e8 !important;
+    margin-top:8px !important;
+    max-width:460px !important;
+    line-height:1.42 !important;
+}
+.ninth-brand-header .pill{
+    display:inline-flex;
+    margin-top:14px !important;
+    padding:8px 16px !important;
+    border-radius:999px;
+    background:rgba(34,197,94,.08) !important;
+    border:1px solid rgba(34,197,94,.30) !important;
+    color:#aef5c2 !important;
+    font-size:.74rem !important;
+    font-weight:950 !important;
+    letter-spacing:.09em !important;
+    box-shadow:0 8px 18px rgba(0,0,0,.18);
 }
 .ninth-full-logo{
     width:min(100%,720px);
@@ -1573,12 +1653,26 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
 }
 @media(max-width:700px){
     .ninth-brand-header{
-        grid-template-columns:76px minmax(0,1fr);
-        gap:10px;
+        grid-template-columns:96px minmax(0,1fr);
+        gap:12px;
+        padding:14px 14px 14px 12px;
+        border-radius:22px;
     }
     .ninth-brand-mark{
-        width:76px;
-        height:76px;
+        width:96px;
+        height:96px;
+    }
+    .ninth-brand-header .title{
+        font-size:2rem !important;
+    }
+    .ninth-brand-header .sub{
+        font-size:.82rem !important;
+        max-width:100% !important;
+    }
+    .ninth-brand-header .pill{
+        margin-top:12px !important;
+        padding:7px 13px !important;
+        font-size:.68rem !important;
     }
 }
 
@@ -3514,7 +3608,7 @@ st.markdown("""
   </div>
   <div class="hero ninth-hero branded-hero-copy">
     <div class="eyebrow">BASEBALL MARKET SIGNALS</div>
-    <div class="title">Ninth Signal</div>
+    <div class="title"><span>Ninth</span> <span class="signal">Signal</span></div>
     <div class="sub">Pregame model signals, live tracking, and forward performance.</div>
     <div class="pill">MODEL LIVE</div>
   </div>
