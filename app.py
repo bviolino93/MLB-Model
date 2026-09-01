@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "2.0.1-FULL-WIDTH-NAV"
+APP_VERSION = "2.0.2-TRACKER-DTYPE-HOTFIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -2122,11 +2122,35 @@ def empty_tracker():
 def _tracker_clean(df):
     if df is None or df.empty:
         return empty_tracker()
+
     out = df.copy()
     for c in TRACKER_COLUMNS:
         if c not in out.columns:
             out[c] = None
-    return out[TRACKER_COLUMNS]
+
+    out = out[TRACKER_COLUMNS].copy()
+
+    # Older tracker CSVs can load entirely blank timestamp/text columns as
+    # float64. Later assigning an ISO timestamp string then raises TypeError.
+    object_cols = [
+        "Record_Key","Logged_At_ET","Slate_Date","Game","Start_Time_UTC",
+        "Market","Pick","Side","Book","Grade","App_Version","Model_Version",
+        "Result","Graded_At_ET",
+    ]
+    for c in object_cols:
+        if c in out.columns:
+            out[c] = out[c].astype("object")
+
+    numeric_cols = [
+        "GamePk","Market_Line","Odds","Model_Probability","Edge","EV",
+        "Fair_Line","Model_Weight","Market_Weight","Model_Confidence",
+        "Units","Final_Away_Score","Final_Home_Score","Final_Total",
+    ]
+    for c in numeric_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    return out
 
 def load_tracker():
     if "_model_tracker_df" in st.session_state:
@@ -2324,6 +2348,10 @@ def _american_profit(odds):
 def grade_tracker(force=False):
     """Automatically grade pending recommendations once MLB marks the game final."""
     df = load_tracker()
+
+    # Defensive normalization for tracker files created before v2.0.2.
+    if "Graded_At_ET" in df.columns:
+        df["Graded_At_ET"] = df["Graded_At_ET"].astype("object")
     if df.empty:
         return 0
     pending_mask = df["Result"].fillna("PENDING").astype(str).eq("PENDING")
