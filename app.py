@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.7.1-DUPLICATE-KEY-FIX"
+APP_VERSION = "1.7.2-TOP-PLAYS-CHRONO"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -481,6 +481,20 @@ div[data-testid="stAlert"][data-baseweb="notification"] {
 @media(max-width:700px){
   .score-card{padding:12px}
   .score-main{font-size:.98rem}
+}
+
+
+/* v1.7.2 top plays */
+.top-play-card{
+    margin:8px 0;padding:12px 14px;border-radius:14px;
+    background:#0c1d2e;border:1px solid #2b465e;
+}
+.top-play-rank{font-size:.60rem;font-weight:950;color:#7dd3fc;letter-spacing:.08em}
+.top-play-main{font-size:.94rem;font-weight:950;color:#fff;margin-top:2px;line-height:1.22}
+.top-play-sub{font-size:.64rem;color:#9fb1c2;margin-top:3px}
+@media(max-width:700px){
+  .top-play-card{padding:11px 12px}
+  .top-play-main{font-size:.89rem}
 }
 
 </style>
@@ -2076,7 +2090,6 @@ else:
         live_now = sorted([x for x in candidates if x.get("game_state") == "LIVE"], key=start_sort)
         final_now = sorted([x for x in candidates if x.get("game_state") == "FINAL"], key=start_sort)
 
-        st.markdown('<div class="kicker">Upcoming Games</div>', unsafe_allow_html=True)
         if not st.session_state.get("odds_loaded") or not st.session_state.get("totals_loaded"):
             st.caption("Model view shown below. Tap **Update Full Slate Odds** above for current BET / LEAN / PASS grades.")
         if not upcoming:
@@ -2098,15 +2111,66 @@ else:
                     tp = build_total_pick(float(ctx["Projected_Total"]), tm) if tm else None
                     total_map[cx["GamePk"]] = (tp, ctx)
 
-            # Actionable games first; otherwise chronological.
-            def combined_priority(cx):
-                ml_grade = (cx.get("best") or {}).get("selection") if cx.get("market_available") else "MODEL"
-                tp = (total_map.get(cx["GamePk"]) or (None,None))[0]
-                total_grade = tp.get("grade") if tp else "MODEL"
-                rank = {"BEST BET":4,"BET":3,"LEAN":2,"PASS":1,"MODEL":0,"MODEL ONLY":0}
-                return (-max(rank.get(ml_grade,0), rank.get(total_grade,0)), start_sort(cx))
+            # Top Plays = strongest actionable markets only.
+            # Upcoming Games below stays purely chronological for easy scanning.
+            top_plays = []
+            grade_rank = {"BEST BET":3, "BET":2, "LEAN":1}
 
-            for cx in sorted(upcoming, key=combined_priority):
+            for cx in upcoming:
+                b0 = cx.get("best") or {}
+                if cx.get("market_available") and b0.get("selection") in grade_rank:
+                    top_plays.append({
+                        "game": cx,
+                        "market": "ML",
+                        "grade": b0.get("selection"),
+                        "main": f'{b0.get("team")} ML {b0.get("odds"):+d}',
+                        "book": b0.get("book"),
+                        "edge": float(b0.get("edge") or 0),
+                        "ev": float(b0.get("ev") or 0),
+                    })
+
+                tp0 = (total_map.get(cx["GamePk"]) or (None,None))[0]
+                if tp0 and tp0.get("grade") in grade_rank:
+                    top_plays.append({
+                        "game": cx,
+                        "market": "TOTAL",
+                        "grade": tp0.get("grade"),
+                        "main": f'{tp0.get("side")} {tp0.get("market_total"):.1f} {tp0.get("odds"):+d}',
+                        "book": tp0.get("book"),
+                        "edge": float(tp0.get("edge") or 0),
+                        "ev": float(tp0.get("ev") or 0),
+                    })
+
+            top_plays = sorted(
+                top_plays,
+                key=lambda p: (
+                    -grade_rank.get(p["grade"], 0),
+                    -p["edge"],
+                    -p["ev"],
+                    start_sort(p["game"]),
+                ),
+            )
+
+            st.markdown('<div class="kicker">Top Plays</div>', unsafe_allow_html=True)
+            if top_plays:
+                for n, p in enumerate(top_plays[:5], start=1):
+                    gx = p["game"]
+                    st.markdown(
+                        f'<div class="top-play-card">'
+                        f'<div class="top-play-rank">#{n} • {p["grade"]} • {p["market"]} • {gx["time"]}</div>'
+                        f'<div class="top-play-main">{p["main"]}</div>'
+                        f'<div class="top-play-sub">{gx["away"]} @ {gx["home"]} • {p["book"]} • Edge {p["edge"]*100:+.1f}% • EV {p["ev"]*100:+.1f}%</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+            elif st.session_state.get("odds_loaded") or st.session_state.get("totals_loaded"):
+                st.caption("No BET / BEST BET / LEAN plays currently qualify.")
+            else:
+                st.caption("Update Full Slate Odds to rank the strongest current plays.")
+
+            st.markdown('<div class="kicker">Upcoming Games — Chronological</div>', unsafe_allow_html=True)
+
+            for cx in sorted(upcoming, key=start_sort):
                 b = cx.get("best") or {}
                 if cx.get("market_available"):
                     ml_grade = b.get("selection","PASS")
