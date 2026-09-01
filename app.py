@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.2.0.2-TOTALS-MARKET-TIE-FIX"
+APP_VERSION = "1.2.0.3-TOTALS-DOWNLOAD"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -337,7 +337,98 @@ def build_total_pick(model_total, tm):
         "over_book":tm["over_book"],"under_book":tm["under_book"],
     }
 
+
+def totals_download_row(game_row, total_ctx, total_pick):
+    """Flatten one totals recommendation into a CSV-friendly row."""
+    out = {
+        "GamePk": game_row.get("GamePk"),
+        "GameDate": game_row.get("GameDate"),
+        "Start_Time": game_row.get("Start_Time"),
+        "Away_Team": game_row.get("Away_Team"),
+        "Home_Team": game_row.get("Home_Team"),
+        "Away_SP": game_row.get("Away_SP"),
+        "Home_SP": game_row.get("Home_SP"),
+        "Lineups_Confirmed": game_row.get("Lineups_Confirmed"),
+        "Raw_Model_Total": total_ctx.get("Projected_Total"),
+        "Base_Total": total_ctx.get("Base_Total"),
+        "Park_Factor_Context": total_ctx.get("Park_Factor"),
+        "Weather_Factor_Context": total_ctx.get("Weather_Factor"),
+        "Temperature_F": total_ctx.get("Temp"),
+        "Wind": total_ctx.get("Wind"),
+        "Humidity": total_ctx.get("Humidity"),
+        "Precip": total_ctx.get("Precip"),
+    }
+    if total_pick:
+        out.update({
+            "Market_Total": total_pick.get("market_total"),
+            "Side": total_pick.get("side"),
+            "Grade": total_pick.get("grade"),
+            "Odds": total_pick.get("odds"),
+            "Book": total_pick.get("book"),
+            "Bet_Probability": total_pick.get("prob"),
+            "Edge": total_pick.get("edge"),
+            "EV": total_pick.get("ev"),
+            "Calibrated_Total": total_pick.get("calibrated_total"),
+            "Model_Weight": TOTALS_MODEL_WEIGHT,
+            "Over_Probability": total_pick.get("over_prob"),
+            "Under_Probability": total_pick.get("under_prob"),
+            "Over_Edge": total_pick.get("over_edge"),
+            "Under_Edge": total_pick.get("under_edge"),
+            "Over_Odds": total_pick.get("over_odds"),
+            "Under_Odds": total_pick.get("under_odds"),
+            "Over_Book": total_pick.get("over_book"),
+            "Under_Book": total_pick.get("under_book"),
+            "Books_In_Consensus": total_pick.get("books"),
+        })
+    return out
+
+
+
+def game_state(game):
+    """Return one of PREGAME / LIVE / FINAL / OTHER using MLB schedule status first."""
+    if not game:
+        return "OTHER"
+    abstract = str(game.get("AbstractGameState") or "").strip().lower()
+    detailed = str(game.get("DetailedState") or "").strip().lower()
+    code = str(game.get("StatusCode") or "").strip().upper()
+
+    if abstract == "live" or any(x in detailed for x in ("in progress","manager challenge","review","warmup")):
+        return "LIVE"
+    if abstract == "final" or any(x in detailed for x in ("final","completed","game over")):
+        return "FINAL"
+
+    # MLB codes that are normally pregame/scheduled states.
+    if abstract == "preview" or code in {"S","P"} or any(x in detailed for x in ("scheduled","pre-game","pregame","delayed start")):
+        return "PREGAME"
+
+    # Time fallback protects us if MLB status is stale/missing.
+    try:
+        start = pd.to_datetime(game.get("GameDate"), utc=True)
+        now = pd.Timestamp.now(tz="UTC")
+        # Once first pitch time has arrived, never expose a pregame betting grade
+        # unless MLB explicitly still reports a preview/delayed-start state.
+        if now >= start:
+            return "LIVE"
+        return "PREGAME"
+    except Exception:
+        return "OTHER"
+
+def is_pregame(game):
+    return game_state(game) == "PREGAME"
+
+def game_state_label(game):
+    state = game_state(game)
+    if state == "LIVE":
+        return "LIVE — betting recommendations disabled"
+    if state == "FINAL":
+        return "FINAL — betting recommendations disabled"
+    if state == "PREGAME":
+        return "PREGAME"
+    return "STATUS UNKNOWN"
+
 def event_match(event, game):
+    if not is_pregame(game):
+        return None
     if team_key(event.get("away_team")) != team_key(game.get("Away")) or team_key(event.get("home_team")) != team_key(game.get("Home")):
         return None
     try:
@@ -460,8 +551,8 @@ def build_candidates(model_df, games, events):
     out=[]
     for _,r in model_df.iterrows():
         g=game_map.get(r["GamePk"],{})
-        event=match_event(events,g)
-        m=moneyline_market(event)
+        event=match_event(events,g) if is_pregame(g) else None
+        m=moneyline_market(event) if is_pregame(g) else None
         confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
         conf=int(r["Model_Confidence"])
         alpha=model_alpha(conf,confirmed)
@@ -502,6 +593,8 @@ def build_candidates(model_df, games, events):
             "away_proj":float(r["Away_Proj_Runs"]),"home_proj":float(r["Home_Proj_Runs"]),
             "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons",""),"market_available":market_available,
             "model_row": r.to_dict(),
+            "game_state": game_state(g),
+            "pregame": is_pregame(g),
         })
     order={"BEST BET":5,"BET":4,"LEAN":3,"MODEL ONLY":2,"PASS":1}
     out.sort(key=lambda x:(order.get(x["best"].get("selection"),0), x["best"].get("smart_score",-999)),reverse=True)
@@ -624,6 +717,7 @@ with ctrl3:
     st.caption("Totals market")
     load_totals_market=st.button("Load Full Slate Totals Odds",use_container_width=True)
 st.caption("Nothing calls The Odds API automatically. Moneyline and totals are separate manual pulls so you control credits.")
+st.caption("Pregame only: once MLB marks a game live/final (or scheduled first-pitch time has passed), its odds are removed from BET/LEAN cards and single-game odds buttons are disabled.")
 
 free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
 if free_refresh:
@@ -667,8 +761,10 @@ if st.session_state.get("odds_loaded"):
     qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Live odds loaded manually"
 else:
     qtxt="Market not loaded • 0 Odds API credits used"
-priced_games=sum(1 for x in candidates if x.get("market_available"))
-st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {slate_date.strftime("%b %-d")} • {len(candidates)} games modeled • {priced_games} with live prices</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+priced_games=sum(1 for x in candidates if x.get("market_available") and x.get("pregame"))
+pregame_games=sum(1 for x in candidates if x.get("pregame"))
+started_games=sum(1 for x in candidates if x.get("game_state") in ("LIVE","FINAL"))
+st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MODEL LIVE</span> &nbsp; {slate_date.strftime("%b %-d")} • {pregame_games} pregame • {priced_games} priced • {started_games} started/final</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
@@ -701,13 +797,21 @@ else:
 
     if mode == "🎯 Single Game":
         chrono = sorted(candidates, key=start_sort)
-        labels = [f"{x['time']} • {x['away']} @ {x['home']}" for x in chrono]
+        labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in chrono]
         selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup")
         x = chrono[labels.index(selected_label)]
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
         st.caption("Selecting a matchup does **not** call the odds API. Tap below only when you want this game's live moneyline.")
-        pull_single = st.button("Load / Refresh Odds for This Game", use_container_width=True, type="primary")
+        selected_state = game_state(selected_game)
+        if selected_state != "PREGAME":
+            st.warning(game_state_label(selected_game) + ". Historical/pregame prices are not shown as actionable live bets.")
+        pull_single = st.button(
+            "Load / Refresh Odds for This Game",
+            use_container_width=True,
+            type="primary",
+            disabled=(selected_state != "PREGAME"),
+        )
         if pull_single:
             payload = fetch_single_game_odds(api_key, selected_game)
             st.session_state.odds_payload = payload
@@ -756,7 +860,12 @@ else:
 
         st.markdown('<div class="kicker">Totals</div>', unsafe_allow_html=True)
         st.caption("Production totals are separate from moneyline. The market is only pulled when you tap the button below.")
-        pull_total=st.button("Load / Refresh Total for This Game",use_container_width=True,key=f"pull_total_{x['GamePk']}")
+        pull_total=st.button(
+            "Load / Refresh Total for This Game",
+            use_container_width=True,
+            key=f"pull_total_{x['GamePk']}",
+            disabled=(game_state(selected_game) != "PREGAME"),
+        )
         if pull_total:
             st.session_state.totals_payload=fetch_single_game_totals(api_key,selected_game)
             st.session_state.totals_loaded=True
@@ -778,6 +887,20 @@ else:
         else:
             temp_txt = f'{float(tctx["Temp"]):.0f}°F' if tctx.get("Temp") is not None and pd.notna(tctx.get("Temp")) else "—"
             st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS MODEL VIEW</div><div class="best-pick">Projected total {raw_total:.2f}</div><div class="best-game">Load this game's total only when you want an official market grade.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Projected total</span><b>{raw_total:.2f}</b></div><div class="metric"><span>Park context</span><b>{float(tctx.get("Park_Factor",1.0)):.3f}</b></div><div class="metric"><span>Temperature</span><b>{temp_txt}</b></div><div class="metric"><span>Lineups</span><b>{"CONFIRMED" if x["lineup_confirmed"] else "WAIT"}</b></div></div></div>''',unsafe_allow_html=True)
+
+
+        st.markdown('<div class="kicker">Totals Download</div>', unsafe_allow_html=True)
+        total_download_row = totals_download_row(row_for_total, tctx, tp if tm and 'tp' in locals() else None)
+        total_download_df = pd.DataFrame([total_download_row])
+        st.download_button(
+            "Download This Game's Totals CSV",
+            data=total_download_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"mlb_game_totals_{x['GamePk']}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key=f"download_total_{x['GamePk']}",
+        )
+        st.caption("This download does not call The Odds API. It exports the totals data already loaded for this game.")
 
         st.markdown('<div class="kicker">Game Data</div>', unsafe_allow_html=True)
         if "show_single_downloads" not in st.session_state:
@@ -849,6 +972,8 @@ else:
         else:
             total_rows=[]
             for cx in sorted(candidates,key=start_sort):
+                if not cx.get("pregame"):
+                    continue
                 mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
                 if mr.empty:
                     continue
@@ -890,6 +1015,36 @@ else:
             with st.expander(f"Other totals — {len(other_totals)} PASS",expanded=False):
                 for cx,tp,ctx in other_totals:
                     st.write(f'{cx["time"]} • {cx["away"]} @ {cx["home"]} — {tp["side"]} {tp["market_total"]:.1f} • edge {tp["edge"]*100:+.1f}% • model {float(ctx["Projected_Total"]):.2f}')
+
+
+        if st.session_state.get("totals_loaded"):
+            totals_export_rows = []
+            for cx in sorted(candidates, key=start_sort):
+                if not cx.get("pregame"):
+                    continue
+                mr = model_df.loc[model_df["GamePk"] == cx["GamePk"]]
+                if mr.empty:
+                    continue
+                row_dict = mr.iloc[0].to_dict()
+                ctx = engine.totals_projection(row_dict) if hasattr(engine, "totals_projection") else {
+                    "Projected_Total": cx["away_proj"] + cx["home_proj"]
+                }
+                game_obj = next((g for g in games if g.get("GamePk") == cx["GamePk"]), None)
+                ev = match_event(totals_payload.get("events", []), game_obj) if game_obj else None
+                tm = totals_market(ev)
+                tp = build_total_pick(float(ctx["Projected_Total"]), tm) if tm else None
+                totals_export_rows.append(totals_download_row(row_dict, ctx, tp))
+            if totals_export_rows:
+                totals_export_df = pd.DataFrame(totals_export_rows)
+                st.download_button(
+                    "Download Full Slate Totals CSV",
+                    data=totals_export_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"mlb_totals_board_{selected_date}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_full_totals_csv",
+                )
+                st.caption("Exports the totals board already in memory. No additional Odds API credits are used.")
 
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
         if "show_slate_downloads" not in st.session_state:

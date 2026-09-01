@@ -192,6 +192,9 @@ def fetch_games_for_date(selected_date=None):
                 "HoursToGame": hours_to_game,
                 "GameNumber": int(safe_float(g.get("gameNumber"), 1)),
                 "DoubleHeader": g.get("doubleHeader", "N"),
+                "AbstractGameState": (g.get("status", {}) or {}).get("abstractGameState", ""),
+                "DetailedState": (g.get("status", {}) or {}).get("detailedState", ""),
+                "StatusCode": (g.get("status", {}) or {}).get("statusCode", ""),
             })
     return games
 
