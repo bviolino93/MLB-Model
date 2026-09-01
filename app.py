@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.9.2-NAV-PULSE-VISIBILITY"
+APP_VERSION = "2.0.0-FIVE-TAB-NAV"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1112,6 +1112,131 @@ div[class*="st-key-main_navigation"] legend {
     margin-top:3px;
     font-size:.58rem;
     color:#9eb2c5;
+}
+
+
+/* v2.0.0 mockup-style five-tab bottom navigation */
+div[class*="st-key-main_navigation"] {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    z-index: 999999 !important;
+    margin: 0 !important;
+    padding: 7px 14px calc(7px + env(safe-area-inset-bottom)) !important;
+    min-height: 76px !important;
+    background:
+      linear-gradient(180deg,rgba(8,24,40,.97),rgba(5,17,29,.995)) !important;
+    border-top: 1px solid #29445d !important;
+    box-shadow: 0 -12px 30px rgba(0,0,0,.30) !important;
+    backdrop-filter: blur(20px) !important;
+}
+div[class*="st-key-main_navigation"] [role="radiogroup"] {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0,1fr)) !important;
+    gap: 2px !important;
+    max-width: 760px !important;
+    margin: 0 auto !important;
+}
+div[class*="st-key-main_navigation"] label {
+    min-width: 0 !important;
+    min-height: 62px !important;
+    padding: 5px 2px 3px !important;
+    border: 0 !important;
+    border-radius: 12px !important;
+    background: transparent !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    transition: all .15s ease !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) {
+    background: rgba(34,112,177,.10) !important;
+    box-shadow: none !important;
+}
+div[class*="st-key-main_navigation"] input {
+    display: none !important;
+}
+div[class*="st-key-main_navigation"] label p {
+    margin: 0 !important;
+    color: #7f93a8 !important;
+    font-size: .58rem !important;
+    font-weight: 750 !important;
+    letter-spacing: .01em !important;
+    text-transform: none !important;
+    white-space: nowrap !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) p {
+    color: #3da5ff !important;
+    font-weight: 900 !important;
+}
+
+/* shared icon shell */
+div[class*="st-key-main_navigation"] label::before {
+    content:"" !important;
+    display:block !important;
+    width:25px !important;
+    height:25px !important;
+    background-color:#74889c !important;
+    -webkit-mask-size:contain !important;
+    -webkit-mask-repeat:no-repeat !important;
+    -webkit-mask-position:center !important;
+    mask-size:contain !important;
+    mask-repeat:no-repeat !important;
+    mask-position:center !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked)::before {
+    background-color:#3da5ff !important;
+    filter:drop-shadow(0 0 8px rgba(61,165,255,.28)) !important;
+}
+
+/* Home */
+div[class*="st-key-main_navigation"] label:nth-child(1)::before {
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E") !important;
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E") !important;
+}
+/* Live */
+div[class*="st-key-main_navigation"] label:nth-child(2)::before {
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E") !important;
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E") !important;
+}
+/* Tracker */
+div[class*="st-key-main_navigation"] label:nth-child(3)::before {
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E") !important;
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E") !important;
+}
+/* Bets */
+div[class*="st-key-main_navigation"] label:nth-child(4)::before {
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E") !important;
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E") !important;
+}
+/* Account */
+div[class*="st-key-main_navigation"] label:nth-child(5)::before {
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E") !important;
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E") !important;
+}
+
+.block-container {
+    padding-bottom: 104px !important;
+}
+
+/* dedicated page headers */
+.page-head{margin:4px 0 16px}
+.page-kicker{font-size:.54rem;font-weight:950;letter-spacing:.13em;color:#69d8ca}
+.page-title{font-size:1.7rem;font-weight:950;color:#fff;letter-spacing:-.03em;margin-top:3px}
+.page-count{display:inline-flex;min-width:27px;height:27px;align-items:center;justify-content:center;padding:0 7px;border-radius:8px;background:#20364f;font-size:.78rem;vertical-align:middle}
+.page-sub{font-size:.72rem;color:#9db0c2;margin-top:5px}
+.live-page-card{margin:10px 0;padding:14px;border-radius:17px;background:linear-gradient(180deg,#11273d,#0b1c2e);border:1px solid #34556f}
+.account-card{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0 16px}
+.account-card div{padding:12px;border-radius:12px;background:#0d2032;border:1px solid #29475f}
+.account-card span{display:block;font-size:.52rem;font-weight:900;letter-spacing:.09em;color:#8ea4b8}
+.account-card b{display:block;margin-top:4px;font-size:.72rem;color:#fff;word-break:break-word}
+@media(max-width:700px){
+    div[class*="st-key-main_navigation"] {padding-left:8px !important;padding-right:8px !important}
+    div[class*="st-key-main_navigation"] label::before {width:23px !important;height:23px !important}
+    div[class*="st-key-main_navigation"] label p {font-size:.54rem !important}
 }
 
 </style>
@@ -2776,6 +2901,87 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
                 )
 
 
+
+def render_live_games_page(games, fresh_scoreboard):
+    """Dedicated scores page: all live games first, finals collapsed below."""
+    fresh_games = []
+    for g0 in games:
+        g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
+        state = game_state(g)
+        if state in ("LIVE", "FINAL"):
+            fresh_games.append(g)
+
+    live_list = [g for g in fresh_games if game_state(g) == "LIVE"]
+    final_list = [g for g in fresh_games if game_state(g) == "FINAL"]
+
+    st.markdown(
+        f'<div class="page-head">'
+        f'<div class="page-kicker">LIVE SCOREBOARD</div>'
+        f'<div class="page-title">Live <span class="page-count">{len(live_list)}</span></div>'
+        f'<div class="page-sub">Scores, inning status, baserunners and MLB live win probability.</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    if live_list:
+        for g in live_list:
+            wp = fetch_live_win_probability(g.get("GamePk"))
+            st.markdown(
+                f'<div class="live-page-card">'
+                f'<div class="visual-score-head">'
+                f'<div class="score-teams">{_score_rows(g)}</div>'
+                f'<div class="live-meta"><div class="live-dot-wrap"><span class="mini-dot"></span>LIVE</div>'
+                f'<div class="inning-meta">{inning_status_text(g)}</div></div>'
+                f'<div class="diamond-mini">'
+                f'<i class="base-second {"occupied" if g.get("On_Second") else ""}"></i>'
+                f'<i class="base-third {"occupied" if g.get("On_Third") else ""}"></i>'
+                f'<i class="base-first {"occupied" if g.get("On_First") else ""}"></i>'
+                f'<i class="base-home"></i>'
+                f'</div>'
+                f'</div>'
+                f'{_game_win_probability_html(g, wp)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No games are currently live.")
+
+    if final_list:
+        with st.expander(f"Final Games — {len(final_list)}", expanded=False):
+            for g in final_list:
+                st.markdown(
+                    f'<div class="plain-live-card"><div>'
+                    f'<div class="score-state">FINAL</div>'
+                    f'<div class="score-main">{live_score_text(g)}</div>'
+                    f'</div><div class="score-badge">FINAL</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+def render_account_page():
+    st.markdown(
+        f'<div class="page-head">'
+        f'<div class="page-kicker">MLB EDGE</div>'
+        f'<div class="page-title">Account</div>'
+        f'<div class="page-sub">App information, model version and advanced resources.</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="account-card">'
+        f'<div><span>APP</span><b>{APP_VERSION}</b></div>'
+        f'<div><span>MODEL</span><b>{MODEL_VERSION}</b></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("Model details & limitations", expanded=False):
+        st.write(
+            "Production recommendations are pregame-only. Live views are for tracking and "
+            "score context; they do not generate in-game betting recommendations."
+        )
+    with st.expander("Data & downloads", expanded=False):
+        st.caption("Use the Board and Bets tabs for slate/game downloads and performance exports.")
+
+
 def render_performance_page():
     tracker_df = load_tracker()
     perf = tracker_performance_summary(tracker_df)
@@ -2866,15 +3072,22 @@ slate_date=st.date_input(
     help="Current/upcoming MLB dates only.",
     label_visibility="collapsed",
 )
-free_refresh=st.button("Refresh Schedule + Scores (free)",use_container_width=True)
-st.caption("Schedule and score refreshes are free. Odds update only when you press an odds button.")
+free_refresh=st.button("Refresh Scores + Tracker (free)",use_container_width=True)
+st.caption("Refreshes scores, game status and live tracker data for free. Odds only update when you press an odds button.")
 if free_refresh:
+    # A Streamlit button click already triggers a script rerun. Clear caches here and
+    # continue through this same run so the selected bottom tab is preserved.
+    _selected_view = st.session_state.get("main_navigation", "Home")
     st.cache_data.clear()
     try:
         fetch_fresh_scoreboard.clear()
     except Exception:
         pass
-    st.rerun()
+    try:
+        fetch_live_win_probability.clear()
+    except Exception:
+        pass
+    st.session_state["main_navigation"] = _selected_view
 
 if "odds_payload" not in st.session_state:
     st.session_state.odds_payload={"events":[],"error":"","quota":{}}
@@ -2936,11 +3149,15 @@ if not candidates:
 else:
     main_view = st.radio(
         "Main view",
-        ["Board", "Tracker", "Results"],
+        ["Home", "Live", "Tracker", "Bets", "Account"],
         horizontal=True,
         label_visibility="collapsed",
         key="main_navigation",
     )
+
+    if main_view == "Live":
+        render_live_games_page(games, fresh_scoreboard)
+        st.stop()
 
     if main_view == "Tracker":
         tracker_df = load_tracker()
@@ -2948,8 +3165,12 @@ else:
         st.caption("Visual tracking only — no in-game recommendations.")
         st.stop()
 
-    if main_view == "Results":
+    if main_view == "Bets":
         render_performance_page()
+        st.stop()
+
+    if main_view == "Account":
+        render_account_page()
         st.stop()
 
     st.markdown('<div class="kicker">Betting Board</div>', unsafe_allow_html=True)
@@ -2974,7 +3195,7 @@ else:
         single_group = "Upcoming"
         single_pool = upcoming_single
         if not single_pool:
-            st.info("No upcoming games remain. Use the **Tracker** tab for games already underway or final.")
+            st.info("No upcoming games remain. Use **Live** for scores or **Tracker** for tracked bets.")
             st.stop()
         labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
         st.markdown('<div class="kicker">Matchup</div>', unsafe_allow_html=True)
