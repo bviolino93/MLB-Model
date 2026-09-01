@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.6.0-SIMPLE-WORKFLOW"
+APP_VERSION = "1.6.1-LIVE-BADGE-EXPANDER-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -427,6 +427,43 @@ div[data-testid="stAlert"][data-baseweb="notification"] {
   .hero .sub{font-size:.92rem !important;line-height:1.45 !important;}
   .hero{padding-bottom:.35rem !important;}
   .kicker{margin-top:14px !important;margin-bottom:7px !important;}
+}
+
+
+/* v1.6.1 expander readability */
+[data-testid="stExpander"] {
+    background: #081827 !important;
+    border: 1px solid #284159 !important;
+    border-radius: 14px !important;
+    overflow: hidden !important;
+}
+[data-testid="stExpander"] details,
+[data-testid="stExpander"] details > div {
+    background: #081827 !important;
+    color: #eef5fb !important;
+}
+[data-testid="stExpander"] details summary,
+[data-testid="stExpander"] details summary:hover,
+[data-testid="stExpander"] details[open] summary {
+    background: #0d1d2e !important;
+    color: #eef5fb !important;
+    border-radius: 12px !important;
+}
+[data-testid="stExpander"] details summary p,
+[data-testid="stExpander"] details summary span,
+[data-testid="stExpander"] details summary div {
+    color: #eef5fb !important;
+    opacity: 1 !important;
+    font-weight: 850 !important;
+}
+[data-testid="stExpander"] details summary svg {
+    fill: #eef5fb !important;
+    color: #eef5fb !important;
+}
+[data-testid="stExpander"] details[open] summary {
+    border-bottom: 1px solid #284159 !important;
+    border-bottom-left-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
 }
 
 </style>
@@ -1906,7 +1943,7 @@ else:
 
         st.markdown('<div class="kicker">In Progress / Final</div>', unsafe_allow_html=True)
         if live_now:
-            with st.expander(f"Live games — {len(live_now)}", expanded=False):
+            with st.expander(f"In Progress / Recently Final — {len(live_now)}", expanded=False):
                 for cx in live_now:
                     g = fresh_scoreboard.get(
                         str(cx.get("GamePk")),
@@ -1914,12 +1951,14 @@ else:
                     )
                     score = live_score_text(g)
                     inning = inning_status_text(g)
+                    display_state = game_state(g)
+                    display_badge = "FINAL" if display_state == "FINAL" else "LIVE"
                     st.markdown(
                         f'<div class="game-card"><div class="game-head"><div>'
                         f'<div class="game-time">{inning}</div>'
                         f'<div class="match">{score}</div>'
                         f'<div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
-                        f'</div><div class="badge badge-pass">LIVE</div></div></div>',
+                        f'</div><div class="badge badge-pass">{display_badge}</div></div></div>',
                         unsafe_allow_html=True,
                     )
         if final_now:
