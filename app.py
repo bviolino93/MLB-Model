@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.3.0-FORWARD-TRACKER"
+APP_VERSION = "1.3.1-QUALIFIED-TRACKER"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -705,6 +705,11 @@ TRACKER_COLUMNS = [
     "Graded_At_ET",
 ]
 
+
+TRACKER_MIN_CONFIDENCE_ML = 80
+TRACKER_MIN_CONFIDENCE_TOTAL = 80
+TRACKER_REQUIRE_CONFIRMED_LINEUPS = True
+
 def empty_tracker():
     return pd.DataFrame(columns=TRACKER_COLUMNS)
 
@@ -763,12 +768,28 @@ def _append_tracker_row(row):
     save_tracker(df)
     return True
 
+
+def tracker_qualification(candidate, market_type):
+    """Return (qualified, reason). The live board can still show early signals,
+    but only mature pregame signals enter the headline forward-performance ledger.
+    """
+    if not candidate or not candidate.get("pregame"):
+        return False, "not pregame"
+    if TRACKER_REQUIRE_CONFIRMED_LINEUPS and not candidate.get("lineup_confirmed"):
+        return False, "lineups not confirmed"
+    conf = int(candidate.get("confidence") or 0)
+    min_conf = TRACKER_MIN_CONFIDENCE_TOTAL if str(market_type).upper() == "TOTAL" else TRACKER_MIN_CONFIDENCE_ML
+    if conf < min_conf:
+        return False, f"confidence {conf} < {min_conf}"
+    return True, "qualified"
+
 def track_current_official_recommendations(candidates, games, slate_date):
     """Freeze the first official ML signal for each game. Never overwrite later line moves."""
     game_map = _game_lookup(games)
     added = 0
     for x in candidates:
-        if not x.get("pregame") or not x.get("market_available"):
+        qualified, _reason = tracker_qualification(x, "MONEYLINE")
+        if not qualified or not x.get("market_available"):
             continue
         b = x.get("best") or {}
         if b.get("selection") not in ("BET", "BEST BET"):
@@ -811,7 +832,8 @@ def track_current_total_recommendations(candidates, games, model_df, totals_payl
     added = 0
     game_map = _game_lookup(games)
     for x in candidates:
-        if not x.get("pregame"):
+        qualified, _reason = tracker_qualification(x, "TOTAL")
+        if not qualified:
             continue
         mr = model_df.loc[model_df["GamePk"] == x["GamePk"]]
         if mr.empty:
@@ -1170,12 +1192,16 @@ else:
         expanded=False,
     ):
         if tracker_df.empty:
-            st.info("No official BET/BEST BET recommendations have been frozen yet. The tracker logs them automatically the first time they become official.")
+            st.info("No qualified BET/BEST BET recommendations have been frozen yet. A play enters the headline tracker only when lineups are confirmed, confidence is at least 80, the game is still pregame, and the play remains BET/BEST BET.")
         else:
             record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
             st.markdown(
                 f'<div class="metrics"><div class="metric"><span>Record</span><b>{record_display}</b></div><div class="metric"><span>Units</span><b>{perf["units"]:+.2f}</b></div><div class="metric"><span>ROI</span><b>{perf["roi"]*100:+.1f}%</b></div><div class="metric"><span>Pending</span><b>{perf["pending"]}</b></div></div>',
                 unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Tracker qualification: lineups confirmed • confidence ≥{TRACKER_MIN_CONFIDENCE_ML} • pregame • BET/BEST BET. "
+                "The first recommendation meeting all rules is frozen for forward performance."
             )
             split = tracker_split_table(tracker_df)
             if not split.empty:
@@ -1208,7 +1234,7 @@ else:
                 key="tracker_backup_download",
             )
 
-        st.caption("Official BET/BEST BET signals are frozen automatically at the first qualifying price. Refreshes never overwrite them. MLB final scores are graded with the free MLB Stats API, not The Odds API.")
+        st.caption("Qualified BET/BEST BET signals are frozen automatically at the first price where all tracker rules are met: confirmed lineups, confidence ≥80, pregame status, and a valid official grade. Earlier morning signals can still appear on the live board but do not count in headline record/ROI. Refreshes never overwrite a qualified entry. MLB final scores are graded with the free MLB Stats API, not The Odds API.")
 
         restore_file = st.file_uploader("Restore / merge tracker backup", type=["csv"], key="tracker_restore_upload")
         if st.button("Merge Tracker Backup", use_container_width=True, disabled=(restore_file is None), key="tracker_restore_btn"):
@@ -1224,8 +1250,8 @@ else:
             except Exception as e:
                 st.error(f"Could not restore tracker: {e}")
 
-        st.markdown("**Backfill an earlier model recommendation**")
-        diag_file = st.file_uploader("Import a downloaded Game Diagnostics CSV", type=["csv"], key="tracker_diag_import")
+        st.markdown("**Backfill an earlier model recommendation (legacy)**")
+        diag_file = st.file_uploader("Import a downloaded Game Diagnostics CSV (legacy backfill)", type=["csv"], key="tracker_diag_import")
         if st.button("Import Diagnostics Pick", use_container_width=True, disabled=(diag_file is None), key="tracker_diag_btn"):
             n,msg = import_diagnostics_tracker(diag_file)
             if n:
@@ -1287,8 +1313,14 @@ else:
         away_side = next(z for z in x["all"] if z["team"] == x["away"])
         home_side = next(z for z in x["all"] if z["team"] == x["home"])
         lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
+        _trk_ok, _trk_reason = tracker_qualification(x, "MONEYLINE")
 
         st.markdown('<div class="kicker">Single Game Analysis</div>', unsafe_allow_html=True)
+        if x.get("market_available") and (x.get("best") or {}).get("selection") in ("BET","BEST BET"):
+            if _trk_ok:
+                st.caption("📌 Tracker status: **QUALIFIED** — this recommendation is eligible to be frozen in forward performance.")
+            else:
+                st.caption(f"🕒 Tracker status: **EARLY SIGNAL** — not yet counted in headline performance ({_trk_reason}).")
         if x["market_available"]:
             st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">{b['selection']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="metrics"><div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div><div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div><div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div></div>''', unsafe_allow_html=True)
         else:
@@ -1534,5 +1566,5 @@ st.markdown("""
 
 with st.expander("Research basis & limitations",expanded=False):
     st.write("The research sequence rejected a team-only moneyline model, isolated a starting-pitcher signal through placebo/causality tests, improved it with Pitcher Model 2.0, rejected bullpen, and promoted offense/platoon plus lineup information. Totals then failed in the simple baseline, passed after adding pitcher + run-environment structure, and survived scrambled/no-starter integrity checks before this production promotion.")
-    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary. v1.3 adds an automatic forward-performance ledger: first official BET/BEST BET signals are frozen before first pitch and later auto-graded from MLB final scores.")
+    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary. v1.3.1 uses a qualified forward-performance ledger: only pregame BET/BEST BET signals with confirmed lineups and confidence ≥80 are frozen, then auto-graded from MLB final scores.")
     st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")
