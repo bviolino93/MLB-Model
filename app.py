@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.4-START-GUARD-ALL-OFFICIAL"
+APP_VERSION = "3.2.6-TRACKER-TIME-ORDER"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -3630,6 +3630,41 @@ def _visual_tracked_card(rec, game, win_prob=None):
     )
 
 
+
+def _live_progress_sort_key(item):
+    """Sort live tracked bets from furthest progressed game to least progressed.
+
+    Uses inning/half/outs via _inning_fraction(). Multiple official bets from the
+    same game naturally stay together because they share the same progress value.
+    """
+    g, _rec = item
+    try:
+        progress = float(_inning_fraction(g))
+    except Exception:
+        progress = 0.0
+
+    # Secondary keys keep ordering deterministic within the same progress point.
+    try:
+        inning = int(g.get("Current_Inning") or 0)
+    except Exception:
+        inning = 0
+
+    half = str(g.get("Inning_State") or g.get("Inning_Half") or "").strip().lower()
+    half_rank = {
+        "top": 0,
+        "middle": 1,
+        "bottom": 2,
+        "end": 3,
+    }.get(half, 0)
+
+    try:
+        outs = int(g.get("Outs") or 0)
+    except Exception:
+        outs = 0
+
+    return (progress, inning, half_rank, outs)
+
+
 def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
     """Official bet tracker: upcoming, live and completed tracked recommendations."""
     game_map = {}
@@ -3661,13 +3696,26 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         elif state == "PREGAME":
             tracked_upcoming.append((g, rec))
 
-    # Keep upcoming bets in first-pitch order.
+    # Upcoming official bets: earliest scheduled first pitch first.
+    # Multiple official bets from the same game stay adjacent because they share
+    # the same GameDate and GamePk.
     def _start_key(item):
+        g, _rec = item
         try:
-            return pd.to_datetime(item[0].get("GameDate"), utc=True)
+            start = pd.to_datetime(g.get("GameDate"), utc=True)
         except Exception:
-            return pd.Timestamp.max.tz_localize("UTC")
+            start = pd.Timestamp.max.tz_localize("UTC")
+        try:
+            game_pk = int(g.get("GamePk") or 0)
+        except Exception:
+            game_pk = 0
+        return (start, game_pk)
+
     tracked_upcoming.sort(key=_start_key)
+
+    # Live Tracker priority: games furthest along are shown first.
+    # Example: Bottom 8th appears above Top 6th, which appears above Top 2nd.
+    tracked_live.sort(key=_live_progress_sort_key, reverse=True)
 
     active_count = len(tracked_upcoming) + len(tracked_live)
 
@@ -3675,7 +3723,7 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         f'<div class="tracker-hero">'
         f'<div><div class="tracker-eyebrow">OFFICIAL MODEL LEDGER</div>'
         f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{active_count}</span></div>'
-        f'<div class="tracker-sub">Every official Best Bet / Bet from pregame through final result</div></div>'
+        f'<div class="tracker-sub">Official bets • upcoming by start time • live by game progress</div></div>'
         f'<div class="tracker-live-orb"><span></span>AUTO</div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -3714,6 +3762,10 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         g for g in live_games
         if tracked_rows_for_game(g.get("GamePk"), tracker_df).empty
     ]
+    untracked_live.sort(
+        key=lambda g: _live_progress_sort_key((g, None)),
+        reverse=True,
+    )
     if untracked_live:
         with st.expander(f"Other Live Games — {len(untracked_live)}", expanded=False):
             for g in untracked_live:
