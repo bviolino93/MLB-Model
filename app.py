@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.8.2-PROFESSIONAL-NAV"
+APP_VERSION = "1.9.0-PREMIUM-VISUAL"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -627,6 +627,350 @@ div[class*="st-key-main_navigation"] label:has(input:checked) {
 }
 div[class*="st-key-main_navigation"] label:has(input:checked) p {
     color: #8fd0ff !important;
+}
+
+
+/* v1.8.3 clearer totals tracker */
+.run-summary{
+    display:grid !important;
+    grid-template-columns:1fr 1fr !important;
+    gap:10px !important;
+    margin-top:18px !important;
+    margin-bottom:14px !important;
+}
+.run-stat{
+    padding:10px 12px !important;
+    border-radius:12px !important;
+    background:#0b1b2d !important;
+    border:1px solid #29445c !important;
+}
+.run-stat span{
+    display:block !important;
+    font-size:.56rem !important;
+    letter-spacing:.09em !important;
+    font-weight:900 !important;
+    color:#93a7ba !important;
+}
+.run-stat b{
+    display:block !important;
+    margin-top:3px !important;
+    font-size:1.55rem !important;
+    line-height:1 !important;
+    font-weight:950 !important;
+    color:#ffffff !important;
+}
+.line-stat b{color:#dce8f2 !important}
+.clear-track{
+    height:9px !important;
+    margin-top:2px !important;
+}
+.clear-track .run-fill{height:9px !important}
+.clear-track .line-marker{
+    top:-7px !important;
+    height:23px !important;
+    width:3px !important;
+    background:#ffffff !important;
+}
+.clear-axis{
+    height:24px !important;
+    margin-top:8px !important;
+}
+.clear-axis .line-axis-label{
+    transform:translateX(-50%) !important;
+    color:#ffffff !important;
+    font-weight:900 !important;
+    font-size:.58rem !important;
+}
+.bet-pick{
+    font-size:1.08rem !important;
+    letter-spacing:.01em !important;
+}
+.track-pill{
+    font-size:.54rem !important;
+    padding:5px 8px !important;
+}
+.tracker-sub{
+    font-size:.72rem !important;
+}
+.visual-bet-card{
+    padding:15px !important;
+}
+
+/* Bottom navigation: compact, no extra title-like visual weight */
+div[class*="st-key-main_navigation"]{
+    padding-top:6px !important;
+}
+div[class*="st-key-main_navigation"] [role="radiogroup"]{
+    gap:6px !important;
+}
+div[class*="st-key-main_navigation"] label{
+    min-height:44px !important;
+}
+div[class*="st-key-main_navigation"] label p{
+    font-size:.66rem !important;
+    letter-spacing:.04em !important;
+}
+@media(max-width:700px){
+    .run-stat b{font-size:1.42rem !important}
+    .bet-pick{font-size:1rem !important}
+}
+
+
+/* v1.9.0 premium visual system */
+:root{
+  --bg:#06111d;
+  --panel:#0b1b2b;
+  --panel2:#10253a;
+  --line:#27445f;
+  --text:#f7fbff;
+  --muted:#93a9bd;
+  --cyan:#67c7ff;
+  --teal:#37d8c2;
+  --green:#43e28f;
+  --amber:#f4c95d;
+  --red:#ff6b73;
+}
+[data-testid="stAppViewContainer"]{
+    background:
+      radial-gradient(circle at 20% -10%, rgba(33,112,170,.16), transparent 32%),
+      radial-gradient(circle at 100% 15%, rgba(55,216,194,.08), transparent 28%),
+      linear-gradient(180deg,#06111d 0%,#071522 100%) !important;
+}
+.block-container{
+    max-width:920px !important;
+}
+
+/* Hero */
+.hero{
+    padding:10px 0 6px !important;
+}
+.hero h1{
+    font-size:2.05rem !important;
+    letter-spacing:-.035em !important;
+    text-shadow:0 6px 24px rgba(0,0,0,.28);
+}
+.hero .sub{
+    max-width:620px;
+    font-size:.9rem !important;
+    color:#98adbf !important;
+}
+.live-pill{
+    box-shadow:0 0 0 1px rgba(67,226,143,.15),0 8px 30px rgba(67,226,143,.08) !important;
+}
+
+/* Main status strip */
+.status{
+    background:linear-gradient(180deg,rgba(15,34,54,.92),rgba(9,24,39,.95)) !important;
+    border:1px solid #284762 !important;
+    box-shadow:0 10px 28px rgba(0,0,0,.16) !important;
+    backdrop-filter:blur(12px);
+}
+
+/* Buttons */
+.stButton > button,
+.stDownloadButton > button{
+    background:linear-gradient(180deg,#1b547f 0%,#153f63 100%) !important;
+    border:1px solid #4b8ebb !important;
+    box-shadow:0 8px 22px rgba(0,0,0,.18) !important;
+    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease !important;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover{
+    transform:translateY(-1px) !important;
+    border-color:#75b9e5 !important;
+    box-shadow:0 10px 26px rgba(29,91,140,.24) !important;
+}
+.stButton > button[kind="primary"]{
+    background:linear-gradient(135deg,#158b7f 0%,#126b75 100%) !important;
+    border-color:#32d4c3 !important;
+    box-shadow:0 8px 26px rgba(38,201,182,.18) !important;
+}
+
+/* Full-slate cards */
+.combo-card{
+    position:relative;
+    overflow:hidden;
+    background:
+      linear-gradient(180deg,rgba(18,43,67,.98) 0%,rgba(10,27,44,.98) 100%) !important;
+    border:1px solid #31516d !important;
+    box-shadow:0 14px 32px rgba(0,0,0,.18) !important;
+}
+.combo-card::before{
+    content:"";
+    position:absolute;left:0;top:0;bottom:0;width:3px;
+    background:linear-gradient(180deg,#5ac7ff,#32d9c4);
+    opacity:.85;
+}
+.market-row{
+    background:rgba(5,18,31,.78) !important;
+    border:1px solid #24445e !important;
+}
+.market-name{
+    color:#73cdfc !important;
+}
+.market-grade{
+    box-shadow:0 4px 16px rgba(0,0,0,.16);
+}
+
+/* Top plays */
+.top-play-card{
+    position:relative;
+    overflow:hidden;
+    background:linear-gradient(135deg,#11263b,#0b1a2a) !important;
+    border:1px solid #31516c !important;
+    box-shadow:0 10px 28px rgba(0,0,0,.16) !important;
+}
+.top-play-card::after{
+    content:"";
+    position:absolute;right:-24px;top:-24px;width:78px;height:78px;border-radius:50%;
+    background:radial-gradient(circle,rgba(71,199,255,.14),transparent 68%);
+}
+
+/* Tracker hero */
+.tracker-hero{
+    display:flex;justify-content:space-between;align-items:center;gap:14px;
+    margin:4px 0 18px;padding:15px 16px;border-radius:18px;
+    background:linear-gradient(135deg,#102941 0%,#0a1d30 70%);
+    border:1px solid #31516c;
+    box-shadow:0 16px 34px rgba(0,0,0,.18);
+}
+.tracker-eyebrow{
+    font-size:.56rem;font-weight:950;letter-spacing:.14em;color:#69d8ca;
+}
+.tracker-title{
+    margin-top:3px;font-size:1.65rem !important;letter-spacing:-.03em;
+}
+.tracker-live-orb{
+    display:flex;align-items:center;gap:7px;color:#78efaa;font-size:.62rem;font-weight:950;
+    border:1px solid #2f7252;background:#0c2d22;padding:7px 10px;border-radius:999px;
+}
+.tracker-live-orb span{
+    width:7px;height:7px;border-radius:50%;background:#43e28f;
+    box-shadow:0 0 0 5px rgba(67,226,143,.09),0 0 14px rgba(67,226,143,.4);
+}
+
+/* Tracked bet cards */
+.visual-bet-card{
+    position:relative;
+    overflow:hidden;
+    background:
+      radial-gradient(circle at 92% 8%,rgba(91,196,255,.08),transparent 24%),
+      linear-gradient(180deg,#112941 0%,#0b1c2e 100%) !important;
+    border:1px solid #355773 !important;
+    box-shadow:0 16px 36px rgba(0,0,0,.20) !important;
+    border-radius:20px !important;
+}
+.visual-bet-card::before{
+    content:"";
+    position:absolute;left:0;right:0;top:0;height:1px;
+    background:linear-gradient(90deg,transparent,#5bc9ff,transparent);
+    opacity:.7;
+}
+.team-row{
+    font-size:1.01rem !important;
+}
+.live-dot-wrap{
+    color:#72efa6 !important;
+}
+.market-chip{
+    display:inline-flex;align-items:center;
+    margin-bottom:5px;padding:3px 7px;border-radius:999px;
+    font-size:.51rem;font-weight:950;letter-spacing:.09em;
+    color:#8cd7ff;background:#0d2a42;border:1px solid #28587a;
+}
+.bet-pick{
+    font-size:1.12rem !important;
+}
+.run-summary{
+    gap:12px !important;
+}
+.run-stat{
+    background:linear-gradient(180deg,#0c1e30,#091827) !important;
+    border:1px solid #294a64 !important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.02);
+}
+.run-stat b{
+    font-size:1.72rem !important;
+}
+.clear-track{
+    background:#223b52 !important;
+    box-shadow:inset 0 1px 3px rgba(0,0,0,.28);
+}
+.run-fill{
+    box-shadow:0 0 14px rgba(67,226,143,.22);
+}
+.run-fill.track-risk{
+    box-shadow:0 0 14px rgba(255,107,115,.18);
+}
+.line-marker{
+    box-shadow:0 0 0 2px rgba(255,255,255,.09),0 0 14px rgba(255,255,255,.22) !important;
+}
+
+/* Status pills */
+.track-pill{
+    font-size:.56rem !important;
+    letter-spacing:.03em;
+    box-shadow:0 4px 16px rgba(0,0,0,.16);
+}
+.track-good{
+    background:linear-gradient(180deg,#0e3c2a,#0b2c20) !important;
+}
+.track-risk{
+    background:linear-gradient(180deg,#41191c,#2f1114) !important;
+}
+.track-neutral{
+    background:linear-gradient(180deg,#3b3112,#29220c) !important;
+}
+
+/* Functional diamond */
+.diamond-mini{
+    filter:drop-shadow(0 6px 12px rgba(0,0,0,.18));
+}
+.diamond-mini i{
+    border-color:#47647e !important;
+}
+.diamond-mini i.occupied{
+    background:#f4c95d !important;
+    border-color:#f4c95d !important;
+    box-shadow:0 0 12px rgba(244,201,93,.35) !important;
+}
+
+/* Expanders */
+[data-testid="stExpander"]{
+    box-shadow:0 10px 28px rgba(0,0,0,.12) !important;
+}
+
+/* Bottom nav */
+div[class*="st-key-main_navigation"]{
+    background:rgba(5,17,29,.96) !important;
+    backdrop-filter:blur(18px) !important;
+    border-top:1px solid #29445d !important;
+}
+div[class*="st-key-main_navigation"] label{
+    transition:all .15s ease !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked){
+    background:linear-gradient(180deg,#153650,#102b44) !important;
+    border-color:#4c82aa !important;
+    box-shadow:0 6px 18px rgba(0,0,0,.18) !important;
+}
+div[class*="st-key-main_navigation"] label:has(input:checked) p{
+    color:#8fd5ff !important;
+}
+
+/* Dataframes + metrics */
+.metric{
+    background:linear-gradient(180deg,#132a40,#0f2235) !important;
+    border-color:#31516c !important;
+    box-shadow:0 8px 22px rgba(0,0,0,.12);
+}
+
+@media(max-width:700px){
+    .tracker-hero{padding:13px 14px}
+    .tracker-title{font-size:1.45rem !important}
+    .tracker-live-orb{padding:6px 8px}
+    .visual-bet-card{border-radius:18px !important}
+    .run-stat b{font-size:1.55rem !important}
 }
 
 </style>
@@ -1860,19 +2204,19 @@ def _total_visual(rec, game):
             if runs >= line:
                 status, status_cls = "NEEDS SCORING", "track-risk"
             elif ratio <= 0.90:
-                status, status_cls = "TRACKING WELL", "track-good"
+                status, status_cls = "ON TRACK", "track-good"
             elif ratio <= 1.20:
-                status, status_cls = "ON PACE", "track-neutral"
+                status, status_cls = "ON TRACK", "track-neutral"
             else:
                 status, status_cls = "NEEDS SCORING", "track-risk"
         else:
             ratio = runs / max(expected_to_now, 0.75)
             if runs > line:
-                status, status_cls = "TRACKING WELL", "track-good"
+                status, status_cls = "ON TRACK", "track-good"
             elif ratio >= 1.10:
-                status, status_cls = "TRACKING WELL", "track-good"
+                status, status_cls = "ON TRACK", "track-good"
             elif ratio >= 0.80:
-                status, status_cls = "ON PACE", "track-neutral"
+                status, status_cls = "ON TRACK", "track-neutral"
             else:
                 status, status_cls = "NEEDS SCORING", "track-risk"
 
@@ -1883,15 +2227,19 @@ def _total_visual(rec, game):
 
     html = (
         f'<div class="bet-section-head"><div>'
-        f'<div class="bet-pick">{pick}</div>'
-        f'<div class="bet-type">Total Runs</div></div>'
+        f'<div class="market-chip">TOTAL</div>'
+        f'<div class="bet-pick">{pick}</div></div>'
         f'<div class="track-pill {status_cls}">{status}</div></div>'
-        f'<div class="progress-label"><span>Runs scored</span><b>{runs:g} / {line:g}</b></div>'
-        f'<div class="run-track">'
+        f'<div class="run-summary">'
+        f'<div class="run-stat"><span>CURRENT RUNS</span><b>{runs:g}</b></div>'
+        f'<div class="run-stat line-stat"><span>BET LINE</span><b>{line:g}</b></div>'
+        f'</div>'
+        f'<div class="run-track clear-track">'
         f'<div class="run-fill {status_cls}" style="width:{fill_pct:.1f}%"></div>'
         f'<div class="line-marker" style="left:{line_pct:.1f}%"></div>'
         f'</div>'
-        f'<div class="run-axis"><span>0</span><span style="left:{line_pct:.1f}%">{line:g}</span></div>'
+        f'<div class="run-axis clear-axis"><span>0</span>'
+        f'<span class="line-axis-label" style="left:{line_pct:.1f}%">LINE {line:g}</span></div>'
     )
     return html, status_cls, status
 
@@ -1930,7 +2278,8 @@ def _moneyline_visual(rec, game):
 
     html = (
         f'<div class="bet-section-head"><div>'
-        f'<div class="bet-pick">{pick} Moneyline {odds}</div>'
+        f'<div class="market-chip">MONEYLINE</div>'
+        f'<div class="bet-pick">{pick} {odds}</div>'
         f'<div class="bet-type">Moneyline</div></div>'
         f'<div class="track-pill {status_cls}">{status}</div></div>'
         f'<div class="ml-meter-wrap">'
@@ -2014,9 +2363,12 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df):
                 tracked_final.append((g, rec))
 
     st.markdown(
-        f'<div class="tracker-title-row"><div><div class="tracker-title">Bet Tracker '
-        f'<span class="tracker-count">{len(tracked_live)}</span></div>'
-        f'<div class="tracker-sub">Live progress on your tracked model bets</div></div></div>',
+        f'<div class="tracker-hero">'
+        f'<div><div class="tracker-eyebrow">LIVE MODEL MONITOR</div>'
+        f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{len(tracked_live)}</span></div>'
+        f'<div class="tracker-sub">Real-time progress for qualified tracked recommendations</div></div>'
+        f'<div class="tracker-live-orb"><span></span>LIVE</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -2113,7 +2465,7 @@ st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">MLB Edge</div>
-  <div class="sub">Upcoming recommendations, live tracking, and model performance.</div>
+  <div class="sub">Live MLB market intelligence with model-ranked plays and real-time tracking.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -2202,7 +2554,7 @@ if not candidates:
 else:
     main_view = st.radio(
         "Navigation",
-        ["Board", "Tracker", "Performance"],
+        ["Board", "Tracker", "Results"],
         horizontal=True,
         label_visibility="collapsed",
         key="main_navigation",
@@ -2214,7 +2566,7 @@ else:
         st.caption("Visual tracking only — no in-game recommendations.")
         st.stop()
 
-    if main_view == "Performance":
+    if main_view == "Results":
         render_performance_page()
         st.stop()
 
