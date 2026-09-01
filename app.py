@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.5.3-LIVE-SCORES"
+APP_VERSION = "1.5.3.1-LIVE-SCORE-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -814,6 +814,51 @@ def game_state_label(game):
     return "STATUS UNKNOWN"
 
 
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_fresh_scoreboard(date_text):
+    """Fetch fresh MLB scores/innings directly from the free schedule endpoint.
+
+    This intentionally bypasses model.py's long-lived JSON cache so live scores update.
+    """
+    try:
+        day = pd.Timestamp(date_text).date().strftime("%Y-%m-%d")
+        r = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": day, "hydrate": "linescore"},
+            timeout=12,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return {}
+
+    board = {}
+    for block in data.get("dates", []):
+        for g in block.get("games", []):
+            teams = g.get("teams", {}) or {}
+            away = teams.get("away", {}) or {}
+            home = teams.get("home", {}) or {}
+            linescore = g.get("linescore", {}) or {}
+            status = g.get("status", {}) or {}
+            board[str(g.get("gamePk"))] = {
+                "GamePk": g.get("gamePk"),
+                "Away": (away.get("team", {}) or {}).get("name"),
+                "Home": (home.get("team", {}) or {}).get("name"),
+                "Away_Score": away.get("score"),
+                "Home_Score": home.get("score"),
+                "Current_Inning": linescore.get("currentInning"),
+                "Current_Inning_Ordinal": linescore.get("currentInningOrdinal"),
+                "Inning_State": linescore.get("inningState"),
+                "Inning_Half": linescore.get("inningHalf"),
+                "Outs": linescore.get("outs"),
+                "AbstractGameState": status.get("abstractGameState", ""),
+                "DetailedState": status.get("detailedState", ""),
+                "StatusCode": status.get("statusCode", ""),
+                "GameDate": g.get("gameDate"),
+            }
+    return board
+
 def live_score_text(game):
     if not game:
         return ""
@@ -1556,11 +1601,15 @@ slate_date=st.date_input(
 )
 load_all_odds=st.button("Update Odds — Moneyline + Totals",use_container_width=True,type="primary")
 st.caption("Manual only. This button refreshes both moneyline and totals markets together. Nothing calls The Odds API automatically.")
-st.caption("Started games move out of the betting board automatically. Live scores/innings use the free MLB Stats API.")
+st.caption("Started games move out automatically. Live scores refresh from MLB every ~20 seconds while the app reruns; the free refresh button forces a fresh pull.")
 
 free_refresh=st.button("Refresh Schedule + Live Scores (free)",use_container_width=True)
 if free_refresh:
     st.cache_data.clear()
+    try:
+        fetch_fresh_scoreboard.clear()
+    except Exception:
+        pass
     st.rerun()
 
 if "odds_payload" not in st.session_state:
@@ -1593,6 +1642,8 @@ with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
     games=fetch_games_for_date(slate_date)
     model_df=run_model(games) if games else pd.DataFrame()
     candidates=build_candidates(model_df,games,odds_payload.get("events",[])) if not model_df.empty else []
+
+fresh_scoreboard = fetch_fresh_scoreboard(slate_date)
 
 # Forward-test tracker: freeze the first official recommendation at the price that triggered it.
 _new_ml = track_current_official_recommendations(candidates, games, slate_date)
@@ -1746,12 +1797,13 @@ else:
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
         if single_group == "In Progress / Final":
-            state_now = game_state(selected_game)
-            status_now = inning_status_text(selected_game)
+            fresh_game = fresh_scoreboard.get(str(x["GamePk"]), selected_game)
+            state_now = game_state(fresh_game)
+            status_now = inning_status_text(fresh_game)
             st.markdown(
                 f'<div class="best-card"><div class="best-top"><div>'
                 f'<div class="best-tag">{status_now}</div>'
-                f'<div class="best-pick">{live_score_text(selected_game)}</div>'
+                f'<div class="best-pick">{live_score_text(fresh_game)}</div>'
                 f'<div class="best-game">{x["away_sp"]} vs {x["home_sp"]}</div>'
                 f'</div><div class="badge badge-pass">{state_now}</div></div></div>',
                 unsafe_allow_html=True,
@@ -1958,7 +2010,10 @@ else:
         if live_now:
             with st.expander(f"Live games — {len(live_now)}", expanded=True):
                 for cx in live_now:
-                    g = next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    g = fresh_scoreboard.get(
+                        str(cx.get("GamePk")),
+                        next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    )
                     score = live_score_text(g)
                     inning = inning_status_text(g)
                     st.markdown(
@@ -1972,7 +2027,10 @@ else:
         if final_now:
             with st.expander(f"Final games — {len(final_now)}", expanded=False):
                 for cx in final_now:
-                    g = next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    g = fresh_scoreboard.get(
+                        str(cx.get("GamePk")),
+                        next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
+                    )
                     st.markdown(
                         f'<div class="game-card"><div class="game-head"><div>'
                         f'<div class="game-time">FINAL</div>'
