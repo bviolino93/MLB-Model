@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.9.0-PREMIUM-VISUAL"
+APP_VERSION = "1.9.2-NAV-PULSE-VISIBILITY"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -971,6 +971,147 @@ div[class*="st-key-main_navigation"] label:has(input:checked) p{
     .tracker-live-orb{padding:6px 8px}
     .visual-bet-card{border-radius:18px !important}
     .run-stat b{font-size:1.55rem !important}
+}
+
+
+/* v1.9.1 win probability + slate pulse */
+.slate-pulse{
+    margin:0 0 18px;padding:14px 15px;border-radius:18px;
+    background:
+      radial-gradient(circle at 90% 0%,rgba(103,199,255,.10),transparent 30%),
+      linear-gradient(135deg,#10263b,#0a1b2c);
+    border:1px solid #31516c;
+    box-shadow:0 14px 30px rgba(0,0,0,.17);
+}
+.pulse-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.pulse-kicker{font-size:.52rem;letter-spacing:.12em;font-weight:950;color:#69d8ca}
+.pulse-title{font-size:1.05rem;font-weight:950;color:#fff;margin-top:3px}
+.pulse-status{font-size:.55rem;font-weight:950;padding:6px 8px;border-radius:999px;border:1px solid}
+.pulse-good{color:#75edaa;background:#0c3324;border-color:#29734f}
+.pulse-neutral{color:#f2d980;background:#30280e;border-color:#73601b}
+.pulse-risk{color:#ff8589;background:#351619;border-color:#813337}
+.pulse-grid{
+    display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin-top:12px
+}
+.pulse-grid div{
+    padding:8px 7px;border-radius:10px;background:rgba(6,18,31,.62);border:1px solid #25435b
+}
+.pulse-grid span{display:block;font-size:.48rem;letter-spacing:.07em;font-weight:900;color:#8fa4b7}
+.pulse-grid b{display:block;margin-top:3px;font-size:.82rem;color:#fff}
+
+.wp-wrap{
+    margin-top:13px;padding:10px 11px;border-radius:12px;
+    background:rgba(6,18,31,.55);border:1px solid #29465f
+}
+.wp-title{font-size:.50rem;letter-spacing:.10em;font-weight:950;color:#87a1b8;margin-bottom:7px}
+.wp-labels{display:flex;justify-content:space-between;gap:12px;font-size:.58rem;color:#a8b8c7}
+.wp-labels span{display:flex;gap:5px;align-items:baseline;min-width:0}
+.wp-labels span:last-child{justify-content:flex-end;text-align:right}
+.wp-labels b{font-size:.75rem;color:#fff}
+.wp-track{
+    position:relative;height:7px;margin-top:7px;border-radius:999px;overflow:hidden;
+    background:#1d3b55
+}
+.wp-away{
+    height:100%;background:linear-gradient(90deg,#55c9ff,#39d8c2);
+    border-radius:999px 0 0 999px
+}
+.wp-mid{
+    position:absolute;left:50%;top:-2px;width:1px;height:11px;background:rgba(255,255,255,.75)
+}
+.ml-live-wp{
+    display:flex;justify-content:space-between;align-items:end;gap:10px;margin-top:15px
+}
+.ml-live-wp span{font-size:.54rem;letter-spacing:.08em;font-weight:950;color:#8fa5b8}
+.ml-live-wp b{font-size:1.65rem;line-height:1;color:#fff}
+.live-wp-meter{margin-top:8px !important}
+.plain-live-card-wrap{
+    margin:8px 0;padding:0;border-radius:14px;background:#0d2033;border:1px solid #31506a;overflow:hidden
+}
+.plain-live-card-wrap .plain-live-card{
+    margin:0;border:0;border-radius:0;background:transparent
+}
+.plain-live-card-wrap .wp-wrap{
+    margin:0 10px 10px
+}
+@media(max-width:700px){
+    .pulse-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .pulse-grid div:last-child{grid-column:span 2}
+    .ml-live-wp b{font-size:1.48rem}
+}
+
+
+/* v1.9.2 tracker readability + compact bottom nav */
+
+/* Brighter positive run progress */
+.run-fill.track-good,
+.run-fill.track-neutral.track-good {
+    background: linear-gradient(90deg,#35e08f 0%,#72f2b5 100%) !important;
+    box-shadow: 0 0 16px rgba(76,235,159,.38) !important;
+}
+.run-fill.track-neutral {
+    background: linear-gradient(90deg,#e5c84f 0%,#f2dc74 100%) !important;
+}
+.run-fill.track-risk {
+    background: linear-gradient(90deg,#ff626c 0%,#ff8a90 100%) !important;
+}
+
+/* Make slate pulse more prominent */
+.slate-pulse{
+    margin: 0 0 20px !important;
+    padding: 16px !important;
+    border: 1px solid #3b6687 !important;
+    background:
+      radial-gradient(circle at 85% 0%,rgba(74,209,255,.18),transparent 34%),
+      linear-gradient(135deg,#12314b 0%,#0b2135 100%) !important;
+    box-shadow: 0 16px 34px rgba(0,0,0,.24) !important;
+}
+.pulse-title{
+    font-size:1.16rem !important;
+}
+.pulse-grid b{
+    font-size:.92rem !important;
+}
+
+/* Bottom navigation: thin app-style bar */
+div[class*="st-key-main_navigation"] {
+    padding: 4px 10px calc(4px + env(safe-area-inset-bottom)) !important;
+    min-height: 58px !important;
+}
+div[class*="st-key-main_navigation"] [role="radiogroup"] {
+    gap: 5px !important;
+}
+div[class*="st-key-main_navigation"] label {
+    min-height: 40px !important;
+    padding: 4px 3px !important;
+    border-radius: 9px !important;
+}
+div[class*="st-key-main_navigation"] label p {
+    font-size: .62rem !important;
+    letter-spacing: .045em !important;
+}
+div[class*="st-key-main_navigation"] [data-testid="stWidgetLabel"],
+div[class*="st-key-main_navigation"] > label,
+div[class*="st-key-main_navigation"] legend {
+    display: none !important;
+}
+.block-container {
+    padding-bottom: 82px !important;
+}
+
+/* Keep cards above nav */
+.visual-bet-card,
+.slate-pulse,
+.tracker-hero {
+    position: relative;
+    z-index: 1;
+}
+
+
+.pulse-sub{
+    margin-top:3px;
+    font-size:.58rem;
+    color:#9eb2c5;
 }
 
 </style>
@@ -2136,6 +2277,224 @@ def tracker_split_table(df):
 
 
 
+
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_live_win_probability(game_pk):
+    """Current team win probability from the free MLB contextMetrics endpoint."""
+    try:
+        r = requests.get(
+            f"https://statsapi.mlb.com/api/v1/game/{int(game_pk)}/contextMetrics",
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json() or {}
+        away = data.get("awayWinProbability")
+        home = data.get("homeWinProbability")
+        if away is None or home is None:
+            return {}
+        away = float(away)
+        home = float(home)
+        # Defensive normalization in case an implementation returns 0-1 rather than 0-100.
+        if away <= 1.0 and home <= 1.0:
+            away *= 100.0
+            home *= 100.0
+        total = away + home
+        if total > 0 and abs(total - 100.0) > 0.5:
+            away = away / total * 100.0
+            home = home / total * 100.0
+        return {
+            "away": max(0.0, min(100.0, away)),
+            "home": max(0.0, min(100.0, home)),
+        }
+    except Exception:
+        return {}
+
+def _picked_team_wp(rec, game, win_prob):
+    if not win_prob:
+        return None
+    pick = str(rec.get("Pick") or rec.get("Side") or "")
+    away = str(game.get("Away") or "")
+    home = str(game.get("Home") or "")
+    if team_key(pick) == team_key(away):
+        return float(win_prob.get("away"))
+    if team_key(pick) == team_key(home):
+        return float(win_prob.get("home"))
+    return None
+
+def _game_win_probability_html(game, win_prob):
+    if not win_prob:
+        return ""
+    away = str(game.get("Away") or "Away")
+    home = str(game.get("Home") or "Home")
+    ap = float(win_prob.get("away", 50))
+    hp = float(win_prob.get("home", 50))
+    return (
+        f'<div class="wp-wrap">'
+        f'<div class="wp-title">MLB LIVE WIN PROBABILITY</div>'
+        f'<div class="wp-labels"><span>{away}<b>{ap:.0f}%</b></span>'
+        f'<span>{home}<b>{hp:.0f}%</b></span></div>'
+        f'<div class="wp-track">'
+        f'<div class="wp-away" style="width:{ap:.1f}%"></div>'
+        f'<div class="wp-mid"></div>'
+        f'</div>'
+        f'</div>'
+    )
+
+def _live_tracker_bucket(rec, game, win_prob):
+    """Return ON TRACK / NEUTRAL / NEEDS HELP for slate-level monitoring."""
+    result = str(rec.get("Result", "PENDING") or "PENDING").upper()
+    if result == "WIN":
+        return "FINAL_WIN"
+    if result == "LOSS":
+        return "FINAL_LOSS"
+    if result == "PUSH":
+        return "FINAL_PUSH"
+    if result == "VOID":
+        return "FINAL_VOID"
+
+    market = str(rec.get("Market") or "").upper()
+    if market == "MONEYLINE":
+        wp = _picked_team_wp(rec, game, win_prob)
+        if wp is not None:
+            if wp >= 60:
+                return "ON_TRACK"
+            if wp <= 40:
+                return "NEEDS_HELP"
+            return "NEUTRAL"
+
+        # Fallback to score if live WP is temporarily unavailable.
+        pick = str(rec.get("Pick") or "")
+        away = str(game.get("Away") or "")
+        home = str(game.get("Home") or "")
+        a = _safe_int(game.get("Away_Score"), 0)
+        h = _safe_int(game.get("Home_Score"), 0)
+        if team_key(pick) == team_key(away):
+            diff = a - h
+        elif team_key(pick) == team_key(home):
+            diff = h - a
+        else:
+            diff = 0
+        return "ON_TRACK" if diff > 0 else ("NEEDS_HELP" if diff < 0 else "NEUTRAL")
+
+    if market == "TOTAL":
+        side = str(rec.get("Side") or "").upper()
+        try:
+            line = float(rec.get("Market_Line"))
+        except Exception:
+            return "NEUTRAL"
+        runs = _safe_int(game.get("Away_Score"), 0) + _safe_int(game.get("Home_Score"), 0)
+        frac = _inning_fraction(game)
+        expected_to_now = line * frac
+        ratio = runs / max(expected_to_now, 0.75)
+
+        if side == "UNDER":
+            if runs >= line:
+                return "NEEDS_HELP"
+            if ratio <= 0.95:
+                return "ON_TRACK"
+            if ratio <= 1.20:
+                return "NEUTRAL"
+            return "NEEDS_HELP"
+        else:
+            if runs > line:
+                return "ON_TRACK"
+            if ratio >= 1.05:
+                return "ON_TRACK"
+            if ratio >= 0.80:
+                return "NEUTRAL"
+            return "NEEDS_HELP"
+
+    return "NEUTRAL"
+
+def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
+    if tracker_df is None or tracker_df.empty:
+        return {
+            "tracked":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+            "on_track":0,"neutral":0,"needs_help":0,"units":0.0,"status":"NO TRACKED BETS"
+        }
+
+    today_rows = tracker_df[tracker_df["Slate_Date"].astype(str) == str(slate_date)].copy()
+    if today_rows.empty:
+        return {
+            "tracked":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+            "on_track":0,"neutral":0,"needs_help":0,"units":0.0,"status":"NO TRACKED BETS"
+        }
+
+    game_map = {}
+    for g0 in games:
+        gf = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
+        game_map[str(g0.get("GamePk"))] = gf
+
+    out = {
+        "tracked":len(today_rows),"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+        "on_track":0,"neutral":0,"needs_help":0,"units":0.0
+    }
+
+    for _, rec in today_rows.iterrows():
+        g = game_map.get(str(rec.get("GamePk")), {})
+        state = game_state(g)
+        result = str(rec.get("Result","PENDING") or "PENDING").upper()
+
+        if state == "FINAL" or result in ("WIN","LOSS","PUSH","VOID"):
+            out["final"] += 1
+            if result == "WIN":
+                out["wins"] += 1
+            elif result == "LOSS":
+                out["losses"] += 1
+            elif result == "PUSH":
+                out["pushes"] += 1
+            try:
+                out["units"] += float(rec.get("Units") or 0)
+            except Exception:
+                pass
+            continue
+
+        if state == "LIVE":
+            out["live"] += 1
+            wp = fetch_live_win_probability(rec.get("GamePk"))
+            bucket = _live_tracker_bucket(rec, g, wp)
+            if bucket == "ON_TRACK":
+                out["on_track"] += 1
+            elif bucket == "NEEDS_HELP":
+                out["needs_help"] += 1
+            else:
+                out["neutral"] += 1
+
+    pulse = (out["wins"] - out["losses"]) * 2 + out["on_track"] - out["needs_help"]
+    if out["tracked"] == 0:
+        status = "NO TRACKED BETS"
+    elif pulse >= 2:
+        status = "SLATE POSITIVE"
+    elif pulse <= -2:
+        status = "SLATE UNDER PRESSURE"
+    else:
+        status = "SLATE MIXED"
+    out["status"] = status
+    return out
+
+def _slate_pulse_html(summary):
+    record = f'{summary["wins"]}-{summary["losses"]}'
+    if summary["pushes"]:
+        record += f'-{summary["pushes"]}P'
+    status_cls = (
+        "pulse-good" if summary["status"] == "SLATE POSITIVE"
+        else ("pulse-risk" if summary["status"] == "SLATE UNDER PRESSURE" else "pulse-neutral")
+    )
+    return (
+        f'<div class="slate-pulse">'
+        f'<div class="pulse-head"><div><div class="pulse-kicker">TODAY\'S TRACKED SLATE</div>'
+        f'<div class="pulse-title">{summary["status"]}</div><div class="pulse-sub">Final results + live tracked bets</div></div>'
+        f'<div class="pulse-status {status_cls}">{summary["tracked"]} TRACKED</div></div>'
+        f'<div class="pulse-grid">'
+        f'<div><span>FINAL</span><b>{record}</b></div>'
+        f'<div><span>LIVE</span><b>{summary["live"]}</b></div>'
+        f'<div><span>ON TRACK</span><b>{summary["on_track"]}</b></div>'
+        f'<div><span>NEEDS HELP</span><b>{summary["needs_help"]}</b></div>'
+        f'<div><span>FINAL UNITS</span><b>{summary["units"]:+.2f}u</b></div>'
+        f'</div>'
+        f'</div>'
+    )
+
 def tracked_rows_for_game(game_pk, tracker_df=None):
     if tracker_df is None:
         tracker_df = load_tracker()
@@ -2243,7 +2602,8 @@ def _total_visual(rec, game):
     )
     return html, status_cls, status
 
-def _moneyline_visual(rec, game):
+
+def _moneyline_visual(rec, game, win_prob=None):
     pick = str(rec.get("Pick") or "")
     odds = _odds_text(rec.get("Odds"))
     away = str(game.get("Away") or "")
@@ -2252,8 +2612,17 @@ def _moneyline_visual(rec, game):
     home_score = _safe_int(game.get("Home_Score"), 0)
 
     final_badge, final_cls = _tracker_result_badge(rec)
+    picked_wp = _picked_team_wp(rec, game, win_prob)
+
     if final_badge:
         status, status_cls = final_badge, final_cls
+    elif picked_wp is not None:
+        if picked_wp >= 60:
+            status, status_cls = "ON TRACK", "track-good"
+        elif picked_wp <= 40:
+            status, status_cls = "NEEDS HELP", "track-risk"
+        else:
+            status, status_cls = "LIVE", "track-neutral"
     else:
         if team_key(pick) == team_key(away):
             margin = away_score - home_score
@@ -2264,30 +2633,32 @@ def _moneyline_visual(rec, game):
         status = "LEADING" if margin > 0 else ("TRAILING" if margin < 0 else "TIED")
         status_cls = "track-good" if margin > 0 else ("track-risk" if margin < 0 else "track-neutral")
 
-    # Visual lead meter centered at 50%. This is not live win probability.
-    if team_key(pick) == team_key(away):
-        margin = away_score - home_score
+    if picked_wp is not None:
+        meter = max(2, min(98, picked_wp))
+        wp_main = f"{picked_wp:.0f}%"
+        wp_label = "CURRENT WIN PROBABILITY"
     else:
-        margin = home_score - away_score
-    meter = max(8, min(92, 50 + margin * 8))
-    try:
-        pregame_prob = float(rec.get("Model_Probability")) * 100
-        prob_text = f"Pregame model {pregame_prob:.0f}%"
-    except Exception:
-        prob_text = "Model pick"
+        if team_key(pick) == team_key(away):
+            margin = away_score - home_score
+        else:
+            margin = home_score - away_score
+        meter = max(8, min(92, 50 + margin * 8))
+        wp_main = "—"
+        wp_label = "LIVE WIN PROBABILITY"
 
     html = (
         f'<div class="bet-section-head"><div>'
         f'<div class="market-chip">MONEYLINE</div>'
-        f'<div class="bet-pick">{pick} {odds}</div>'
-        f'<div class="bet-type">Moneyline</div></div>'
+        f'<div class="bet-pick">{pick} {odds}</div></div>'
         f'<div class="track-pill {status_cls}">{status}</div></div>'
-        f'<div class="ml-meter-wrap">'
+        f'<div class="ml-live-wp">'
+        f'<span>{wp_label}</span><b>{wp_main}</b></div>'
+        f'<div class="ml-meter-wrap live-wp-meter">'
         f'<div class="ml-meter-line"></div>'
         f'<div class="ml-meter-mid"></div>'
         f'<div class="ml-meter-dot {status_cls}" style="left:{meter:.1f}%"></div>'
         f'</div>'
-        f'<div class="ml-meter-labels"><span>Trailing</span><b>{prob_text}</b><span>Leading</span></div>'
+        f'<div class="ml-meter-labels"><span>0%</span><b>50%</b><span>100%</span></div>'
     )
     return html, status_cls, status
 
@@ -2309,7 +2680,7 @@ def _score_rows(game):
         f'<div class="team-row"><span>{home}</span><b>{home_score}</b></div>'
     )
 
-def _visual_tracked_card(rec, game):
+def _visual_tracked_card(rec, game, win_prob=None):
     market = str(rec.get("Market") or "").upper()
     state = game_state(game)
     state_label = "FINAL" if state == "FINAL" else "LIVE"
@@ -2317,7 +2688,7 @@ def _visual_tracked_card(rec, game):
     if market == "TOTAL":
         bet_html, _, _ = _total_visual(rec, game)
     else:
-        bet_html, _, _ = _moneyline_visual(rec, game)
+        bet_html, _, _ = _moneyline_visual(rec, game, win_prob=win_prob)
 
     return (
         f'<div class="visual-bet-card">'
@@ -2332,13 +2703,15 @@ def _visual_tracked_card(rec, game):
         f'<i class="base-home"></i>'
         f'</div>'
         f'</div>'
+        f'{_game_win_probability_html(game, win_prob)}'
         f'<div class="visual-divider"></div>'
         f'{bet_html}'
         f'</div>'
     )
 
-def render_live_scoreboard(games, fresh_scoreboard, tracker_df):
-    """Visual live bet tracker modeled after the approved product mockup."""
+
+def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
+    """Premium live bet tracker with MLB win probability and slate-level tracking."""
     fresh_games = []
     for g0 in games:
         g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
@@ -2366,30 +2739,39 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df):
         f'<div class="tracker-hero">'
         f'<div><div class="tracker-eyebrow">LIVE MODEL MONITOR</div>'
         f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{len(tracked_live)}</span></div>'
-        f'<div class="tracker-sub">Real-time progress for qualified tracked recommendations</div></div>'
+        f'<div class="tracker-sub">Win probability, live bet progress, and today\'s slate status</div></div>'
         f'<div class="tracker-live-orb"><span></span>LIVE</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
+    summary = _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date)
+    st.markdown(_slate_pulse_html(summary), unsafe_allow_html=True)
+
     if tracked_live:
+        st.markdown('<div class="kicker">Live Tracked Bets</div>', unsafe_allow_html=True)
         for g, rec in tracked_live:
-            st.markdown(_visual_tracked_card(rec, g), unsafe_allow_html=True)
+            wp = fetch_live_win_probability(g.get("GamePk"))
+            st.markdown(_visual_tracked_card(rec, g, win_prob=wp), unsafe_allow_html=True)
     else:
         st.info("No tracked bets are live right now.")
 
     if tracked_final:
         with st.expander(f"Completed Tracked Bets — {len(tracked_final)}", expanded=False):
             for g, rec in tracked_final:
-                st.markdown(_visual_tracked_card(rec, g), unsafe_allow_html=True)
+                st.markdown(_visual_tracked_card(rec, g, win_prob=None), unsafe_allow_html=True)
 
     untracked_live = [g for g in live_list if tracked_rows_for_game(g.get("GamePk"), tracker_df).empty]
     if untracked_live:
         with st.expander(f"Other Live Games — {len(untracked_live)}", expanded=False):
             for g in untracked_live:
+                wp = fetch_live_win_probability(g.get("GamePk"))
                 st.markdown(
+                    f'<div class="plain-live-card-wrap">'
                     f'<div class="plain-live-card"><div><div class="score-state">{inning_status_text(g)}</div>'
-                    f'<div class="score-main">{live_score_text(g)}</div></div><div class="score-badge">LIVE</div></div>',
+                    f'<div class="score-main">{live_score_text(g)}</div></div><div class="score-badge">LIVE</div></div>'
+                    f'{_game_win_probability_html(g, wp)}'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -2553,7 +2935,7 @@ if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
     main_view = st.radio(
-        "Navigation",
+        "Main view",
         ["Board", "Tracker", "Results"],
         horizontal=True,
         label_visibility="collapsed",
@@ -2562,7 +2944,7 @@ else:
 
     if main_view == "Tracker":
         tracker_df = load_tracker()
-        render_live_scoreboard(games, fresh_scoreboard, tracker_df)
+        render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date)
         st.caption("Visual tracking only — no in-game recommendations.")
         st.stop()
 
