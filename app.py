@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.7.0-TABS-LIVE-TRACKING"
+APP_VERSION = "1.7.1-DUPLICATE-KEY-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1945,13 +1945,6 @@ else:
         st.stop()
 
     st.markdown('<div class="kicker">Betting Board</div>', unsafe_allow_html=True)
-    mode = st.radio(
-        "View mode",
-        ["Single Game", "Full Slate"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="production_view_mode",
-    )
     mode = st.radio(
         "View mode",
         ["Single Game", "Full Slate"],
