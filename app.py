@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.6.1-LIVE-BADGE-EXPANDER-FIX"
+APP_VERSION = "1.7.0-TABS-LIVE-TRACKING"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -464,6 +464,23 @@ div[data-testid="stAlert"][data-baseweb="notification"] {
     border-bottom: 1px solid #284159 !important;
     border-bottom-left-radius: 0 !important;
     border-bottom-right-radius: 0 !important;
+}
+
+
+/* v1.7 navigation + dedicated live scoreboard */
+.score-card{
+    margin:10px 0;padding:14px 15px;border-radius:16px;
+    background:#102238;border:1px solid #31506a;
+}
+.score-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.score-state{font-size:.68rem;font-weight:900;color:#9fb4c7;letter-spacing:.03em}
+.score-main{font-size:1.06rem;font-weight:950;color:#fff;line-height:1.25;margin-top:4px}
+.score-badge{font-size:.62rem;font-weight:950;color:#dce8f2;background:#26394b;border:1px solid #536b80;border-radius:999px;padding:6px 9px}
+.track-wrap{margin-top:10px;padding-top:8px;border-top:1px solid #29445c}
+.track-row{font-size:.72rem;color:#dce8f2;padding:4px 0;font-weight:750}
+@media(max-width:700px){
+  .score-card{padding:12px}
+  .score-main{font-size:.98rem}
 }
 
 </style>
@@ -1625,11 +1642,202 @@ def tracker_split_table(df):
     return pd.DataFrame(rows)
 
 
+
+def tracked_rows_for_game(game_pk, tracker_df=None):
+    if tracker_df is None:
+        tracker_df = load_tracker()
+    if tracker_df is None or tracker_df.empty:
+        return pd.DataFrame(columns=TRACKER_COLUMNS)
+    return tracker_df[tracker_df["GamePk"].astype(str) == str(game_pk)].copy()
+
+def live_tracking_text(rec, game):
+    """Describe how a frozen model recommendation is tracking right now."""
+    market = str(rec.get("Market", "")).upper()
+    result = str(rec.get("Result", "PENDING") or "PENDING").upper()
+    odds = rec.get("Odds")
+    try:
+        odds_txt = f"{int(float(odds)):+d}"
+    except Exception:
+        odds_txt = ""
+
+    if result in ("WIN", "LOSS", "PUSH", "VOID"):
+        try:
+            units = float(rec.get("Units") or 0)
+            unit_txt = f" • {units:+.2f}u" if result in ("WIN","LOSS") else ""
+        except Exception:
+            unit_txt = ""
+        return f'{rec.get("Pick")} {odds_txt} • {result}{unit_txt}'
+
+    try:
+        away_score = int(game.get("Away_Score"))
+        home_score = int(game.get("Home_Score"))
+    except Exception:
+        away_score = home_score = None
+
+    if market == "MONEYLINE":
+        pick = str(rec.get("Pick", ""))
+        status = "PENDING"
+        if away_score is not None and home_score is not None:
+            away_name = str(game.get("Away") or "")
+            home_name = str(game.get("Home") or "")
+            if team_key(pick) == team_key(away_name):
+                diff = away_score - home_score
+            elif team_key(pick) == team_key(home_name):
+                diff = home_score - away_score
+            else:
+                diff = 0
+            status = "AHEAD" if diff > 0 else ("BEHIND" if diff < 0 else "TIED")
+        return f'{pick} ML {odds_txt} • {status}'
+
+    if market == "TOTAL":
+        side = str(rec.get("Side", "")).upper()
+        try:
+            line = float(rec.get("Market_Line"))
+            line_txt = f"{line:.1f}"
+        except Exception:
+            line = None
+            line_txt = ""
+        current_total = None if away_score is None or home_score is None else away_score + home_score
+        if current_total is None or line is None:
+            return f'{side} {line_txt} {odds_txt} • PENDING'
+        if current_total > line:
+            position = "CURRENTLY OVER"
+        elif current_total < line:
+            position = "CURRENTLY UNDER"
+        else:
+            position = "AT THE LINE"
+        return f'{side} {line_txt} {odds_txt} • {current_total} RUNS • {position}'
+
+    return f'{rec.get("Pick")} {odds_txt} • {result}'
+
+def render_live_scoreboard(games, fresh_scoreboard, tracker_df):
+    """Dedicated live/final page with score, inning and tracked-model-pick progress."""
+    fresh_games = []
+    for g0 in games:
+        g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
+        state = game_state(g)
+        if state in ("LIVE", "FINAL"):
+            fresh_games.append(g)
+
+    live_list = [g for g in fresh_games if game_state(g) == "LIVE"]
+    final_list = [g for g in fresh_games if game_state(g) == "FINAL"]
+
+    st.markdown('<div class="kicker">Live Scores</div>', unsafe_allow_html=True)
+    st.caption("Scores and innings come from MLB. Tracked model picks are shown underneath the game they belong to.")
+
+    if live_list:
+        for g in live_list:
+            score = live_score_text(g)
+            inning = inning_status_text(g)
+            tracked = tracked_rows_for_game(g.get("GamePk"), tracker_df)
+            track_html = ""
+            if not tracked.empty:
+                bits = []
+                for _, rec in tracked.iterrows():
+                    bits.append(f'<div class="track-row">🎯 {live_tracking_text(rec, g)}</div>')
+                track_html = '<div class="track-wrap">' + "".join(bits) + '</div>'
+            st.markdown(
+                f'<div class="score-card">'
+                f'<div class="score-top"><div><div class="score-state">{inning}</div>'
+                f'<div class="score-main">{score}</div></div>'
+                f'<div class="score-badge">LIVE</div></div>'
+                f'{track_html}</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("No games are currently in progress.")
+
+    if final_list:
+        with st.expander(f"Final Games — {len(final_list)}", expanded=False):
+            for g in final_list:
+                tracked = tracked_rows_for_game(g.get("GamePk"), tracker_df)
+                track_html = ""
+                if not tracked.empty:
+                    bits = []
+                    for _, rec in tracked.iterrows():
+                        bits.append(f'<div class="track-row">🎯 {live_tracking_text(rec, g)}</div>')
+                    track_html = '<div class="track-wrap">' + "".join(bits) + '</div>'
+                st.markdown(
+                    f'<div class="score-card">'
+                    f'<div class="score-top"><div><div class="score-state">FINAL</div>'
+                    f'<div class="score-main">{live_score_text(g)}</div></div>'
+                    f'<div class="score-badge">FINAL</div></div>'
+                    f'{track_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
+def render_performance_page():
+    tracker_df = load_tracker()
+    perf = tracker_performance_summary(tracker_df)
+    record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
+
+    st.markdown('<div class="kicker">Model Performance</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="metrics">'
+        f'<div class="metric"><span>Record</span><b>{record_display}</b></div>'
+        f'<div class="metric"><span>Units</span><b>{perf["units"]:+.2f}</b></div>'
+        f'<div class="metric"><span>ROI</span><b>{perf["roi"]*100:+.1f}%</b></div>'
+        f'<div class="metric"><span>Pending</span><b>{perf["pending"]}</b></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Headline tracker includes qualified pregame BET/BEST BET signals only: confirmed lineups, confidence ≥80 and valid odds.")
+
+    if not tracker_df.empty:
+        split = tracker_split_table(tracker_df)
+        if not split.empty:
+            st.dataframe(split, use_container_width=True, hide_index=True)
+
+        recent_cols = ["Slate_Date","Game","Market","Pick","Odds","Grade","Result","Units"]
+        recent = tracker_df.sort_values(["Slate_Date","Logged_At_ET"], ascending=False)
+        st.dataframe(recent[[c for c in recent_cols if c in recent.columns]].head(50), use_container_width=True, hide_index=True)
+
+    if st.button("Refresh Results (free)", use_container_width=True, key="perf_refresh_results"):
+        tracker_results_for_date.clear()
+        n = grade_tracker(force=True)
+        st.success(f"Updated {n} completed recommendation(s)." if n else "No new finals to grade yet.")
+        st.rerun()
+
+    tracker_df = load_tracker()
+    st.download_button(
+        "Download Performance Tracker",
+        data=tracker_df.to_csv(index=False).encode("utf-8"),
+        file_name="mlb_model_recommendation_tracker.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="perf_download_tracker",
+    )
+
+    with st.expander("Tracker backup / restore", expanded=False):
+        restore_file = st.file_uploader("Restore tracker backup", type=["csv"], key="perf_restore_upload")
+        if st.button("Merge Tracker Backup", use_container_width=True, disabled=(restore_file is None), key="perf_restore_btn"):
+            try:
+                incoming = _tracker_clean(pd.read_csv(restore_file))
+                current = load_tracker()
+                merged = pd.concat([current, incoming], ignore_index=True)
+                merged = merged.drop_duplicates(subset=["Record_Key"], keep="first")
+                save_tracker(merged)
+                grade_tracker(force=True)
+                st.success(f"Tracker restored/merged: {len(merged)} total records.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not restore tracker: {e}")
+
+        diag_file = st.file_uploader("Import earlier Game Diagnostics CSV", type=["csv"], key="perf_diag_import")
+        if st.button("Import Earlier Pick", use_container_width=True, disabled=(diag_file is None), key="perf_diag_btn"):
+            n,msg = import_diagnostics_tracker(diag_file)
+            if n:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.warning(msg)
+
+
 st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">MLB Edge</div>
-  <div class="sub">Pick a mode, update odds when you want them, and see the answer first.</div>
+  <div class="sub">Betting board, live scores, and model performance — separated so each view stays simple.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -1649,7 +1857,7 @@ slate_date=st.date_input(
     label_visibility="collapsed",
 )
 free_refresh=st.button("Refresh Schedule + Scores (free)",use_container_width=True)
-st.caption("Browsing and score refreshes use 0 Odds API credits.")
+st.caption("Schedule and score refreshes are free. Odds update only when you press an odds button.")
 if free_refresh:
     st.cache_data.clear()
     try:
@@ -1694,9 +1902,13 @@ if st.session_state.get("odds_loaded") or st.session_state.get("totals_loaded"):
 else:
     qtxt="Market not loaded • 0 Odds API credits used"
 priced_games=sum(1 for x in candidates if x.get("market_available") and x.get("pregame"))
-pregame_games=sum(1 for x in candidates if x.get("pregame"))
-live_games=sum(1 for x in candidates if x.get("game_state")=="LIVE")
-final_games=sum(1 for x in candidates if x.get("game_state")=="FINAL")
+fresh_states=[]
+for _g0 in games:
+    _gf=fresh_scoreboard.get(str(_g0.get("GamePk")),_g0)
+    fresh_states.append(game_state(_gf))
+pregame_games=sum(1 for s in fresh_states if s=="PREGAME")
+live_games=sum(1 for s in fresh_states if s=="LIVE")
+final_games=sum(1 for s in fresh_states if s=="FINAL")
 st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MLB EDGE</span> &nbsp; {slate_date.strftime("%b %-d")} • {pregame_games} upcoming • {live_games} live • {final_games} final</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
 
 if odds_payload.get("error"):
@@ -1712,7 +1924,34 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
-    st.markdown('<div class="kicker">What do you want to view?</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Navigation</div>', unsafe_allow_html=True)
+    main_view = st.radio(
+        "Navigation",
+        ["Betting Board", "Live Scores", "Performance"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="main_navigation",
+    )
+
+    if main_view == "Live Scores":
+        tracker_df = load_tracker()
+        render_live_scoreboard(games, fresh_scoreboard, tracker_df)
+        st.markdown('<div class="kicker">About This View</div>', unsafe_allow_html=True)
+        st.caption("Tracked picks shown here are frozen model recommendations from the forward-performance ledger. Live status is informational only; no in-game betting recommendations are generated.")
+        st.stop()
+
+    if main_view == "Performance":
+        render_performance_page()
+        st.stop()
+
+    st.markdown('<div class="kicker">Betting Board</div>', unsafe_allow_html=True)
+    mode = st.radio(
+        "View mode",
+        ["Single Game", "Full Slate"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="production_view_mode",
+    )
     mode = st.radio(
         "View mode",
         ["Single Game", "Full Slate"],
@@ -1731,37 +1970,16 @@ else:
     if mode == "Single Game":
         chrono = sorted(candidates, key=start_sort)
         upcoming_single = [x for x in chrono if x.get("pregame")]
-        started_single = [x for x in chrono if x.get("game_state") in ("LIVE","FINAL")]
-        st.markdown('<div class="kicker">Game Status</div>', unsafe_allow_html=True)
-        single_group = st.radio(
-            "Game status",
-            ["Upcoming", "In Progress / Final"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="single_status_group",
-        )
-        single_pool = upcoming_single if single_group == "Upcoming" else started_single
+        single_group = "Upcoming"
+        single_pool = upcoming_single
         if not single_pool:
-            st.info("No games in this section.")
+            st.info("No upcoming games remain. Use the **Live Scores** tab for games already underway or final.")
             st.stop()
         labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
         st.markdown('<div class="kicker">Matchup</div>', unsafe_allow_html=True)
         selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup", label_visibility="collapsed")
         x = single_pool[labels.index(selected_label)]
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
-
-        if single_group == "In Progress / Final":
-            fresh_game = fresh_scoreboard.get(str(x["GamePk"]), selected_game)
-            state_now = game_state(fresh_game)
-            status_now = inning_status_text(fresh_game)
-            st.markdown(
-                f'<div class="best-card"><div class="best-top"><div>'
-                f'<div class="best-tag">{status_now}</div>'
-                f'<div class="best-pick">{live_score_text(fresh_game)}</div>'
-                f'<div class="best-game">{x["away_sp"]} vs {x["home_sp"]}</div>'
-                f'</div><div class="badge badge-pass">{state_now}</div></div></div>',
-                unsafe_allow_html=True,
-            )
 
         st.caption("One tap updates both the moneyline and total for this game.")
         selected_state = game_state(selected_game)
@@ -1941,44 +2159,6 @@ else:
                 )
                 st.markdown(html, unsafe_allow_html=True)
 
-        st.markdown('<div class="kicker">In Progress / Final</div>', unsafe_allow_html=True)
-        if live_now:
-            with st.expander(f"In Progress / Recently Final — {len(live_now)}", expanded=False):
-                for cx in live_now:
-                    g = fresh_scoreboard.get(
-                        str(cx.get("GamePk")),
-                        next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
-                    )
-                    score = live_score_text(g)
-                    inning = inning_status_text(g)
-                    display_state = game_state(g)
-                    display_badge = "FINAL" if display_state == "FINAL" else "LIVE"
-                    st.markdown(
-                        f'<div class="game-card"><div class="game-head"><div>'
-                        f'<div class="game-time">{inning}</div>'
-                        f'<div class="match">{score}</div>'
-                        f'<div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
-                        f'</div><div class="badge badge-pass">{display_badge}</div></div></div>',
-                        unsafe_allow_html=True,
-                    )
-        if final_now:
-            with st.expander(f"Final games — {len(final_now)}", expanded=False):
-                for cx in final_now:
-                    g = fresh_scoreboard.get(
-                        str(cx.get("GamePk")),
-                        next((gg for gg in games if gg.get("GamePk") == cx.get("GamePk")), {})
-                    )
-                    st.markdown(
-                        f'<div class="game-card"><div class="game-head"><div>'
-                        f'<div class="game-time">FINAL</div>'
-                        f'<div class="match">{live_score_text(g)}</div>'
-                        f'<div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
-                        f'</div><div class="badge badge-pass">FINAL</div></div></div>',
-                        unsafe_allow_html=True,
-                    )
-        if not live_now and not final_now:
-            st.caption("No games have started yet.")
-
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
         with st.expander("Download detailed analysis", expanded=False):
             export_df = slate_export_df(candidates)
@@ -2012,89 +2192,7 @@ else:
                         use_container_width=True,
                         key="download_full_totals_csv_v150",
                     )
-    st.markdown('<div class="kicker">Advanced</div>', unsafe_allow_html=True)
-    tracker_df = load_tracker()
-    perf = tracker_performance_summary(tracker_df)
-    perf_record = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
-    with st.expander(
-        f'Performance Tracker • {perf_record} • {perf["units"]:+.2f}u • {perf["pending"]} pending',
-        expanded=False,
-    ):
-        if tracker_df.empty:
-            st.info("No qualified BET/BEST BET recommendations have been frozen yet. A play enters the headline tracker only when lineups are confirmed, confidence is at least 80, the game is still pregame, and the play remains BET/BEST BET.")
-        else:
-            record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
-            st.markdown(
-                f'<div class="metrics"><div class="metric"><span>Record</span><b>{record_display}</b></div><div class="metric"><span>Units</span><b>{perf["units"]:+.2f}</b></div><div class="metric"><span>ROI</span><b>{perf["roi"]*100:+.1f}%</b></div><div class="metric"><span>Pending</span><b>{perf["pending"]}</b></div></div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                f"Tracker qualification: lineups confirmed • confidence ≥{TRACKER_MIN_CONFIDENCE_ML} • pregame • BET/BEST BET. "
-                "The first recommendation meeting all rules is frozen for forward performance."
-            )
-            split = tracker_split_table(tracker_df)
-            if not split.empty:
-                st.dataframe(split, use_container_width=True, hide_index=True)
-
-            graded = tracker_df[tracker_df["Result"].isin(["WIN","LOSS","PUSH"])].copy()
-            if not graded.empty:
-                graded["Cum_Units"] = pd.to_numeric(graded["Units"], errors="coerce").fillna(0).cumsum()
-                st.line_chart(graded[["Cum_Units"]], use_container_width=True)
-
-            show_cols = ["Slate_Date","Game","Market","Pick","Odds","Grade","Edge","EV","Result","Units","App_Version"]
-            recent = tracker_df.sort_values(["Slate_Date","Logged_At_ET"], ascending=False)
-            st.dataframe(recent[[c for c in show_cols if c in recent.columns]].head(50), use_container_width=True, hide_index=True)
-
-        c1,c2=st.columns(2)
-        with c1:
-            if st.button("Refresh Results Now (free)", use_container_width=True, key="tracker_refresh_results"):
-                tracker_results_for_date.clear()
-                n = grade_tracker(force=True)
-                st.success(f"Updated {n} completed recommendation(s)." if n else "No new finals to grade yet.")
-                st.rerun()
-        with c2:
-            tracker_df = load_tracker()
-            st.download_button(
-                "Download Performance Tracker",
-                data=tracker_df.to_csv(index=False).encode("utf-8"),
-                file_name="mlb_model_recommendation_tracker.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="tracker_backup_download",
-            )
-
-        st.caption("Tracker rule: only qualified pregame BET/BEST BET signals count — confirmed lineups, confidence ≥80, and valid odds. Earlier signals stay off the headline record. Results are graded automatically from MLB.")
-
-        restore_file = st.file_uploader("Restore tracker backup", type=["csv"], key="tracker_restore_upload")
-        if st.button("Merge Tracker Backup", use_container_width=True, disabled=(restore_file is None), key="tracker_restore_btn"):
-            try:
-                incoming = _tracker_clean(pd.read_csv(restore_file))
-                current = load_tracker()
-                merged = pd.concat([current, incoming], ignore_index=True)
-                merged = merged.drop_duplicates(subset=["Record_Key"], keep="first")
-                save_tracker(merged)
-                grade_tracker(force=True)
-                st.success(f"Tracker restored/merged: {len(merged)} total records.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not restore tracker: {e}")
-
-        st.markdown("**Backfill earlier recommendation**")
-        diag_file = st.file_uploader("Import Game Diagnostics CSV", type=["csv"], key="tracker_diag_import")
-        if st.button("Import Diagnostics Pick", use_container_width=True, disabled=(diag_file is None), key="tracker_diag_btn"):
-            n,msg = import_diagnostics_tracker(diag_file)
-            if n:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.warning(msg)
-
-        if st.session_state.get("_tracker_storage_error"):
-            st.warning("Tracker is currently saved in this app session, but local file persistence failed. Download a backup CSV before leaving the app.")
-        else:
-            st.caption("Storage note: the app also writes a local tracker file. Streamlit Cloud can replace its runtime filesystem during redeploys, so the downloadable backup is the safest long-term copy.")
-
-st.markdown('<div class="kicker">About</div>', unsafe_allow_html=True)
+st.markdown('<div class="kicker">More</div>', unsafe_allow_html=True)
 with st.expander("Model details & limitations", expanded=False):
     st.write("Moneyline uses the validated starting-pitcher + offense/platoon + lineup engine. Totals use the validated pitcher/run-environment framework. Bullpen and run lines remain excluded.")
     st.write("BET thresholds: moneyline BEST BET 10%+ edge, BET 7.5%+, LEAN 5%+. Totals BEST BET 12.5%+, BET 7.5%+, LEAN 5%+. Odds pulls remain manual-only.")
