@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.6-TRACKER-TIME-ORDER"
+APP_VERSION = "3.2.7-TRACKER-LIVE-FIRST"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -3723,7 +3723,7 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         f'<div class="tracker-hero">'
         f'<div><div class="tracker-eyebrow">OFFICIAL MODEL LEDGER</div>'
         f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{active_count}</span></div>'
-        f'<div class="tracker-sub">Official bets • upcoming by start time • live by game progress</div></div>'
+        f'<div class="tracker-sub">Official bets • live first by game progress • upcoming next by start time</div></div>'
         f'<div class="tracker-live-orb"><span></span>AUTO</div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -3731,6 +3731,19 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
 
     summary = _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date)
     st.markdown(_slate_pulse_html(summary), unsafe_allow_html=True)
+
+    # Priority order in Tracker:
+    # 1) Live tracked bets
+    # 2) Upcoming tracked bets
+    # 3) Completed tracked bets
+    if tracked_live:
+        st.markdown(
+            f'<div class="kicker">Live Tracked Bets — {len(tracked_live)}</div>',
+            unsafe_allow_html=True,
+        )
+        for g, rec in tracked_live:
+            wp = fetch_live_win_probability(g.get("GamePk"))
+            st.markdown(_visual_tracked_card(rec, g, win_prob=wp), unsafe_allow_html=True)
 
     if tracked_upcoming:
         st.markdown(
@@ -3740,15 +3753,7 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         for g, rec in tracked_upcoming:
             st.markdown(_pregame_tracked_card(rec, g), unsafe_allow_html=True)
 
-    if tracked_live:
-        st.markdown(
-            f'<div class="kicker">Live Tracked Bets — {len(tracked_live)}</div>',
-            unsafe_allow_html=True,
-        )
-        for g, rec in tracked_live:
-            wp = fetch_live_win_probability(g.get("GamePk"))
-            st.markdown(_visual_tracked_card(rec, g, win_prob=wp), unsafe_allow_html=True)
-    elif not tracked_upcoming:
+    if not tracked_live and not tracked_upcoming:
         st.info("No official tracked bets are upcoming or live right now.")
 
     if tracked_final:
