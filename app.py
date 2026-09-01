@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.4.0-SIMPLE-UI"
+APP_VERSION = "1.5.0-DAILY-BOARD"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -50,6 +50,344 @@ header[data-testid="stHeader"]{background:rgba(6,17,31,.78);backdrop-filter:blur
 .note{padding:11px 12px;border-radius:12px;background:rgba(59,130,246,.06);border:1px solid rgba(96,165,250,.12);color:#91a7bd;font-size:.72rem;line-height:1.45}
 .single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850!important;background:#123252!important;color:#f8fbff!important;border:1px solid #2d5b82!important;box-shadow:none!important}.stButton>button:hover{background:#174267!important;border-color:#4c86b5!important;color:#fff!important}.stButton>button:focus{color:#fff!important}.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{background:#0f766e!important;color:#fff!important;border-color:#2dd4bf!important}.stButton>button:disabled{background:#17263a!important;color:#8fa3ba!important;border-color:#2a3a4e!important;opacity:1!important}div[data-testid="stRadio"] label,div[data-testid="stRadio"] label p,div[data-testid="stRadio"] span{color:#eef5fb!important;opacity:1!important}div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p{color:#eef5fb!important}div[data-testid="stSelectbox"] label,div[data-testid="stDateInput"] label{color:#dbeafe!important}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
 @media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.detail-grid{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
+
+/* v1.4.1 readability fix */
+.stButton > button,
+.stDownloadButton > button {
+    background: #12395f !important;
+    color: #ffffff !important;
+    border: 1px solid #2d6f9e !important;
+    font-weight: 800 !important;
+}
+.stButton > button:disabled,
+.stDownloadButton > button:disabled {
+    background: #203247 !important;
+    color: #b9c8d6 !important;
+    border: 1px solid #41556a !important;
+    opacity: 1 !important;
+}
+.stButton > button p,
+.stDownloadButton > button p {
+    color: #ffffff !important;
+}
+.stButton > button:disabled p,
+.stDownloadButton > button:disabled p {
+    color: #b9c8d6 !important;
+}
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploader"] p,
+[data-testid="stFileUploader"] div {
+    color: #dce8f2 !important;
+}
+[data-testid="stFileUploaderDropzone"] {
+    background: #e9eef4 !important;
+    border: 1px solid #9eb2c4 !important;
+}
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploaderDropzone"] p,
+[data-testid="stFileUploaderDropzone"] div {
+    color: #516273 !important;
+}
+[data-testid="stFileUploaderDropzone"] button {
+    background: #ffffff !important;
+    color: #203247 !important;
+    border: 1px solid #c6d1dc !important;
+}
+[data-testid="stFileUploaderDropzone"] button p {
+    color: #203247 !important;
+}
+.stMarkdown p,
+.stCaption,
+[data-testid="stCaptionContainer"] p {
+    color: #aebdcc !important;
+}
+label,
+[data-testid="stWidgetLabel"] p {
+    color: #dce8f2 !important;
+}
+[data-testid="stExpander"] details summary p {
+    color: #eaf2f9 !important;
+    font-weight: 800 !important;
+}
+
+
+/* v1.4.2 global readability */
+html, body, [class*="css"] {
+    -webkit-font-smoothing: antialiased !important;
+    text-rendering: optimizeLegibility !important;
+}
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+.main {
+    background: #061321 !important;
+    color: #edf5fb !important;
+}
+.block-container {
+    max-width: 980px !important;
+    padding-top: 1.1rem !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    padding-bottom: 3rem !important;
+}
+
+/* Global text */
+h1, h2, h3, h4, h5, h6,
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3,
+.stMarkdown strong, .stMarkdown b {
+    color: #f8fbff !important;
+}
+.stMarkdown p,
+.stMarkdown li,
+.stCaption,
+[data-testid="stCaptionContainer"] p,
+[data-testid="stText"] {
+    color: #b8c7d6 !important;
+    line-height: 1.55 !important;
+}
+small {
+    color: #9fb0c1 !important;
+}
+
+/* Section labels */
+.kicker {
+    color: #7dd3fc !important;
+    font-size: .72rem !important;
+    letter-spacing: .14em !important;
+    font-weight: 950 !important;
+}
+.live {
+    color: #86efac !important;
+}
+.status {
+    color: #b9c8d6 !important;
+    background: #0a1a2b !important;
+    border-color: #29425a !important;
+}
+
+/* Radio / checkbox / toggle labels */
+[data-testid="stRadio"] label,
+[data-testid="stRadio"] p,
+[data-testid="stCheckbox"] label,
+[data-testid="stCheckbox"] p,
+[data-testid="stToggle"] label,
+[data-testid="stToggle"] p {
+    color: #eef5fb !important;
+    opacity: 1 !important;
+    font-weight: 750 !important;
+}
+[data-testid="stRadio"] [role="radiogroup"] {
+    gap: .7rem !important;
+}
+
+/* Inputs */
+[data-baseweb="select"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input {
+    background: #f4f7fa !important;
+    color: #162638 !important;
+    border-color: #afbecb !important;
+}
+[data-baseweb="select"] span,
+[data-baseweb="select"] input {
+    color: #162638 !important;
+}
+[data-testid="stWidgetLabel"] p,
+label {
+    color: #dbe7f1 !important;
+    font-weight: 750 !important;
+}
+
+/* Buttons */
+.stButton > button,
+.stDownloadButton > button {
+    background: #174a73 !important;
+    color: #ffffff !important;
+    border: 1px solid #4a88b8 !important;
+    font-weight: 850 !important;
+    min-height: 3rem !important;
+    border-radius: 13px !important;
+    opacity: 1 !important;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    background: #1d5b8c !important;
+    border-color: #6fb7e6 !important;
+    color: #ffffff !important;
+}
+.stButton > button p,
+.stDownloadButton > button p {
+    color: #ffffff !important;
+    opacity: 1 !important;
+}
+.stButton > button:disabled,
+.stDownloadButton > button:disabled {
+    background: #24384c !important;
+    color: #c8d4df !important;
+    border-color: #4c6277 !important;
+    opacity: 1 !important;
+}
+.stButton > button:disabled p,
+.stDownloadButton > button:disabled p {
+    color: #c8d4df !important;
+    opacity: 1 !important;
+}
+
+/* File uploader */
+[data-testid="stFileUploader"] {
+    color: #dce8f2 !important;
+}
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploader"] p {
+    color: #dce8f2 !important;
+}
+[data-testid="stFileUploaderDropzone"] {
+    background: #edf2f6 !important;
+    border: 1px solid #aab9c7 !important;
+}
+[data-testid="stFileUploaderDropzone"] * {
+    color: #42566a !important;
+}
+[data-testid="stFileUploaderDropzone"] button {
+    background: #ffffff !important;
+    color: #17324a !important;
+    border: 1px solid #b6c3cf !important;
+}
+[data-testid="stFileUploaderDropzone"] button p {
+    color: #17324a !important;
+}
+
+/* Expanders */
+[data-testid="stExpander"] {
+    border: 1px solid #284159 !important;
+    background: #081827 !important;
+    border-radius: 14px !important;
+}
+[data-testid="stExpander"] details summary {
+    color: #eef5fb !important;
+}
+[data-testid="stExpander"] details summary p {
+    color: #eef5fb !important;
+    font-weight: 800 !important;
+}
+[data-testid="stExpander"] svg {
+    fill: #dbe7f1 !important;
+}
+
+/* Alerts */
+[data-testid="stAlert"] {
+    border-radius: 14px !important;
+}
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] div {
+    color: inherit !important;
+}
+div[data-testid="stAlert"][data-baseweb="notification"] {
+    opacity: 1 !important;
+}
+
+/* Cards */
+.best-card, .game-card {
+    background: linear-gradient(180deg, #102238 0%, #0a1929 100%) !important;
+    border-color: #2b4359 !important;
+}
+.best-pick, .match, .pick-main {
+    color: #ffffff !important;
+}
+.best-game, .sp, .pick-sub, .game-time {
+    color: #a9bac9 !important;
+}
+.metric {
+    background: #14283d !important;
+    border-color: #31495f !important;
+}
+.metric span {
+    color: #9db0c2 !important;
+}
+.metric b {
+    color: #f8fbff !important;
+}
+.pick {
+    background: #071524 !important;
+}
+
+/* Badges */
+.badge-best {
+    color: #b6f7d0 !important;
+    background: #123c2a !important;
+    border-color: #2d7a53 !important;
+}
+.badge-bet {
+    color: #d6f0ff !important;
+    background: #10344b !important;
+    border-color: #2877a4 !important;
+}
+.badge-lean {
+    color: #ffe99a !important;
+    background: #3a3011 !important;
+    border-color: #806b17 !important;
+}
+.badge-pass {
+    color: #cbd8e4 !important;
+    background: #24313e !important;
+    border-color: #495b6d !important;
+}
+.lineup-ok { color: #8df0b7 !important; }
+.lineup-wait { color: #ffe27a !important; }
+
+/* Dataframes */
+[data-testid="stDataFrame"] {
+    border: 1px solid #2a435c !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+[data-testid="stDataFrame"] * {
+    font-size: .82rem !important;
+}
+
+/* Tabs if introduced later */
+[data-baseweb="tab-list"] button {
+    color: #c9d6e2 !important;
+}
+[data-baseweb="tab-list"] button[aria-selected="true"] {
+    color: #ffffff !important;
+    font-weight: 850 !important;
+}
+
+/* Mobile tuning */
+@media (max-width: 700px) {
+    .block-container {
+        padding-left: .75rem !important;
+        padding-right: .75rem !important;
+    }
+    .best-pick {
+        font-size: 1.25rem !important;
+        line-height: 1.2 !important;
+    }
+    .match {
+        font-size: 1rem !important;
+        line-height: 1.25 !important;
+    }
+    .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+    }
+    .metric {
+        min-height: 66px !important;
+    }
+    .status {
+        display: block !important;
+        line-height: 1.45 !important;
+    }
+    .stButton > button,
+    .stDownloadButton > button {
+        font-size: .95rem !important;
+    }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -1091,7 +1429,7 @@ st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
   <div class="title">MLB Edge</div>
-  <div class="sub">Simple daily MLB betting board. Choose a date, load odds only when you want them, and keep upcoming games separate from games already in progress.</div>
+  <div class="sub">Daily MLB board: upcoming plays first, live/final games separated, advanced details tucked away.</div>
   <div class="pill">MODEL LIVE • {APP_VERSION}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -1111,8 +1449,8 @@ with ctrl2:
 with ctrl3:
     st.caption("Totals market")
     load_totals_market=st.button("Load Full Slate Totals Odds",use_container_width=True)
-st.caption("Nothing calls The Odds API automatically. Moneyline and totals are separate manual pulls so you control credits.")
-st.caption("Pregame only: once MLB marks a game live/final (or scheduled first-pitch time has passed), its odds are removed from BET/LEAN cards and single-game odds buttons are disabled.")
+st.caption("Odds are manual-only. Load ML or totals only when you want current prices.")
+st.caption("Started games move out of the betting board automatically.")
 
 free_refresh=st.button("Refresh MLB schedule/model data (free)",use_container_width=True)
 if free_refresh:
@@ -1184,7 +1522,7 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
-    st.markdown('<div class="kicker">Tools</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Performance & Tools</div>', unsafe_allow_html=True)
     tracker_df = load_tracker()
     perf = tracker_performance_summary(tracker_df)
     perf_record = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
@@ -1235,9 +1573,9 @@ else:
                 key="tracker_backup_download",
             )
 
-        st.caption("Qualified BET/BEST BET signals are frozen automatically at the first price where all tracker rules are met: confirmed lineups, confidence ≥80, pregame status, and a valid official grade. Earlier morning signals can still appear on the live board but do not count in headline record/ROI. Refreshes never overwrite a qualified entry. MLB final scores are graded with the free MLB Stats API, not The Odds API.")
+        st.caption("Tracker rule: only qualified pregame BET/BEST BET signals count — confirmed lineups, confidence ≥80, and valid odds. Earlier signals stay off the headline record. Results are graded automatically from MLB.")
 
-        restore_file = st.file_uploader("Restore / merge tracker backup", type=["csv"], key="tracker_restore_upload")
+        restore_file = st.file_uploader("Restore tracker backup", type=["csv"], key="tracker_restore_upload")
         if st.button("Merge Tracker Backup", use_container_width=True, disabled=(restore_file is None), key="tracker_restore_btn"):
             try:
                 incoming = _tracker_clean(pd.read_csv(restore_file))
@@ -1251,8 +1589,8 @@ else:
             except Exception as e:
                 st.error(f"Could not restore tracker: {e}")
 
-        st.markdown("**Backfill an earlier model recommendation (legacy)**")
-        diag_file = st.file_uploader("Import a downloaded Game Diagnostics CSV (legacy backfill)", type=["csv"], key="tracker_diag_import")
+        st.markdown("**Backfill earlier recommendation**")
+        diag_file = st.file_uploader("Import Game Diagnostics CSV", type=["csv"], key="tracker_diag_import")
         if st.button("Import Diagnostics Pick", use_container_width=True, disabled=(diag_file is None), key="tracker_diag_btn"):
             n,msg = import_diagnostics_tracker(diag_file)
             if n:
@@ -1431,171 +1769,141 @@ else:
                 st.rerun()
 
     else:
-        official=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection") in ("BEST BET","BET")], key=lambda x:x["best"].get("smart_score",-999), reverse=True)[:5]
-        secondary=sorted([x for x in candidates if x["market_available"] and x["best"].get("selection")=="LEAN"], key=lambda x:x["best"].get("smart_score",-999), reverse=True)
-        priced=[x for x in candidates if x["market_available"]]
+        upcoming = sorted([x for x in candidates if x.get("pregame")], key=start_sort)
+        live_now = sorted([x for x in candidates if x.get("game_state") == "LIVE"], key=start_sort)
+        final_now = sorted([x for x in candidates if x.get("game_state") == "FINAL"], key=start_sort)
 
-        if not priced:
-            st.markdown('<div class="kicker">Today\'s Model View</div>',unsafe_allow_html=True)
-            st.info("Live odds are not loaded. The slate remains fully selectable in model-only mode; load full-slate odds only when you want priced recommendations.")
+        st.markdown('<div class="kicker">Upcoming</div>', unsafe_allow_html=True)
+        if not upcoming:
+            st.info("No upcoming games remain on this slate.")
         else:
-            st.markdown('<div class="kicker">Today\'s Plays</div>',unsafe_allow_html=True)
-            plays=official + secondary
-            if not plays:
-                st.info("No game currently reaches the 5% LEAN threshold. The model is passing the slate at these prices.")
-            else:
-                st.caption(f"{len(official)} official bet{'s' if len(official)!=1 else ''} • {len(secondary)} lean{'s' if len(secondary)!=1 else ''}. BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%. No minimum number of bets is forced.")
-                rank=1
-                for x in plays[:8]:
-                    b=x["best"]
-                    is_official=b["selection"] in ("BEST BET","BET")
-                    rank_label=f"#{rank}" if is_official else "WATCH"
-                    if is_official:
-                        rank+=1
-                    st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{rank_label} • {x['time']}</div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="pick"><div><div class="pick-main">{b['team']} ML {b['odds']:+d}</div><div class="pick-sub">{b['book']} • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • Win {b['prob']*100:.1f}%</div></div><div class="{'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'}" style="font-size:.60rem;font-weight:900">{'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'}</div></div></div>''',unsafe_allow_html=True)
-
-        other_games=[x for x in sorted(candidates,key=start_sort) if x["best"].get("selection") not in ("BEST BET","BET","LEAN")]
-        st.markdown('<div class="kicker">Other Games</div>',unsafe_allow_html=True)
-        st.caption(f"{len(other_games)} game{'s' if len(other_games)!=1 else ''} currently outside the play list. Expand any matchup for the full model view.")
-        for x in other_games:
-            b=x["best"]
-            with st.expander(f"{x['time']}  •  {x['away']} @ {x['home']}  —  {b['selection']}",expanded=False):
-                if x['market_available']:
-                    pick_html=f"<div class='pick'><div><div class='pick-main'>{b['team']} ML {b['odds']:+d}</div><div class='pick-sub'>Win {b['prob']*100:.1f}% • Edge {b['edge']*100:+.1f}% • EV {b['ev']*100:+.1f}% • Fair {b['fair']:+d} • {b['book']}</div></div></div>"
-                    cap=f"Calibration: {x['alpha']*100:.0f}% model / {(1-x['alpha'])*100:.0f}% market."
-                else:
-                    away_side=next(z for z in x['all'] if z['team']==x['away'])
-                    home_side=next(z for z in x['all'] if z['team']==x['home'])
-                    pick_html=f"<div class='pick'><div><div class='pick-main'>Model: {x['away']} {away_side['prob']*100:.1f}% • {x['home']} {home_side['prob']*100:.1f}%</div><div class='pick-sub'>Fair lines {x['away']} {away_side['fair']:+d} • {x['home']} {home_side['fair']:+d} • live moneyline unavailable</div></div></div>"
-                    cap="Model-only projection; no betting verdict until a valid live market is available."
-                st.markdown(f'''<div class="game-card" style="margin-top:0"><div class="game-head"><div><div class="match">{x['away']} @ {x['home']}</div><div class="sp">{x['away_sp']} vs {x['home_sp']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div>{pick_html}</div>''',unsafe_allow_html=True)
-                st.caption(f"Model projected runs: {x['away']} {x['away_proj']:.2f} — {x['home']} {x['home_proj']:.2f}. {cap} {x['lineup_status']}.")
-                if x.get("confidence_reasons"):
-                    st.caption(f"Data notes: {x['confidence_reasons']}")
-        st.markdown('<div class="kicker">Totals Plays</div>', unsafe_allow_html=True)
-        if not st.session_state.get("totals_loaded"):
-            st.info("Totals odds are not loaded. Use **Load Full Slate Totals Odds** only when you want priced totals recommendations.")
-        else:
-            total_rows=[]
-            for cx in sorted(candidates,key=start_sort):
-                if not cx.get("pregame"):
-                    continue
-                mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
-                if mr.empty:
-                    continue
-                ctx=engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine,"totals_projection") else {"Projected_Total":cx['away_proj']+cx['home_proj']}
-                game_obj=next((g for g in games if g.get("GamePk")==cx["GamePk"]),None)
-                ev=match_event(totals_payload.get("events",[]),game_obj) if game_obj else None
-                tm=totals_market(ev)
-                if not tm:
-                    continue
-                tp=build_total_pick(float(ctx["Projected_Total"]),tm)
-                if tp is None:
-                    continue
-                total_rows.append((cx,tp,ctx))
-
-            official_totals=sorted(
-                [z for z in total_rows if z[1]["grade"] in ("BEST BET","BET")],
-                key=lambda z:(z[1]["edge"],z[1]["ev"]),
-                reverse=True
-            )[:TOTALS_MAX_OFFICIAL]
-            lean_totals=sorted(
-                [z for z in total_rows if z[1]["grade"]=="LEAN"],
-                key=lambda z:(z[1]["edge"],z[1]["ev"]),
-                reverse=True
+            official = sorted(
+                [x for x in upcoming if x.get("market_available") and x["best"].get("selection") in ("BEST BET","BET")],
+                key=lambda x:x["best"].get("smart_score",-999), reverse=True
+            )[:5]
+            secondary = sorted(
+                [x for x in upcoming if x.get("market_available") and x["best"].get("selection") == "LEAN"],
+                key=lambda x:x["best"].get("smart_score",-999), reverse=True
             )
+            priced_upcoming = [x for x in upcoming if x.get("market_available")]
 
-            st.caption(f"Maximum {TOTALS_MAX_OFFICIAL} official totals plays. BEST BET starts at 12.5% edge, BET at 7.5%, LEAN at 5%. No minimum number of bets is forced.")
-            if not official_totals and not lean_totals:
-                st.info("No total currently reaches the 5% LEAN threshold.")
+            st.markdown('<div class="kicker">Moneyline Plays</div>', unsafe_allow_html=True)
+            if not priced_upcoming:
+                st.caption("Moneyline odds are not loaded for the upcoming slate. Use **Load Full Slate ML Odds** above when you want priced recommendations.")
             else:
-                rank=1
-                for cx,tp,ctx in official_totals + lean_totals[:5]:
-                    official=tp["grade"] in ("BEST BET","BET")
-                    label=f"#{rank}" if official else "WATCH"
-                    if official:
-                        rank+=1
-                    st.markdown(f'''<div class="game-card"><div class="game-head"><div><div class="game-time">{label} • {cx["time"]}</div><div class="match">{cx["away"]} @ {cx["home"]}</div><div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="pick"><div><div class="pick-main">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="pick-sub">{tp["book"]} • Edge {tp["edge"]*100:+.1f}% • EV {tp["ev"]*100:+.1f}% • Raw model {float(ctx["Projected_Total"]):.2f} • Calibrated {tp["calibrated_total"]:.2f}</div></div><div class="{"lineup-ok" if cx["lineup_confirmed"] else "lineup-wait"}" style="font-size:.60rem;font-weight:900">{"LINEUPS ✓" if cx["lineup_confirmed"] else "LINEUPS WAIT"}</div></div></div>''',unsafe_allow_html=True)
+                plays = official + secondary
+                if not plays:
+                    st.info("No moneyline currently reaches the 5% LEAN threshold.")
+                else:
+                    st.caption(f"{len(official)} official • {len(secondary)} lean. Only upcoming games can appear here.")
+                    rank=1
+                    for x in plays[:8]:
+                        b=x["best"]
+                        official_flag=b["selection"] in ("BEST BET","BET")
+                        rank_label=f"#{rank}" if official_flag else "WATCH"
+                        if official_flag: rank += 1
+                        lineup_class = 'lineup-ok' if x['lineup_confirmed'] else 'lineup-wait'
+                        lineup_label = 'LINEUPS ✓' if x['lineup_confirmed'] else 'LINEUPS WAIT'
+                        html = (
+                            f'<div class="game-card"><div class="game-head"><div><div class="game-time">{rank_label} • {x["time"]}</div>'
+                            f'<div class="match">{x["away"]} @ {x["home"]}</div><div class="sp">{x["away_sp"]} vs {x["home_sp"]}</div></div>'
+                            f'<div class="badge {cls(b["selection"])}">{b["selection"]}</div></div><div class="pick"><div>'
+                            f'<div class="pick-main">{b["team"]} ML {b["odds"]:+d}</div><div class="pick-sub">{b["book"]} • Edge {b["edge"]*100:+.1f}% • EV {b["ev"]*100:+.1f}% • Fair {b["fair"]:+d}</div>'
+                            f'</div><div class="{lineup_class}" style="font-size:.60rem;font-weight:900">{lineup_label}</div></div></div>'
+                        )
+                        st.markdown(html, unsafe_allow_html=True)
 
-            other_totals=[z for z in total_rows if z[1]["grade"]=="PASS"]
-            with st.expander(f"Other totals — {len(other_totals)} PASS",expanded=False):
-                for cx,tp,ctx in other_totals:
-                    st.write(f'{cx["time"]} • {cx["away"]} @ {cx["home"]} — {tp["side"]} {tp["market_total"]:.1f} • edge {tp["edge"]*100:+.1f}% • model {float(ctx["Projected_Total"]):.2f}')
+            st.markdown('<div class="kicker">Totals Plays</div>', unsafe_allow_html=True)
+            if not st.session_state.get("totals_loaded"):
+                st.caption("Totals odds are not loaded. Use **Load Full Slate Totals Odds** above only when you want priced totals recommendations.")
+            else:
+                total_rows=[]
+                for cx in upcoming:
+                    mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
+                    if mr.empty: continue
+                    ctx=engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine,"totals_projection") else {"Projected_Total":cx['away_proj']+cx['home_proj']}
+                    game_obj=next((g for g in games if g.get("GamePk")==cx["GamePk"]),None)
+                    ev=match_event(totals_payload.get("events",[]),game_obj) if game_obj else None
+                    tm=totals_market(ev)
+                    if not tm: continue
+                    tp=build_total_pick(float(ctx["Projected_Total"]),tm)
+                    if tp is None: continue
+                    total_rows.append((cx,tp,ctx))
+                official_totals=sorted([z for z in total_rows if z[1]["grade"] in ("BEST BET","BET")], key=lambda z:(z[1]["edge"],z[1]["ev"]), reverse=True)[:TOTALS_MAX_OFFICIAL]
+                lean_totals=sorted([z for z in total_rows if z[1]["grade"]=="LEAN"], key=lambda z:(z[1]["edge"],z[1]["ev"]), reverse=True)
+                if not official_totals and not lean_totals:
+                    st.caption("No total currently reaches the 5% LEAN threshold.")
+                else:
+                    rank=1
+                    for cx,tp,ctx in official_totals + lean_totals[:5]:
+                        official_flag=tp["grade"] in ("BEST BET","BET")
+                        label=f"#{rank}" if official_flag else "WATCH"
+                        if official_flag: rank+=1
+                        lineup_class = 'lineup-ok' if cx['lineup_confirmed'] else 'lineup-wait'
+                        lineup_label = 'LINEUPS ✓' if cx['lineup_confirmed'] else 'LINEUPS WAIT'
+                        html = (
+                            f'<div class="game-card"><div class="game-head"><div><div class="game-time">{label} • {cx["time"]}</div>'
+                            f'<div class="match">{cx["away"]} @ {cx["home"]}</div><div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div>'
+                            f'<div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="pick"><div>'
+                            f'<div class="pick-main">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="pick-sub">{tp["book"]} • Edge {tp["edge"]*100:+.1f}% • EV {tp["ev"]*100:+.1f}% • Model {float(ctx["Projected_Total"]):.2f}</div>'
+                            f'</div><div class="{lineup_class}" style="font-size:.60rem;font-weight:900">{lineup_label}</div></div></div>'
+                        )
+                        st.markdown(html, unsafe_allow_html=True)
 
+            with st.expander(f"All upcoming games — {len(upcoming)}", expanded=False):
+                for x in upcoming:
+                    b=x["best"]
+                    label=b.get("selection") if x.get("market_available") else "MODEL ONLY"
+                    st.write(f'{x["time"]} • {x["away"]} @ {x["home"]} — {label}')
 
-        if st.session_state.get("totals_loaded"):
-            totals_export_rows = []
-            for cx in sorted(candidates, key=start_sort):
-                if not cx.get("pregame"):
-                    continue
-                mr = model_df.loc[model_df["GamePk"] == cx["GamePk"]]
-                if mr.empty:
-                    continue
-                row_dict = mr.iloc[0].to_dict()
-                ctx = engine.totals_projection(row_dict) if hasattr(engine, "totals_projection") else {
-                    "Projected_Total": cx["away_proj"] + cx["home_proj"]
-                }
-                game_obj = next((g for g in games if g.get("GamePk") == cx["GamePk"]), None)
-                ev = match_event(totals_payload.get("events", []), game_obj) if game_obj else None
-                tm = totals_market(ev)
-                tp = build_total_pick(float(ctx["Projected_Total"]), tm) if tm else None
-                totals_export_rows.append(totals_download_row(row_dict, ctx, tp))
-            if totals_export_rows:
-                totals_export_df = pd.DataFrame(totals_export_rows)
-                st.download_button(
-                    "Download Totals Analysis",
-                    data=totals_export_df.to_csv(index=False).encode("utf-8"),
-                    file_name=f"mlb_totals_board_{slate_date.strftime('%Y-%m-%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="download_full_totals_csv",
-                )
-                st.caption("Exports the totals board already in memory. No additional Odds API credits are used.")
-
-        st.markdown('<div class="kicker">In Progress / Final</div>', unsafe_allow_html=True)
-        live_now = [x for x in candidates if x.get("game_state") == "LIVE"]
-        final_now = [x for x in candidates if x.get("game_state") == "FINAL"]
+        st.markdown('<div class="kicker">Live / Final</div>', unsafe_allow_html=True)
+        if live_now:
+            with st.expander(f"Live games — {len(live_now)}", expanded=False):
+                for cx in live_now:
+                    st.write(f'LIVE • {cx["away"]} @ {cx["home"]}')
+        if final_now:
+            with st.expander(f"Final games — {len(final_now)}", expanded=False):
+                for cx in final_now:
+                    st.write(f'FINAL • {cx["away"]} @ {cx["home"]}')
         if not live_now and not final_now:
             st.caption("No games have started yet.")
-        else:
-            if live_now:
-                for cx in sorted(live_now, key=start_sort):
-                    st.markdown(
-                        f'<div class="game-card"><div class="game-head"><div><div class="game-time">LIVE</div><div class="match">{cx["away"]} @ {cx["home"]}</div><div class="sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div><div class="badge badge-pass">LIVE</div></div></div>',
-                        unsafe_allow_html=True,
-                    )
-            if final_now:
-                with st.expander(f"Final games — {len(final_now)}", expanded=False):
-                    for cx in sorted(final_now, key=start_sort):
-                        st.write(f'{cx["time"]} • {cx["away"]} @ {cx["home"]} — FINAL')
 
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
-        if "show_slate_downloads" not in st.session_state:
-            st.session_state.show_slate_downloads = False
-        if not st.session_state.show_slate_downloads:
-            if st.button("Open Full Slate Downloads", key="open_slate_downloads", use_container_width=True):
-                st.session_state.show_slate_downloads = True
-                st.rerun()
-        else:
+        with st.expander("Download detailed slate analysis", expanded=False):
             export_df = slate_export_df(candidates)
             st.download_button(
-                "Download Today's Moneyline Board",
+                "Download Moneyline Analysis",
                 export_df.to_csv(index=False).encode("utf-8"),
                 file_name="mlb_production_moneyline_board.csv",
                 mime="text/csv",
                 use_container_width=True,
-                key="download_full_slate_board",
+                key="download_full_slate_board_v150",
             )
-            if st.button("Close Downloads", key="close_slate_downloads", use_container_width=True):
-                st.session_state.show_slate_downloads = False
-                st.rerun()
-
-st.markdown('<div class="kicker">Model Guardrails</div>',unsafe_allow_html=True)
-st.markdown("""
-<div class="note"><b>Production scope:</b> moneyline + totals. Moneyline keeps the frozen starting-pitcher + offense/platoon + lineup engine. Totals use the same live baseball core, an 80% model / 20% market calibration informed by 2024 validation, and the historical residual spread from the totals audit. Bullpen remains excluded; park/weather are context only because park failed to improve the integrity audit. Run lines remain excluded. Diagnostics Download keeps the same edge-driven bet-selection thresholds and adds closable download panels plus selected-game diagnostic export: BEST BET starts at 10% edge, BET at 7.5%, LEAN at 5%, and PASS below 5%, while +200 or longer dogs remain materially stricter and require confirmed lineups for official status. EV remains visible and influences ranking but is not a separate hard gate. Odds API pulls are manual-only. Moneyline and totals are separate requests so you control which market consumes credits. Single Game and Full Slate each support explicit totals pulls. Totals grading is BEST BET at 12.5%+ edge, BET at 7.5%+, LEAN at 5%+, with at most three official totals plays per slate. Date changes, mode changes, matchup selection and model-only views consume zero odds credits.</div>
-""",unsafe_allow_html=True)
-
-with st.expander("Research basis & limitations",expanded=False):
-    st.write("The research sequence rejected a team-only moneyline model, isolated a starting-pitcher signal through placebo/causality tests, improved it with Pitcher Model 2.0, rejected bullpen, and promoted offense/platoon plus lineup information. Totals then failed in the simple baseline, passed after adding pitcher + run-environment structure, and survived scrambled/no-starter integrity checks before this production promotion.")
-    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary. v1.3.1 uses a qualified forward-performance ledger: only pregame BET/BEST BET signals with confirmed lineups and confidence ≥80 are frozen, then auto-graded from MLB final scores.")
+            if st.session_state.get("totals_loaded"):
+                totals_export_rows=[]
+                for cx in upcoming:
+                    mr=model_df.loc[model_df["GamePk"]==cx["GamePk"]]
+                    if mr.empty: continue
+                    row_dict=mr.iloc[0].to_dict()
+                    ctx=engine.totals_projection(row_dict) if hasattr(engine,"totals_projection") else {"Projected_Total":cx['away_proj']+cx['home_proj']}
+                    game_obj=next((g for g in games if g.get("GamePk")==cx["GamePk"]),None)
+                    ev=match_event(totals_payload.get("events",[]),game_obj) if game_obj else None
+                    tm=totals_market(ev)
+                    tp=build_total_pick(float(ctx["Projected_Total"]),tm) if tm else None
+                    totals_export_rows.append(totals_download_row(row_dict,ctx,tp))
+                if totals_export_rows:
+                    totals_export_df=pd.DataFrame(totals_export_rows)
+                    st.download_button(
+                        "Download Totals Analysis",
+                        data=totals_export_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"mlb_totals_board_{slate_date.strftime('%Y-%m-%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="download_full_totals_csv_v150",
+                    )
+st.markdown('<div class="kicker">About</div>', unsafe_allow_html=True)
+with st.expander("Model details & limitations", expanded=False):
+    st.write("Moneyline uses the validated starting-pitcher + offense/platoon + lineup engine. Totals use the validated pitcher/run-environment framework. Bullpen and run lines remain excluded.")
+    st.write("BET thresholds: moneyline BEST BET 10%+ edge, BET 7.5%+, LEAN 5%+. Totals BEST BET 12.5%+, BET 7.5%+, LEAN 5%+. Odds pulls remain manual-only.")
+    st.write("Forward tracker counts only qualified pregame BET/BEST BET signals with confirmed lineups, confidence ≥80 and valid odds, then grades them from MLB final scores.")
     st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")
