@@ -2,6 +2,7 @@ import math
 import re
 import statistics
 from datetime import timedelta
+from pathlib import Path
 from statistics import median
 
 import pandas as pd
@@ -28,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.2.0.5-TOTALS-DOWNLOAD-FIX"
+APP_VERSION = "1.3.0-FORWARD-TRACKER"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -692,6 +693,378 @@ def slate_export_df(candidates):
         })
     return pd.DataFrame(rows)
 
+
+TRACKER_DIR = Path(".mlb_tracker")
+TRACKER_PATH = TRACKER_DIR / "model_recommendations.csv"
+TRACKER_COLUMNS = [
+    "Record_Key","Logged_At_ET","Slate_Date","GamePk","Game","Start_Time_UTC",
+    "Market","Pick","Side","Market_Line","Odds","Book","Grade",
+    "Model_Probability","Edge","EV","Fair_Line","Model_Weight","Market_Weight",
+    "Lineups_Confirmed","Model_Confidence","App_Version","Model_Version",
+    "Result","Units","Final_Away_Score","Final_Home_Score","Final_Total",
+    "Graded_At_ET",
+]
+
+def empty_tracker():
+    return pd.DataFrame(columns=TRACKER_COLUMNS)
+
+def _tracker_clean(df):
+    if df is None or df.empty:
+        return empty_tracker()
+    out = df.copy()
+    for c in TRACKER_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
+    return out[TRACKER_COLUMNS]
+
+def load_tracker():
+    if "_model_tracker_df" in st.session_state:
+        return _tracker_clean(st.session_state["_model_tracker_df"])
+    try:
+        if TRACKER_PATH.exists():
+            df = pd.read_csv(TRACKER_PATH)
+        else:
+            df = empty_tracker()
+    except Exception:
+        df = empty_tracker()
+    st.session_state["_model_tracker_df"] = _tracker_clean(df)
+    return _tracker_clean(df)
+
+def save_tracker(df):
+    df = _tracker_clean(df)
+    st.session_state["_model_tracker_df"] = df.copy()
+    try:
+        TRACKER_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = TRACKER_PATH.with_suffix(".tmp")
+        df.to_csv(tmp, index=False)
+        tmp.replace(TRACKER_PATH)
+        st.session_state["_tracker_storage_error"] = ""
+        return True
+    except Exception as e:
+        st.session_state["_tracker_storage_error"] = str(e)
+        return False
+
+def _now_et_iso():
+    return pd.Timestamp.now(tz="America/New_York").isoformat()
+
+def _game_lookup(games):
+    return {str(g.get("GamePk")): g for g in games}
+
+def _append_tracker_row(row):
+    df = load_tracker()
+    key = str(row.get("Record_Key"))
+    if key in set(df["Record_Key"].astype(str)):
+        return False
+    full = {c: row.get(c) for c in TRACKER_COLUMNS}
+    full["Result"] = full.get("Result") or "PENDING"
+    if full.get("Units") is None:
+        full["Units"] = 0.0
+    df = pd.concat([df, pd.DataFrame([full])], ignore_index=True)
+    save_tracker(df)
+    return True
+
+def track_current_official_recommendations(candidates, games, slate_date):
+    """Freeze the first official ML signal for each game. Never overwrite later line moves."""
+    game_map = _game_lookup(games)
+    added = 0
+    for x in candidates:
+        if not x.get("pregame") or not x.get("market_available"):
+            continue
+        b = x.get("best") or {}
+        if b.get("selection") not in ("BET", "BEST BET"):
+            continue
+        g = game_map.get(str(x.get("GamePk")), {})
+        row = {
+            "Record_Key": f'{x.get("GamePk")}|MONEYLINE',
+            "Logged_At_ET": _now_et_iso(),
+            "Slate_Date": str(slate_date),
+            "GamePk": x.get("GamePk"),
+            "Game": x.get("game"),
+            "Start_Time_UTC": g.get("GameDate"),
+            "Market": "MONEYLINE",
+            "Pick": b.get("team"),
+            "Side": b.get("team"),
+            "Market_Line": None,
+            "Odds": b.get("odds"),
+            "Book": b.get("book"),
+            "Grade": b.get("selection"),
+            "Model_Probability": b.get("prob"),
+            "Edge": b.get("edge"),
+            "EV": b.get("ev"),
+            "Fair_Line": b.get("fair"),
+            "Model_Weight": x.get("alpha"),
+            "Market_Weight": 1 - float(x.get("alpha", 0)) if x.get("alpha") is not None else None,
+            "Lineups_Confirmed": x.get("lineup_confirmed"),
+            "Model_Confidence": x.get("confidence"),
+            "App_Version": APP_VERSION,
+            "Model_Version": MODEL_VERSION,
+            "Result": "PENDING",
+            "Units": 0.0,
+        }
+        added += int(_append_tracker_row(row))
+    return added
+
+def track_current_total_recommendations(candidates, games, model_df, totals_payload, slate_date):
+    """Freeze the first official totals signal for each game when totals odds are loaded."""
+    if not st.session_state.get("totals_loaded") or model_df is None or model_df.empty:
+        return 0
+    added = 0
+    game_map = _game_lookup(games)
+    for x in candidates:
+        if not x.get("pregame"):
+            continue
+        mr = model_df.loc[model_df["GamePk"] == x["GamePk"]]
+        if mr.empty:
+            continue
+        g = game_map.get(str(x.get("GamePk")), {})
+        ev = match_event(totals_payload.get("events", []), g) if g else None
+        tm = totals_market(ev)
+        if not tm:
+            continue
+        ctx = engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine, "totals_projection") else {
+            "Projected_Total": x["away_proj"] + x["home_proj"]
+        }
+        tp = build_total_pick(float(ctx["Projected_Total"]), tm)
+        if not tp or tp.get("grade") not in ("BET", "BEST BET"):
+            continue
+        row = {
+            "Record_Key": f'{x.get("GamePk")}|TOTAL',
+            "Logged_At_ET": _now_et_iso(),
+            "Slate_Date": str(slate_date),
+            "GamePk": x.get("GamePk"),
+            "Game": x.get("game"),
+            "Start_Time_UTC": g.get("GameDate"),
+            "Market": "TOTAL",
+            "Pick": f'{tp.get("side")} {tp.get("market_total")}',
+            "Side": tp.get("side"),
+            "Market_Line": tp.get("market_total"),
+            "Odds": tp.get("odds"),
+            "Book": tp.get("book"),
+            "Grade": tp.get("grade"),
+            "Model_Probability": tp.get("prob"),
+            "Edge": tp.get("edge"),
+            "EV": tp.get("ev"),
+            "Fair_Line": None,
+            "Model_Weight": TOTALS_MODEL_WEIGHT,
+            "Market_Weight": 1 - TOTALS_MODEL_WEIGHT,
+            "Lineups_Confirmed": x.get("lineup_confirmed"),
+            "Model_Confidence": x.get("confidence"),
+            "App_Version": APP_VERSION,
+            "Model_Version": MODEL_VERSION,
+            "Result": "PENDING",
+            "Units": 0.0,
+        }
+        added += int(_append_tracker_row(row))
+    return added
+
+@st.cache_data(ttl=120, show_spinner=False)
+def tracker_results_for_date(date_text):
+    """Free MLB Stats API result lookup. This does not use Odds API credits."""
+    try:
+        r = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": str(date_text)},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return {}
+    out = {}
+    for block in data.get("dates", []):
+        for g in block.get("games", []):
+            status = g.get("status", {}) or {}
+            away = g.get("teams", {}).get("away", {}) or {}
+            home = g.get("teams", {}).get("home", {}) or {}
+            out[str(g.get("gamePk"))] = {
+                "abstract": str(status.get("abstractGameState", "")),
+                "detailed": str(status.get("detailedState", "")),
+                "away_score": away.get("score"),
+                "home_score": home.get("score"),
+                "away_name": (away.get("team", {}) or {}).get("name"),
+                "home_name": (home.get("team", {}) or {}).get("name"),
+            }
+    return out
+
+def _american_profit(odds):
+    try:
+        o = float(odds)
+        return o / 100.0 if o > 0 else 100.0 / abs(o)
+    except Exception:
+        return 0.0
+
+def grade_tracker(force=False):
+    """Automatically grade pending recommendations once MLB marks the game final."""
+    df = load_tracker()
+    if df.empty:
+        return 0
+    pending_mask = df["Result"].fillna("PENDING").astype(str).eq("PENDING")
+    if not pending_mask.any():
+        return 0
+
+    now = pd.Timestamp.now(tz="UTC")
+    last = st.session_state.get("_tracker_last_grade_check")
+    if not force and last is not None:
+        try:
+            if (now - pd.Timestamp(last)).total_seconds() < 120:
+                return 0
+        except Exception:
+            pass
+    st.session_state["_tracker_last_grade_check"] = now.isoformat()
+
+    changed = 0
+    for date_text in df.loc[pending_mask, "Slate_Date"].dropna().astype(str).unique():
+        results = tracker_results_for_date(date_text)
+        if not results:
+            continue
+        idxs = df.index[pending_mask & df["Slate_Date"].astype(str).eq(date_text)]
+        for i in idxs:
+            rec = results.get(str(df.at[i, "GamePk"]))
+            if not rec:
+                continue
+            abstract = rec.get("abstract", "").lower()
+            detailed = rec.get("detailed", "").lower()
+            if any(x in detailed for x in ("postponed", "cancelled", "canceled")):
+                df.at[i, "Result"] = "VOID"
+                df.at[i, "Units"] = 0.0
+                df.at[i, "Graded_At_ET"] = _now_et_iso()
+                changed += 1
+                continue
+            if abstract != "final" and "final" not in detailed and "game over" not in detailed:
+                continue
+            try:
+                away_score = int(rec.get("away_score"))
+                home_score = int(rec.get("home_score"))
+            except Exception:
+                continue
+
+            df.at[i, "Final_Away_Score"] = away_score
+            df.at[i, "Final_Home_Score"] = home_score
+            df.at[i, "Final_Total"] = away_score + home_score
+
+            market = str(df.at[i, "Market"]).upper()
+            odds = df.at[i, "Odds"]
+            result = "LOSS"
+            if market == "MONEYLINE":
+                pick = str(df.at[i, "Pick"])
+                winner = rec.get("away_name") if away_score > home_score else rec.get("home_name")
+                result = "WIN" if team_key(pick) == team_key(winner) else "LOSS"
+            elif market == "TOTAL":
+                try:
+                    line = float(df.at[i, "Market_Line"])
+                except Exception:
+                    continue
+                final_total = away_score + home_score
+                side = str(df.at[i, "Side"]).upper()
+                if abs(final_total - line) < 1e-9:
+                    result = "PUSH"
+                elif side == "OVER":
+                    result = "WIN" if final_total > line else "LOSS"
+                else:
+                    result = "WIN" if final_total < line else "LOSS"
+
+            units = _american_profit(odds) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
+            df.at[i, "Result"] = result
+            df.at[i, "Units"] = units
+            df.at[i, "Graded_At_ET"] = _now_et_iso()
+            changed += 1
+
+    if changed:
+        save_tracker(df)
+    return changed
+
+def import_diagnostics_tracker(uploaded):
+    """Backfill an older recommendation from a downloaded single-game diagnostics CSV."""
+    try:
+        d = pd.read_csv(uploaded)
+    except Exception as e:
+        return 0, f"Could not read diagnostics CSV: {e}"
+    if d.empty:
+        return 0, "Diagnostics CSV is empty."
+    r = d.iloc[0]
+    required = {"GamePk","Away","Home","Away_Card_Label","Home_Card_Label"}
+    if not required.issubset(d.columns):
+        return 0, "This does not look like an MLB game diagnostics CSV."
+
+    choices = []
+    for prefix in ("Away", "Home"):
+        label = str(r.get(f"{prefix}_Card_Label", ""))
+        if label in ("BET", "BEST BET"):
+            choices.append(prefix)
+    if not choices:
+        return 0, "That diagnostics file did not contain an official BET/BEST BET."
+    prefix = choices[0]
+    team = r.get(prefix)
+    row = {
+        "Record_Key": f'{r.get("GamePk")}|MONEYLINE',
+        "Logged_At_ET": _now_et_iso(),
+        "Slate_Date": str(r.get("Slate_Date")),
+        "GamePk": r.get("GamePk"),
+        "Game": r.get("Game"),
+        "Start_Time_UTC": None,
+        "Market": "MONEYLINE",
+        "Pick": team,
+        "Side": team,
+        "Market_Line": None,
+        "Odds": r.get(f"{prefix}_Best_Odds"),
+        "Book": r.get(f"{prefix}_Best_Book"),
+        "Grade": r.get(f"{prefix}_Card_Label"),
+        "Model_Probability": r.get(f"{prefix}_Calibrated_Prob"),
+        "Edge": r.get(f"{prefix}_Edge"),
+        "EV": r.get(f"{prefix}_EV"),
+        "Fair_Line": r.get(f"{prefix}_Fair_ML"),
+        "Model_Weight": r.get("Model_Weight"),
+        "Market_Weight": r.get("Market_Weight"),
+        "Lineups_Confirmed": r.get("Lineups_Confirmed"),
+        "Model_Confidence": r.get("Model_Confidence"),
+        "App_Version": r.get("App_Version"),
+        "Model_Version": r.get("Model_Version"),
+        "Result": "PENDING",
+        "Units": 0.0,
+    }
+    added = int(_append_tracker_row(row))
+    if added:
+        grade_tracker(force=True)
+        odds_txt = row.get("Odds")
+        try:
+            odds_txt = f'{float(odds_txt):+.0f}'
+        except Exception:
+            odds_txt = str(odds_txt)
+        return 1, f"Imported {team} {odds_txt}."
+    return 0, "That game/market is already in the tracker."
+
+def tracker_performance_summary(df):
+    if df is None or df.empty:
+        return {"wins":0,"losses":0,"pushes":0,"voids":0,"pending":0,"units":0.0,"roi":0.0,"graded":0}
+    res = df["Result"].fillna("PENDING").astype(str)
+    wins = int((res=="WIN").sum())
+    losses = int((res=="LOSS").sum())
+    pushes = int((res=="PUSH").sum())
+    voids = int((res=="VOID").sum())
+    pending = int((res=="PENDING").sum())
+    completed = wins + losses + pushes
+    units = pd.to_numeric(df["Units"], errors="coerce").fillna(0).sum()
+    roi = units / completed if completed else 0.0
+    return {"wins":wins,"losses":losses,"pushes":pushes,"voids":voids,"pending":pending,"units":units,"roi":roi,"graded":completed}
+
+def tracker_split_table(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rows = []
+    for market, g in df.groupby("Market", dropna=False):
+        s = tracker_performance_summary(g)
+        record = f'{s["wins"]}-{s["losses"]}' + (f'-{s["pushes"]}P' if s["pushes"] else "")
+        rows.append({
+            "Market": market,
+            "Graded": s["graded"],
+            "Record": record,
+            "Units": round(s["units"], 2),
+            "ROI %": round(s["roi"] * 100, 1),
+            "Pending": s["pending"],
+        })
+    return pd.DataFrame(rows)
+
+
 st.markdown(f"""
 <div class="hero">
   <div class="eyebrow">MLB EDGE • PRODUCTION</div>
@@ -756,6 +1129,15 @@ with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
     model_df=run_model(games) if games else pd.DataFrame()
     candidates=build_candidates(model_df,games,odds_payload.get("events",[])) if not model_df.empty else []
 
+# Forward-test tracker: freeze the first official recommendation at the price that triggered it.
+_new_ml = track_current_official_recommendations(candidates, games, slate_date)
+_new_totals = track_current_total_recommendations(candidates, games, model_df, totals_payload, slate_date)
+_graded_now = grade_tracker(force=False)
+if _new_ml or _new_totals:
+    st.toast(f"Tracked {_new_ml + _new_totals} new official model recommendation(s).")
+if _graded_now:
+    st.toast(f"Auto-graded {_graded_now} completed recommendation(s).")
+
 quota=odds_payload.get("quota",{})
 if st.session_state.get("odds_loaded"):
     qtxt=f"Odds credits remaining: {quota.get('remaining')}" if quota.get("remaining") is not None else "Live odds loaded manually"
@@ -779,6 +1161,84 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
+    st.markdown('<div class="kicker">Forward Performance</div>', unsafe_allow_html=True)
+    tracker_df = load_tracker()
+    perf = tracker_performance_summary(tracker_df)
+    perf_record = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
+    with st.expander(
+        f'📈 Model Tracker • {perf_record} • {perf["units"]:+.2f}u • {perf["pending"]} pending',
+        expanded=False,
+    ):
+        if tracker_df.empty:
+            st.info("No official BET/BEST BET recommendations have been frozen yet. The tracker logs them automatically the first time they become official.")
+        else:
+            record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
+            st.markdown(
+                f'<div class="metrics"><div class="metric"><span>Record</span><b>{record_display}</b></div><div class="metric"><span>Units</span><b>{perf["units"]:+.2f}</b></div><div class="metric"><span>ROI</span><b>{perf["roi"]*100:+.1f}%</b></div><div class="metric"><span>Pending</span><b>{perf["pending"]}</b></div></div>',
+                unsafe_allow_html=True,
+            )
+            split = tracker_split_table(tracker_df)
+            if not split.empty:
+                st.dataframe(split, use_container_width=True, hide_index=True)
+
+            graded = tracker_df[tracker_df["Result"].isin(["WIN","LOSS","PUSH"])].copy()
+            if not graded.empty:
+                graded["Cum_Units"] = pd.to_numeric(graded["Units"], errors="coerce").fillna(0).cumsum()
+                st.line_chart(graded[["Cum_Units"]], use_container_width=True)
+
+            show_cols = ["Slate_Date","Game","Market","Pick","Odds","Grade","Edge","EV","Result","Units","App_Version"]
+            recent = tracker_df.sort_values(["Slate_Date","Logged_At_ET"], ascending=False)
+            st.dataframe(recent[[c for c in show_cols if c in recent.columns]].head(50), use_container_width=True, hide_index=True)
+
+        c1,c2=st.columns(2)
+        with c1:
+            if st.button("Refresh Results Now (free)", use_container_width=True, key="tracker_refresh_results"):
+                tracker_results_for_date.clear()
+                n = grade_tracker(force=True)
+                st.success(f"Updated {n} completed recommendation(s)." if n else "No new finals to grade yet.")
+                st.rerun()
+        with c2:
+            tracker_df = load_tracker()
+            st.download_button(
+                "Download Tracker Backup CSV",
+                data=tracker_df.to_csv(index=False).encode("utf-8"),
+                file_name="mlb_model_recommendation_tracker.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="tracker_backup_download",
+            )
+
+        st.caption("Official BET/BEST BET signals are frozen automatically at the first qualifying price. Refreshes never overwrite them. MLB final scores are graded with the free MLB Stats API, not The Odds API.")
+
+        restore_file = st.file_uploader("Restore / merge tracker backup", type=["csv"], key="tracker_restore_upload")
+        if st.button("Merge Tracker Backup", use_container_width=True, disabled=(restore_file is None), key="tracker_restore_btn"):
+            try:
+                incoming = _tracker_clean(pd.read_csv(restore_file))
+                current = load_tracker()
+                merged = pd.concat([current, incoming], ignore_index=True)
+                merged = merged.drop_duplicates(subset=["Record_Key"], keep="first")
+                save_tracker(merged)
+                grade_tracker(force=True)
+                st.success(f"Tracker restored/merged: {len(merged)} total records.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not restore tracker: {e}")
+
+        st.markdown("**Backfill an earlier model recommendation**")
+        diag_file = st.file_uploader("Import a downloaded Game Diagnostics CSV", type=["csv"], key="tracker_diag_import")
+        if st.button("Import Diagnostics Pick", use_container_width=True, disabled=(diag_file is None), key="tracker_diag_btn"):
+            n,msg = import_diagnostics_tracker(diag_file)
+            if n:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.warning(msg)
+
+        if st.session_state.get("_tracker_storage_error"):
+            st.warning("Tracker is currently saved in this app session, but local file persistence failed. Download a backup CSV before leaving the app.")
+        else:
+            st.caption("Storage note: the app also writes a local tracker file. Streamlit Cloud can replace its runtime filesystem during redeploys, so the downloadable backup is the safest long-term copy.")
+
     st.markdown('<div class="kicker">Mode</div>', unsafe_allow_html=True)
     mode = st.radio(
         "View mode",
@@ -1074,5 +1534,5 @@ st.markdown("""
 
 with st.expander("Research basis & limitations",expanded=False):
     st.write("The research sequence rejected a team-only moneyline model, isolated a starting-pitcher signal through placebo/causality tests, improved it with Pitcher Model 2.0, rejected bullpen, and promoted offense/platoon plus lineup information. Totals then failed in the simple baseline, passed after adding pitcher + run-environment structure, and survived scrambled/no-starter integrity checks before this production promotion.")
-    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary.")
+    st.write("Historical results are research evidence, not a guarantee of forward profitability. The live engine also uses current data feeds and is not an exact replay of the historical PIT logistic model, so forward tracking remains necessary. v1.3 adds an automatic forward-performance ledger: first official BET/BEST BET signals are frozen before first pitch and later auto-graded from MLB final scores.")
     st.caption(f"App {APP_VERSION} • Engine {MODEL_VERSION}")
