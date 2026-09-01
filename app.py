@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.1-BANNER-EMBED"
+APP_VERSION = "3.2.2-LINEUP-STATUS-AUTO"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1712,6 +1712,19 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     font-size:.58rem;
 }
 
+
+/* ===== v3.2.2 clearer lineup state ===== */
+.lineup-feed-diag{
+    margin-top:5px;
+    color:#6f8ca6;
+    font-size:.56rem;
+    font-weight:750;
+    letter-spacing:.015em;
+}
+.combo-time{
+    white-space:normal !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -2109,6 +2122,92 @@ def game_state_label(game):
 
 
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_fresh_lineup_counts(game_pk):
+    """Read current batting-order counts from MLB's free live game feed."""
+    try:
+        r = requests.get(
+            f"https://statsapi.mlb.com/api/v1.1/game/{int(game_pk)}/feed/live",
+            timeout=12,
+        )
+        r.raise_for_status()
+        data = r.json()
+        teams = ((data.get("liveData") or {}).get("boxscore") or {}).get("teams") or {}
+        away_order = ((teams.get("away") or {}).get("battingOrder") or [])[:9]
+        home_order = ((teams.get("home") or {}).get("battingOrder") or [])[:9]
+        away_count = len(away_order)
+        home_count = len(home_order)
+        return {
+            "away_count": away_count,
+            "home_count": home_count,
+            "away_ready": away_count >= 8,
+            "home_ready": home_count >= 8,
+            "teams_ready": int(away_count >= 8) + int(home_count >= 8),
+        }
+    except Exception:
+        return {
+            "away_count": 0,
+            "home_count": 0,
+            "away_ready": False,
+            "home_ready": False,
+            "teams_ready": 0,
+        }
+
+
+def lineup_feed_status(game_pk):
+    snap = fetch_fresh_lineup_counts(game_pk)
+    ready = int(snap.get("teams_ready", 0))
+    label = "LINEUPS CONFIRMED" if ready >= 2 else f"AWAITING LINEUPS • {ready}/2"
+    return label, snap
+
+
+def _game_hours_to_start(game):
+    try:
+        start = pd.to_datetime(game.get("GameDate"), utc=True)
+        now = pd.Timestamp.now(tz="UTC")
+        return float((start - now).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+def current_lineup_snapshot(games, max_hours=5.0):
+    """Check only near-term pregame games so free MLB traffic stays modest."""
+    out = {}
+    for g in games or []:
+        if not is_pregame(g):
+            continue
+        hrs = _game_hours_to_start(g)
+        if hrs is not None and (hrs < -0.25 or hrs > max_hours):
+            continue
+        gp = g.get("GamePk")
+        if gp is None:
+            continue
+        out[str(gp)] = fetch_fresh_lineup_counts(gp)
+    return out
+
+
+@_auto_fragment(60)
+def lineup_auto_refresh_watcher(games):
+    """Refresh free lineup data every 60s and rerun the model only after a real lineup change."""
+    snapshot = current_lineup_snapshot(games, max_hours=5.0)
+    compact = {
+        k: (
+            int(v.get("away_count", 0)),
+            int(v.get("home_count", 0)),
+            int(v.get("teams_ready", 0)),
+        )
+        for k, v in snapshot.items()
+    }
+    previous = st.session_state.get("_ninth_lineup_snapshot")
+    st.session_state["_ninth_lineup_snapshot"] = compact
+
+    # Once MLB posts or changes a lineup, rerun the complete app. The production
+    # engine clears its dynamic feed cache on run_model(), so lineup adjustments
+    # and Tracker qualification are recalculated immediately.
+    if previous is not None and compact != previous:
+        st.rerun()
+
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_fresh_scoreboard(date_text):
     """Fetch fresh MLB scores/innings directly from the free schedule endpoint.
@@ -2342,6 +2441,7 @@ def build_candidates(model_df, games, events):
         event=match_event(events,g) if is_pregame(g) else None
         m=moneyline_market(event) if is_pregame(g) else None
         confirmed=bool(r["Away_Lineup_Used"] and r["Home_Lineup_Used"])
+        lineup_label, lineup_feed = lineup_feed_status(r["GamePk"]) if is_pregame(g) else ("", {})
         conf=int(r["Model_Confidence"])
         alpha=model_alpha(conf,confirmed)
         market_available=False
@@ -2377,6 +2477,10 @@ def build_candidates(model_df, games, events):
         out.append({
             "GamePk":r["GamePk"],"game":r["Game"],"away":r["Away"],"home":r["Home"],"time":r.get("TimeLabel",g.get("TimeLabel","")),
             "away_sp":r.get("Away_SP") or "TBD","home_sp":r.get("Home_SP") or "TBD","lineup_confirmed":confirmed,
+            "lineup_display": ("LINEUPS CONFIRMED" if confirmed else lineup_label),
+            "away_lineup_count": int(lineup_feed.get("away_count", 0)),
+            "home_lineup_count": int(lineup_feed.get("home_count", 0)),
+            "lineup_teams_ready": int(lineup_feed.get("teams_ready", 0)),
             "confidence":conf,"alpha":alpha,"books":m["books"] if market_available else 0,"best":best,"all":side_rows,
             "away_proj":float(r["Away_Proj_Runs"]),"home_proj":float(r["Home_Proj_Runs"]),
             "lineup_status":r["Lineup_Status"],"confidence_reasons":r.get("Confidence_Reasons",""),"market_available":market_available,
@@ -3679,6 +3783,7 @@ pregame_games=sum(1 for s in fresh_states if s=="PREGAME")
 live_games=sum(1 for s in fresh_states if s=="LIVE")
 final_games=sum(1 for s in fresh_states if s=="FINAL")
 render_auto_slate_status(games, slate_date)
+lineup_auto_refresh_watcher(games)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
@@ -3778,7 +3883,7 @@ else:
         b = x["best"]
         away_side = next(z for z in x["all"] if z["team"] == x["away"])
         home_side = next(z for z in x["all"] if z["team"] == x["home"])
-        lineup_text = "Confirmed lineups" if x["lineup_confirmed"] else "Lineups not fully confirmed"
+        lineup_text = "Lineups confirmed" if x["lineup_confirmed"] else f'Awaiting lineups • {x.get("lineup_teams_ready",0)}/2 teams posted'
         _trk_ok, _trk_reason = tracker_qualification(x, "MONEYLINE")
 
         st.markdown('<div class="kicker">Moneyline</div>', unsafe_allow_html=True)
@@ -3966,12 +4071,20 @@ else:
                         "PASS":"grade-pass","MODEL":"grade-wait","MODEL ONLY":"grade-wait"
                     }.get(g,"grade-wait")
 
-                lineup_label = "LINEUPS ✓" if cx.get("lineup_confirmed") else "LINEUPS WAIT"
+                lineup_label = cx.get("lineup_display") or ("LINEUPS CONFIRMED" if cx.get("lineup_confirmed") else "AWAITING LINEUPS • 0/2")
+                away_lc = int(cx.get("away_lineup_count", 0) or 0)
+                home_lc = int(cx.get("home_lineup_count", 0) or 0)
+                lineup_diag = (
+                    f'Lineup feed: {cx["away"]} {away_lc}/9 • {cx["home"]} {home_lc}/9'
+                    if not cx.get("lineup_confirmed")
+                    else 'Both starting lineups loaded • lineup adjustment active'
+                )
                 html = (
                     f'<div class="combo-card"><div class="combo-head"><div>'
                     f'<div class="combo-time">{cx["time"]} • {lineup_label}</div>'
                     f'<div class="combo-match">{cx["away"]} @ {cx["home"]}</div>'
-                    f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div></div></div>'
+                    f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
+                    f'<div class="lineup-feed-diag">{lineup_diag}</div></div></div>'
                     f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
                     f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {grade_class(ml_grade)}">{ml_grade}</div></div>'
                     f'<div class="market-row"><div class="market-name">TOTAL</div><div><div class="market-main">{total_main}</div>'
