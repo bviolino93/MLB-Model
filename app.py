@@ -29,11 +29,11 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "2.0.2-TRACKER-DTYPE-HOTFIX"
+APP_VERSION = "3.1.0-BRANDED"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
-st.set_page_config(page_title="MLB Edge", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Ninth Signal", page_icon="⚾", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -1328,6 +1328,205 @@ div[class*="st-key-main_navigation"] label:has(input:checked) p {
     }
     div[class*="st-key-main_navigation"] label p{
         font-size:.55rem !important;
+    }
+}
+
+
+/* ===== Ninth Signal v3 mobile UX ===== */
+.ninth-hero{padding-top:8px!important;padding-bottom:6px!important}
+.ninth-hero .title{font-size:2.15rem!important}
+.ninth-hero .sub{font-size:.78rem!important;margin-top:6px!important}
+.ninth-hero .pill{margin-top:9px!important}
+.ninth-status{
+    margin:8px 0 12px!important;
+    padding:9px 11px!important;
+}
+.ninth-status>div{width:100%}
+
+/* Date and refresh are compact, not the focus */
+div[data-testid="stDateInput"]{margin-top:4px!important}
+div[class*="st-key-refresh_scores_top"] button{
+    min-height:42px!important;
+    border-radius:12px!important;
+    background:#102c45!important;
+    border:1px solid #315d80!important;
+    color:#b9d8ee!important;
+    font-size:.72rem!important;
+}
+
+/* Cleaner board hierarchy */
+.board-head{margin:12px 0 8px}
+.board-head span{display:block;color:#74d3f7;font-size:.59rem;font-weight:950;letter-spacing:.13em}
+.board-head b{display:block;color:#fff;font-size:1.14rem;margin-top:2px}
+
+/* True segmented control for Single Game / Full Slate */
+div[class*="st-key-production_view_mode"] [role="radiogroup"]{
+    display:grid!important;
+    grid-template-columns:1fr 1fr!important;
+    gap:5px!important;
+    padding:4px!important;
+    border-radius:14px!important;
+    background:#081a2b!important;
+    border:1px solid #24435c!important;
+}
+div[class*="st-key-production_view_mode"] label{
+    min-height:42px!important;
+    display:flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    border-radius:10px!important;
+    background:transparent!important;
+    border:0!important;
+    padding:0 8px!important;
+}
+div[class*="st-key-production_view_mode"] label:has(input:checked){
+    background:#133451!important;
+    box-shadow:inset 0 0 0 1px #3d7ca9!important;
+}
+div[class*="st-key-production_view_mode"] input,
+div[class*="st-key-production_view_mode"] label > div:first-child,
+div[class*="st-key-production_view_mode"] [data-baseweb="radio"]{
+    display:none!important;
+}
+div[class*="st-key-production_view_mode"] label p{
+    margin:0!important;
+    font-size:.72rem!important;
+    font-weight:850!important;
+    color:#8399ac!important;
+}
+div[class*="st-key-production_view_mode"] label:has(input:checked) p{
+    color:#fff!important;
+}
+
+/* Fixed full-width bottom tab bar using actual buttons */
+div[class*="st-key-ninth_nav_"]{
+    position:fixed!important;
+    bottom:0!important;
+    z-index:999999!important;
+    width:20vw!important;
+    margin:0!important;
+    padding:0!important;
+    background:#051522!important;
+    border-top:1px solid #29465e!important;
+}
+div[class*="st-key-ninth_nav_board_"]{left:0!important}
+div[class*="st-key-ninth_nav_live_"]{left:20vw!important}
+div[class*="st-key-ninth_nav_tracker_"]{left:40vw!important}
+div[class*="st-key-ninth_nav_bets_"]{left:60vw!important}
+div[class*="st-key-ninth_nav_more_"]{left:80vw!important}
+
+div[class*="st-key-ninth_nav_"] button{
+    height:78px!important;
+    min-height:78px!important;
+    width:100%!important;
+    border:0!important;
+    border-radius:0!important;
+    background:#051522!important;
+    box-shadow:none!important;
+    color:#71869a!important;
+    padding:7px 1px calc(7px + env(safe-area-inset-bottom))!important;
+    display:flex!important;
+    flex-direction:column!important;
+    justify-content:center!important;
+    align-items:center!important;
+    gap:5px!important;
+}
+div[class*="st-key-ninth_nav_"] button p{
+    margin:0!important;
+    font-size:.54rem!important;
+    font-weight:800!important;
+    line-height:1!important;
+    color:inherit!important;
+}
+div[class*="st-key-ninth_nav_"] button::before{
+    content:""!important;
+    display:block!important;
+    width:25px!important;
+    height:25px!important;
+    background-color:#70869a!important;
+    -webkit-mask-size:contain!important;
+    -webkit-mask-repeat:no-repeat!important;
+    -webkit-mask-position:center!important;
+    mask-size:contain!important;
+    mask-repeat:no-repeat!important;
+    mask-position:center!important;
+}
+div[class*="st-key-ninth_nav_"][class*="_active"] button{
+    color:#46a8ff!important;
+}
+div[class*="st-key-ninth_nav_"][class*="_active"] button::before{
+    background-color:#46a8ff!important;
+    filter:drop-shadow(0 0 7px rgba(70,168,255,.28));
+}
+/* Board */
+div[class*="st-key-ninth_nav_board_"] button::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3Cpath d='M8 8h8M8 12h8M8 16h5'/%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3Cpath d='M8 8h8M8 12h8M8 16h5'/%3E%3C/svg%3E");
+}
+/* Live */
+div[class*="st-key-ninth_nav_live_"] button::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E");
+}
+/* Tracker */
+div[class*="st-key-ninth_nav_tracker_"] button::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E");
+}
+/* Bets */
+div[class*="st-key-ninth_nav_bets_"] button::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h12v18H6z'/%3E%3Cpath d='M9 8h6M9 12h6M9 16h4'/%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h12v18H6z'/%3E%3Cpath d='M9 8h6M9 12h6M9 16h4'/%3E%3C/svg%3E");
+}
+/* More */
+div[class*="st-key-ninth_nav_more_"] button::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E");
+}
+
+.block-container{padding-bottom:104px!important}
+@media(max-width:700px){
+    .hero{padding-left:0!important;padding-right:0!important}
+    .title{font-size:2.05rem!important}
+    .sub{max-width:92%!important}
+}
+
+
+/* ===== Ninth Signal v3.1 branded header ===== */
+div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]){
+    max-width:128px;
+    margin:0 auto;
+}
+div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
+    border-radius:22px;
+    filter:drop-shadow(0 10px 22px rgba(0,0,0,.22));
+}
+.branded-hero-copy{
+    padding-top:5px!important;
+    padding-bottom:5px!important;
+}
+.branded-hero-copy .title{
+    font-size:2.18rem!important;
+}
+.branded-hero-copy .eyebrow{
+    font-size:.62rem!important;
+}
+.branded-hero-copy .sub{
+    margin-top:6px!important;
+}
+@media(max-width:700px){
+    div[data-testid="stHorizontalBlock"]:has(img[src*="ninth_signal_mark"]){
+        gap:.5rem!important;
+    }
+    div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]){
+        max-width:92px;
+    }
+    .branded-hero-copy .title{
+        font-size:1.88rem!important;
+    }
+    .branded-hero-copy .sub{
+        font-size:.70rem!important;
+        line-height:1.35!important;
     }
 }
 
@@ -3078,11 +3277,13 @@ def render_live_games_page(games, fresh_scoreboard):
                 )
 
 def render_account_page():
+    _full_brand_logo = Path(__file__).parent / "assets" / "ninth_signal_logo.png"
+    st.image(str(_full_brand_logo), use_container_width=True)
     st.markdown(
         f'<div class="page-head">'
-        f'<div class="page-kicker">MLB EDGE</div>'
-        f'<div class="page-title">Account</div>'
-        f'<div class="page-sub">App information, model version and advanced resources.</div>'
+        f'<div class="page-kicker">NINTH SIGNAL</div>'
+        f'<div class="page-title">More</div>'
+        f'<div class="page-sub">Model information, technical details, and advanced resources.</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -3169,21 +3370,28 @@ def render_performance_page():
                 st.warning(msg)
 
 
-st.markdown(f"""
-<div class="hero">
-  <div class="eyebrow">MLB EDGE • PRODUCTION</div>
-  <div class="title">MLB Edge</div>
-  <div class="sub">Live MLB market intelligence with model-ranked plays and real-time tracking.</div>
-  <div class="pill">MODEL LIVE • {APP_VERSION}</div>
-</div>
-""", unsafe_allow_html=True)
+_brand_mark = Path(__file__).parent / "assets" / "ninth_signal_mark.png"
+_brand_logo = Path(__file__).parent / "assets" / "ninth_signal_logo.png"
+
+brand_c1, brand_c2 = st.columns([1.05, 4.95], vertical_alignment="center")
+with brand_c1:
+    st.image(str(_brand_mark), use_container_width=True)
+with brand_c2:
+    st.markdown("""
+    <div class="hero ninth-hero branded-hero-copy">
+      <div class="eyebrow">BASEBALL MARKET SIGNALS</div>
+      <div class="title">Ninth Signal</div>
+      <div class="sub">Pregame model signals, live tracking, and forward performance.</div>
+      <div class="pill">MODEL LIVE</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 try:
     api_key=st.secrets.get("ODDS_API_KEY","")
 except Exception:
     api_key=""
 
-st.markdown('<div class="kicker">Date</div>', unsafe_allow_html=True)
+
 slate_date=st.date_input(
     "Slate date",
     value=today_et(),
@@ -3192,12 +3400,11 @@ slate_date=st.date_input(
     help="Current/upcoming MLB dates only.",
     label_visibility="collapsed",
 )
-free_refresh=st.button("Refresh Scores + Tracker (free)",use_container_width=True)
-st.caption("Refreshes scores, game status and live tracker data for free. Odds only update when you press an odds button.")
+free_refresh=st.button("Refresh Scores",use_container_width=True,key="refresh_scores_top")
 if free_refresh:
     # A Streamlit button click already triggers a script rerun. Clear caches here and
     # continue through this same run so the selected bottom tab is preserved.
-    _selected_view = st.session_state.get("main_navigation", "Home")
+    _selected_view = st.session_state.get("ninth_page", "Board")
     st.cache_data.clear()
     try:
         fetch_fresh_scoreboard.clear()
@@ -3207,7 +3414,7 @@ if free_refresh:
         fetch_live_win_probability.clear()
     except Exception:
         pass
-    st.session_state["main_navigation"] = _selected_view
+    st.session_state["ninth_page"] = _selected_view
 
 if "odds_payload" not in st.session_state:
     st.session_state.odds_payload={"events":[],"error":"","quota":{}}
@@ -3252,13 +3459,15 @@ for _g0 in games:
 pregame_games=sum(1 for s in fresh_states if s=="PREGAME")
 live_games=sum(1 for s in fresh_states if s=="LIVE")
 final_games=sum(1 for s in fresh_states if s=="FINAL")
-st.markdown(f'<div class="status"><div><span class="dot"></span><span class="live">MLB EDGE</span> &nbsp; {slate_date.strftime("%b %-d")} • {pregame_games} upcoming • {live_games} live • {final_games} final</div><div>{qtxt}</div></div>',unsafe_allow_html=True)
+st.markdown(
+    f'<div class="status ninth-status"><div><span class="dot"></span>'
+    f'<span class="live">{slate_date.strftime("%b %-d")}</span> '
+    f'• {pregame_games} upcoming • {live_games} live • {final_games} final</div></div>',
+    unsafe_allow_html=True,
+)
 
 if odds_payload.get("error"):
     st.error(odds_payload["error"])
-
-if not st.session_state.get("odds_loaded"):
-    st.caption("Odds are not loaded yet. Choose a mode below, then update only what you want.")
 
 if not games:
     st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
@@ -3267,13 +3476,23 @@ if not games:
 if not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
-    main_view = st.radio(
-        "Main view",
-        ["Home", "Live", "Tracker", "Bets", "Account"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="main_navigation",
-    )
+    if "ninth_page" not in st.session_state:
+        st.session_state["ninth_page"] = "Board"
+
+    main_view = st.session_state.get("ninth_page", "Board")
+
+    def _ninth_nav_button(label, slug):
+        active = main_view == label
+        key = f"ninth_nav_{slug}_{'active' if active else 'idle'}"
+        if st.button(label, key=key, use_container_width=True):
+            st.session_state["ninth_page"] = label
+            st.rerun()
+
+    _ninth_nav_button("Board", "board")
+    _ninth_nav_button("Live", "live")
+    _ninth_nav_button("Tracker", "tracker")
+    _ninth_nav_button("Bets", "bets")
+    _ninth_nav_button("More", "more")
 
     if main_view == "Live":
         render_live_games_page(games, fresh_scoreboard)
@@ -3289,11 +3508,11 @@ else:
         render_performance_page()
         st.stop()
 
-    if main_view == "Account":
+    if main_view == "More":
         render_account_page()
         st.stop()
 
-    st.markdown('<div class="kicker">Betting Board</div>', unsafe_allow_html=True)
+    st.markdown('<div class="board-head"><span>BETTING BOARD</span><b>Choose a workflow</b></div>', unsafe_allow_html=True)
     mode = st.radio(
         "View mode",
         ["Single Game", "Full Slate"],
@@ -3323,7 +3542,6 @@ else:
         x = single_pool[labels.index(selected_label)]
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
-        st.caption("One tap updates both the moneyline and total for this game.")
         selected_state = game_state(selected_game)
         if selected_state != "PREGAME":
             st.warning(game_state_label(selected_game) + ". Historical/pregame prices are not shown as actionable live bets.")
@@ -3405,9 +3623,7 @@ else:
             st.caption("Use these files when you want a deeper breakdown in ChatGPT.")
 
     else:
-        st.markdown('<div class="kicker">Full Slate Odds</div>', unsafe_allow_html=True)
-        update_full_slate = st.button("Update Full Slate Odds", use_container_width=True, type="primary", key="update_full_slate_odds")
-        st.caption("One tap updates moneyline + totals for all upcoming games. Manual only.")
+        update_full_slate = st.button("Load Full Slate Lines", use_container_width=True, type="primary", key="update_full_slate_odds")
         if update_full_slate:
             fetch_odds.clear()
             fetch_full_slate_totals.clear()
@@ -3426,7 +3642,7 @@ else:
         final_now = sorted([x for x in candidates if x.get("game_state") == "FINAL"], key=start_sort)
 
         if not st.session_state.get("odds_loaded") or not st.session_state.get("totals_loaded"):
-            st.caption("Model view shown below. Tap **Update Full Slate Odds** above for current BET / LEAN / PASS grades.")
+            st.caption("Load current lines to activate Best Bet / Bet / Lean grades.")
         if not upcoming:
             st.info("No upcoming games remain on this slate.")
         else:
