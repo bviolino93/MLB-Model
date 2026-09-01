@@ -28,7 +28,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.2.0.3-TOTALS-DOWNLOAD"
+APP_VERSION = "1.2.0.5-TOTALS-DOWNLOAD-FIX"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1039,7 +1039,7 @@ else:
                 st.download_button(
                     "Download Full Slate Totals CSV",
                     data=totals_export_df.to_csv(index=False).encode("utf-8"),
-                    file_name=f"mlb_totals_board_{selected_date}.csv",
+                    file_name=f"mlb_totals_board_{slate_date.strftime('%Y-%m-%d')}.csv",
                     mime="text/csv",
                     use_container_width=True,
                     key="download_full_totals_csv",
