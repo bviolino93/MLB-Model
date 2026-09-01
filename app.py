@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.3-TRACKER-LINEUP-SYNC"
+APP_VERSION = "3.2.4-START-GUARD-ALL-OFFICIAL"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1734,6 +1734,90 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     font-weight:800;
 }
 
+
+/* ===== v3.2.4 official pregame tracker ===== */
+.pregame-track-card{
+    margin:10px 0 14px;
+    padding:16px;
+    border-radius:20px;
+    background:
+        radial-gradient(circle at 94% 8%, rgba(56,189,248,.10), transparent 30%),
+        linear-gradient(135deg, rgba(18,48,75,.98), rgba(5,25,42,.98));
+    border:1px solid rgba(78,139,181,.50);
+    box-shadow:0 12px 28px rgba(0,0,0,.18);
+}
+.pregame-track-top{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:12px;
+    padding-bottom:12px;
+    border-bottom:1px solid rgba(91,137,170,.28);
+}
+.pregame-track-time{
+    color:#8ca6bc;
+    font-size:.57rem;
+    font-weight:900;
+    letter-spacing:.08em;
+}
+.pregame-track-game{
+    margin-top:5px;
+    color:#fff;
+    font-size:1.06rem;
+    font-weight:950;
+    line-height:1.22;
+}
+.pregame-track-grade{
+    flex:0 0 auto;
+    padding:7px 10px;
+    border-radius:999px;
+    background:rgba(14,165,233,.13);
+    border:1px solid rgba(56,189,248,.52);
+    color:#8bddff;
+    font-size:.57rem;
+    font-weight:950;
+    letter-spacing:.06em;
+}
+.pregame-track-line{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-top:13px;
+}
+.pregame-track-line span{
+    color:#71d2f5;
+    font-size:.58rem;
+    font-weight:950;
+    letter-spacing:.10em;
+}
+.pregame-track-line b{
+    color:#fff;
+    font-size:1rem;
+}
+.pregame-track-meta{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:7px;
+    margin-top:12px;
+}
+.pregame-track-meta span{
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+    padding:8px 9px;
+    border-radius:12px;
+    background:rgba(2,15,28,.42);
+    color:#718ca3;
+    font-size:.49rem;
+    font-weight:850;
+    letter-spacing:.06em;
+}
+.pregame-track-meta b{
+    color:#d9e8f4;
+    font-size:.66rem;
+    letter-spacing:0;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -2072,9 +2156,11 @@ def totals_download_row(game_row, total_ctx, total_pick):
 def game_state(game):
     """Return PREGAME / LIVE / FINAL / OTHER.
 
-    Safety rule: stale MLB Preview/Scheduled status can never keep a game actionable
-    after its scheduled first-pitch time. Explicit delay/postponement states are the
-    only exception.
+    Start-time guard:
+    MLB can initialize a game as Live / Top 1st / 0 outs several minutes before
+    first pitch. Before the scheduled GameDate, Ninth Signal always treats the
+    game as PREGAME. This prevents false live cards and fake pre-first-pitch
+    win-probability displays.
     """
     if not game:
         return "OTHER"
@@ -2083,35 +2169,48 @@ def game_state(game):
     detailed = str(game.get("DetailedState") or "").strip().lower()
     code = str(game.get("StatusCode") or "").strip().upper()
 
-    # Terminal / active MLB states always win.
-    if abstract == "final" or any(x in detailed for x in ("final","completed","game over")):
+    # A true terminal state is always final.
+    if abstract == "final" or any(x in detailed for x in ("final", "completed", "game over")):
         return "FINAL"
-    if abstract == "live" or any(x in detailed for x in ("in progress","manager challenge","review","warmup")):
-        return "LIVE"
 
-    # Explicit delay/postponement should not be forced live merely because the
-    # original scheduled start time passed.
     explicit_delay = any(
         x in detailed for x in (
             "delayed", "delay", "postponed", "suspended", "rain delay",
             "weather delay", "delayed start"
         )
     )
-    if explicit_delay:
-        return "PREGAME"
 
-    # Time is the hard safety gate for all other stale Preview/Scheduled states.
+    # Scheduled first pitch is the hard pregame boundary.
     try:
         start = pd.to_datetime(game.get("GameDate"), utc=True)
         now = pd.Timestamp.now(tz="UTC")
-        if now >= start:
+
+        if now < start:
+            return "PREGAME"
+
+        # Once the scheduled time has arrived, explicit delay/postponement
+        # remains pregame/non-actionable until MLB actually resumes/starts it.
+        if explicit_delay:
+            return "PREGAME"
+
+        # At/after scheduled time, trust an explicit MLB live state.
+        if abstract == "live" or any(
+            x in detailed for x in ("in progress", "manager challenge", "review", "warmup")
+        ):
             return "LIVE"
-        return "PREGAME"
+
+        # Preserve the existing safety rule: after scheduled first pitch, a
+        # stale Preview/Scheduled flag cannot keep betting recommendations live.
+        return "LIVE"
     except Exception:
         pass
 
-    # Only fall back to MLB Preview/Scheduled if time parsing failed.
-    if abstract == "preview" or code in {"S","P"} or any(x in detailed for x in ("scheduled","pre-game","pregame")):
+    # If time parsing failed, fall back to MLB state.
+    if explicit_delay:
+        return "PREGAME"
+    if abstract == "live" or any(x in detailed for x in ("in progress", "manager challenge", "review", "warmup")):
+        return "LIVE"
+    if abstract == "preview" or code in {"S", "P"} or any(x in detailed for x in ("scheduled", "pre-game", "pregame")):
         return "PREGAME"
 
     return "OTHER"
@@ -2701,11 +2800,15 @@ def _append_tracker_row(row):
 
 
 def tracker_qualification(candidate, market_type):
-    """Return (qualified, reason). The live board can still show early signals,
-    but only mature pregame signals enter the headline forward-performance ledger.
+    """Return (qualified, reason) for freezing an official recommendation.
+
+    Tracker policy: if the Board has an official BET / BEST BET, it belongs in
+    forward tracking. There is no second hidden confidence hurdle. The official
+    grading logic already incorporates model confidence.
     """
     if not candidate or not candidate.get("pregame"):
         return False, "not pregame"
+
     effective_lineups_confirmed = bool(
         candidate.get("lineup_confirmed")
         or candidate.get("feed_lineup_confirmed")
@@ -2713,11 +2816,8 @@ def tracker_qualification(candidate, market_type):
     )
     if TRACKER_REQUIRE_CONFIRMED_LINEUPS and not effective_lineups_confirmed:
         return False, f'lineups not confirmed ({int(candidate.get("lineup_teams_ready") or 0)}/2)'
-    conf = int(candidate.get("confidence") or 0)
-    min_conf = TRACKER_MIN_CONFIDENCE_TOTAL if str(market_type).upper() == "TOTAL" else TRACKER_MIN_CONFIDENCE_ML
-    if conf < min_conf:
-        return False, f"confidence {conf} < {min_conf}"
-    return True, "qualified"
+
+    return True, "official-bet eligible"
 
 
 def tracker_candidate_status(candidate, market_type):
@@ -2736,7 +2836,7 @@ def tracker_candidate_status(candidate, market_type):
 
 
 def track_current_official_recommendations(candidates, games, slate_date):
-    """Freeze the first official ML signal for each game. Never overwrite later line moves."""
+    """Freeze every official ML BET / BEST BET at its first qualifying price."""
     game_map = _game_lookup(games)
     added = 0
     for x in candidates:
@@ -2778,7 +2878,7 @@ def track_current_official_recommendations(candidates, games, slate_date):
     return added
 
 def track_current_total_recommendations(candidates, games, model_df, totals_payload, slate_date):
-    """Freeze the first official totals signal for each game when totals odds are loaded."""
+    """Freeze every official totals BET / BEST BET at its first qualifying price."""
     if not st.session_state.get("totals_loaded") or model_df is None or model_df.empty:
         return 0
     added = 0
@@ -3176,14 +3276,14 @@ def _live_tracker_bucket(rec, game, win_prob):
 def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
     if tracker_df is None or tracker_df.empty:
         return {
-            "tracked":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+            "tracked":0,"upcoming":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
             "on_track":0,"neutral":0,"needs_help":0,"units":0.0,"status":"NO TRACKED BETS"
         }
 
     today_rows = tracker_df[tracker_df["Slate_Date"].astype(str) == str(slate_date)].copy()
     if today_rows.empty:
         return {
-            "tracked":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+            "tracked":0,"upcoming":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
             "on_track":0,"neutral":0,"needs_help":0,"units":0.0,"status":"NO TRACKED BETS"
         }
 
@@ -3193,7 +3293,7 @@ def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
         game_map[str(g0.get("GamePk"))] = gf
 
     out = {
-        "tracked":len(today_rows),"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
+        "tracked":len(today_rows),"upcoming":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
         "on_track":0,"neutral":0,"needs_help":0,"units":0.0
     }
 
@@ -3214,6 +3314,10 @@ def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
                 out["units"] += float(rec.get("Units") or 0)
             except Exception:
                 pass
+            continue
+
+        if state == "PREGAME":
+            out["upcoming"] += 1
             continue
 
         if state == "LIVE":
@@ -3250,13 +3354,13 @@ def _slate_pulse_html(summary):
     return (
         f'<div class="slate-pulse">'
         f'<div class="pulse-head"><div><div class="pulse-kicker">TODAY\'S TRACKED SLATE</div>'
-        f'<div class="pulse-title">{summary["status"]}</div><div class="pulse-sub">Final results + live tracked bets</div></div>'
+        f'<div class="pulse-title">{summary["status"]}</div><div class="pulse-sub">Upcoming + live + final official bets</div></div>'
         f'<div class="pulse-status {status_cls}">{summary["tracked"]} TRACKED</div></div>'
         f'<div class="pulse-grid">'
-        f'<div><span>FINAL</span><b>{record}</b></div>'
+        f'<div><span>UPCOMING</span><b>{summary.get("upcoming",0)}</b></div>'
         f'<div><span>LIVE</span><b>{summary["live"]}</b></div>'
+        f'<div><span>FINAL</span><b>{record}</b></div>'
         f'<div><span>ON TRACK</span><b>{summary["on_track"]}</b></div>'
-        f'<div><span>NEEDS HELP</span><b>{summary["needs_help"]}</b></div>'
         f'<div><span>FINAL UNITS</span><b>{summary["units"]:+.2f}u</b></div>'
         f'</div>'
         f'</div>'
@@ -3447,11 +3551,60 @@ def _score_rows(game):
         f'<div class="team-row"><span>{home}</span><b>{home_score}</b></div>'
     )
 
+
+def _pregame_tracked_card(rec, game):
+    """Compact card for an official tracked bet that has not started yet."""
+    market = str(rec.get("Market") or "").upper()
+    grade = str(rec.get("Grade") or "BET").upper()
+    pick = str(rec.get("Pick") or "").strip()
+    odds = _odds_text(rec.get("Odds"))
+    if odds and odds not in pick:
+        pick = f"{pick} {odds}".strip()
+
+    try:
+        start = pd.to_datetime(game.get("GameDate"), utc=True).tz_convert("America/New_York")
+        start_text = start.strftime("%-I:%M %p")
+    except Exception:
+        start_text = "Pregame"
+
+    try:
+        edge_text = f'{float(rec.get("Edge")):+.1%}'
+    except Exception:
+        edge_text = "—"
+    try:
+        ev_text = f'{float(rec.get("EV")):+.1%}'
+    except Exception:
+        ev_text = "—"
+
+    market_label = "TOTAL" if market == "TOTAL" else "MONEYLINE"
+    away = game.get("Away") or str(rec.get("Game") or "").split(" @ ")[0] or "Away"
+    home = game.get("Home") or (
+        str(rec.get("Game") or "").split(" @ ")[1]
+        if " @ " in str(rec.get("Game") or "")
+        else "Home"
+    )
+
+    return (
+        f'<div class="pregame-track-card">'
+        f'<div class="pregame-track-top"><div>'
+        f'<div class="pregame-track-time">{start_text} • OFFICIAL TRACKED BET</div>'
+        f'<div class="pregame-track-game">{away} @ {home}</div>'
+        f'</div><div class="pregame-track-grade">{grade}</div></div>'
+        f'<div class="pregame-track-line"><span>{market_label}</span><b>{pick}</b></div>'
+        f'<div class="pregame-track-meta">'
+        f'<span>EDGE <b>{edge_text}</b></span>'
+        f'<span>EV <b>{ev_text}</b></span>'
+        f'<span>FROZEN <b>{str(rec.get("Book") or "Market")}</b></span>'
+        f'</div>'
+        f'</div>'
+    )
+
+
 def _visual_tracked_card(rec, game, win_prob=None):
     market = str(rec.get("Market") or "").upper()
     state = game_state(game)
-    state_label = "FINAL" if state == "FINAL" else "LIVE"
-    inning = "FINAL" if state == "FINAL" else inning_status_text(game)
+    state_label = "FINAL" if state == "FINAL" else ("LIVE" if state == "LIVE" else "PREGAME")
+    inning = "FINAL" if state == "FINAL" else (inning_status_text(game) if state == "LIVE" else "Awaiting first pitch")
     if market == "TOTAL":
         bet_html, _, _ = _total_visual(rec, game)
     else:
@@ -3478,36 +3631,52 @@ def _visual_tracked_card(rec, game, win_prob=None):
 
 
 def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
-    """Premium live bet tracker with MLB win probability and slate-level tracking."""
-    fresh_games = []
+    """Official bet tracker: upcoming, live and completed tracked recommendations."""
+    game_map = {}
     for g0 in games:
         g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
-        if game_state(g) in ("LIVE", "FINAL"):
-            fresh_games.append(g)
+        game_map[str(g0.get("GamePk"))] = g
 
-    live_list = [g for g in fresh_games if game_state(g) == "LIVE"]
-    final_list = [g for g in fresh_games if game_state(g) == "FINAL"]
+    today_rows = (
+        tracker_df[tracker_df["Slate_Date"].astype(str) == str(slate_date)].copy()
+        if tracker_df is not None and not tracker_df.empty
+        else pd.DataFrame(columns=TRACKER_COLUMNS)
+    )
 
+    tracked_upcoming = []
     tracked_live = []
-    for g in live_list:
-        rows = tracked_rows_for_game(g.get("GamePk"), tracker_df)
-        if not rows.empty:
-            for _, rec in rows.iterrows():
-                tracked_live.append((g, rec))
-
     tracked_final = []
-    for g in final_list:
-        rows = tracked_rows_for_game(g.get("GamePk"), tracker_df)
-        if not rows.empty:
-            for _, rec in rows.iterrows():
-                tracked_final.append((g, rec))
+
+    for _, rec in today_rows.iterrows():
+        g = game_map.get(str(rec.get("GamePk")), {})
+        if not g:
+            continue
+        state = game_state(g)
+        result = str(rec.get("Result", "PENDING") or "PENDING").upper()
+
+        if state == "FINAL" or result in ("WIN", "LOSS", "PUSH", "VOID"):
+            tracked_final.append((g, rec))
+        elif state == "LIVE":
+            tracked_live.append((g, rec))
+        elif state == "PREGAME":
+            tracked_upcoming.append((g, rec))
+
+    # Keep upcoming bets in first-pitch order.
+    def _start_key(item):
+        try:
+            return pd.to_datetime(item[0].get("GameDate"), utc=True)
+        except Exception:
+            return pd.Timestamp.max.tz_localize("UTC")
+    tracked_upcoming.sort(key=_start_key)
+
+    active_count = len(tracked_upcoming) + len(tracked_live)
 
     st.markdown(
         f'<div class="tracker-hero">'
-        f'<div><div class="tracker-eyebrow">LIVE MODEL MONITOR</div>'
-        f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{len(tracked_live)}</span></div>'
-        f'<div class="tracker-sub">Win probability, live bet progress, and today\'s slate status</div></div>'
-        f'<div class="tracker-live-orb"><span></span>LIVE</div>'
+        f'<div><div class="tracker-eyebrow">OFFICIAL MODEL LEDGER</div>'
+        f'<div class="tracker-title">Bet Tracker <span class="tracker-count">{active_count}</span></div>'
+        f'<div class="tracker-sub">Every official Best Bet / Bet from pregame through final result</div></div>'
+        f'<div class="tracker-live-orb"><span></span>AUTO</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -3515,20 +3684,36 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
     summary = _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date)
     st.markdown(_slate_pulse_html(summary), unsafe_allow_html=True)
 
+    if tracked_upcoming:
+        st.markdown(
+            f'<div class="kicker">Upcoming Tracked Bets — {len(tracked_upcoming)}</div>',
+            unsafe_allow_html=True,
+        )
+        for g, rec in tracked_upcoming:
+            st.markdown(_pregame_tracked_card(rec, g), unsafe_allow_html=True)
+
     if tracked_live:
-        st.markdown('<div class="kicker">Live Tracked Bets</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="kicker">Live Tracked Bets — {len(tracked_live)}</div>',
+            unsafe_allow_html=True,
+        )
         for g, rec in tracked_live:
             wp = fetch_live_win_probability(g.get("GamePk"))
             st.markdown(_visual_tracked_card(rec, g, win_prob=wp), unsafe_allow_html=True)
-    else:
-        st.info("No tracked bets are live right now.")
+    elif not tracked_upcoming:
+        st.info("No official tracked bets are upcoming or live right now.")
 
     if tracked_final:
         with st.expander(f"Completed Tracked Bets — {len(tracked_final)}", expanded=False):
             for g, rec in tracked_final:
                 st.markdown(_visual_tracked_card(rec, g, win_prob=None), unsafe_allow_html=True)
 
-    untracked_live = [g for g in live_list if tracked_rows_for_game(g.get("GamePk"), tracker_df).empty]
+    # Other live games remain secondary and never clutter the official ledger.
+    live_games = [g for g in game_map.values() if game_state(g) == "LIVE"]
+    untracked_live = [
+        g for g in live_games
+        if tracked_rows_for_game(g.get("GamePk"), tracker_df).empty
+    ]
     if untracked_live:
         with st.expander(f"Other Live Games — {len(untracked_live)}", expanded=False):
             for g in untracked_live:
