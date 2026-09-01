@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "1.7.2-TOP-PLAYS-CHRONO"
+APP_VERSION = "1.8.0-VISUAL-BET-TRACKER"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -467,22 +467,63 @@ div[data-testid="stAlert"][data-baseweb="notification"] {
 }
 
 
-/* v1.7 navigation + dedicated live scoreboard */
-.score-card{
-    margin:10px 0;padding:14px 15px;border-radius:16px;
-    background:#102238;border:1px solid #31506a;
-}
-.score-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
-.score-state{font-size:.68rem;font-weight:900;color:#9fb4c7;letter-spacing:.03em}
-.score-main{font-size:1.06rem;font-weight:950;color:#fff;line-height:1.25;margin-top:4px}
-.score-badge{font-size:.62rem;font-weight:950;color:#dce8f2;background:#26394b;border:1px solid #536b80;border-radius:999px;padding:6px 9px}
-.track-wrap{margin-top:10px;padding-top:8px;border-top:1px solid #29445c}
-.track-row{font-size:.72rem;color:#dce8f2;padding:4px 0;font-weight:750}
-@media(max-width:700px){
-  .score-card{padding:12px}
-  .score-main{font-size:.98rem}
-}
 
+/* v1.8 visual bet tracker */
+.tracker-title-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0 14px}
+.tracker-title{font-size:1.55rem;font-weight:950;color:#fff;line-height:1.1}
+.tracker-count{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:0 8px;border-radius:9px;background:#21354d;color:#fff;font-size:.82rem;margin-left:7px;vertical-align:middle}
+.tracker-sub{font-size:.78rem;color:#9eafc0;margin-top:5px}
+.visual-bet-card{margin:13px 0;padding:16px;border-radius:18px;background:linear-gradient(180deg,#11253b 0%,#0b1b2d 100%);border:1px solid #2f4c67;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.visual-score-head{display:grid;grid-template-columns:1fr auto 58px;gap:15px;align-items:center}
+.score-teams{min-width:0}
+.team-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;color:#f8fbff;font-size:1rem;font-weight:900;line-height:1.45}
+.team-row b{font-size:1.08rem;color:#fff}
+.live-meta{border-left:1px solid #29445c;padding-left:13px;min-width:96px}
+.live-dot-wrap{font-size:.64rem;font-weight:950;color:#86efac;letter-spacing:.03em}
+.mini-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#39d98a;margin-right:6px;box-shadow:0 0 0 4px rgba(57,217,138,.08)}
+.inning-meta{font-size:.66rem;color:#c3d0dc;margin-top:8px;white-space:nowrap}
+.diamond-mini{width:44px;height:44px;position:relative;opacity:.55}
+.diamond-mini i{position:absolute;width:14px;height:14px;border:2px solid #3f5872;transform:rotate(45deg);border-radius:2px}
+.diamond-mini i:nth-child(1){left:15px;top:0}
+.diamond-mini i:nth-child(2){left:0;top:15px}
+.diamond-mini i:nth-child(3){right:0;top:15px}
+.diamond-mini i:nth-child(4){left:15px;bottom:0}
+.visual-divider{height:1px;background:#2b4359;margin:14px 0}
+.bet-section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.bet-pick{font-size:1.02rem;font-weight:950;color:#fff;line-height:1.2}
+.bet-type{font-size:.68rem;color:#9eb0c1;margin-top:3px}
+.track-pill{font-size:.61rem;font-weight:950;padding:6px 10px;border-radius:999px;border:1px solid;white-space:nowrap}
+.track-good{color:#79edaa !important;border-color:#247a50 !important;background:#0d3526 !important}
+.track-neutral{color:#f8df84 !important;border-color:#79621b !important;background:#30290f !important}
+.track-risk{color:#ff7f7f !important;border-color:#8c3434 !important;background:#351717 !important}
+.progress-label{display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:.68rem;color:#a8b8c7}
+.progress-label b{font-size:.85rem;color:#fff}
+.run-track{height:7px;border-radius:999px;background:#2b3f55;position:relative;margin-top:7px;overflow:visible}
+.run-fill{height:7px;border-radius:999px;background:#51d98a}
+.run-fill.track-neutral{background:#d4b94d !important}
+.run-fill.track-risk{background:#ff6666 !important}
+.line-marker{position:absolute;top:-6px;width:2px;height:19px;background:#e9f0f6;border-radius:1px;transform:translateX(-1px);box-shadow:0 0 0 2px rgba(255,255,255,.07)}
+.run-axis{position:relative;height:22px;margin-top:6px;color:#8195a8;font-size:.60rem}
+.run-axis span:first-child{position:absolute;left:0}
+.run-axis span:nth-child(2){position:absolute;transform:translateX(-50%);color:#e6edf4}
+.run-axis span:last-child{position:absolute;right:0}
+.ml-meter-wrap{height:44px;position:relative;margin:14px 2px 0}
+.ml-meter-line{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:999px;background:linear-gradient(90deg,#a94343 0%,#475c70 50%,#2d9f69 100%)}
+.ml-meter-mid{position:absolute;left:50%;top:14px;width:1px;height:16px;background:#dce8f2;opacity:.55}
+.ml-meter-dot{position:absolute;top:13px;width:17px;height:17px;border-radius:50%;transform:translateX(-50%);background:#51d98a;border:3px solid #dff9ea}
+.ml-meter-dot.track-neutral{background:#d4b94d !important;border-color:#fff4bf !important}
+.ml-meter-dot.track-risk{background:#ff6666 !important;border-color:#ffd4d4 !important}
+.ml-meter-labels{display:flex;justify-content:space-between;gap:8px;color:#879aad;font-size:.58rem;margin-top:-3px}
+.ml-meter-labels b{color:#b9c8d6;font-weight:750}
+.plain-live-card{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:12px;margin:8px 0;border-radius:14px;background:#102238;border:1px solid #31506a}
+@media(max-width:700px){
+  .visual-bet-card{padding:14px}
+  .visual-score-head{grid-template-columns:1fr auto 42px;gap:10px}
+  .team-row{font-size:.92rem}
+  .live-meta{min-width:86px;padding-left:10px}
+  .diamond-mini{transform:scale(.85);transform-origin:center}
+  .bet-pick{font-size:.96rem}
+}
 
 /* v1.7.2 top plays */
 .top-play-card{
@@ -1664,121 +1705,243 @@ def tracked_rows_for_game(game_pk, tracker_df=None):
         return pd.DataFrame(columns=TRACKER_COLUMNS)
     return tracker_df[tracker_df["GamePk"].astype(str) == str(game_pk)].copy()
 
-def live_tracking_text(rec, game):
-    """Describe how a frozen model recommendation is tracking right now."""
-    market = str(rec.get("Market", "")).upper()
+
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def _inning_fraction(game):
+    """Approximate fraction of regulation game completed, for visual pace only."""
+    inning = max(1, _safe_int(game.get("Current_Inning"), 1))
+    outs = max(0, min(3, _safe_int(game.get("Outs"), 0)))
+    half = str(game.get("Inning_State") or game.get("Inning_Half") or "").lower()
+    completed_halves = max(0, (inning - 1) * 2)
+    if "bottom" in half or "middle" in half:
+        completed_halves += 1
+    elif "end" in half:
+        completed_halves += 2
+    frac = (completed_halves * 3 + outs) / 54.0
+    return max(0.02, min(1.0, frac))
+
+def _odds_text(v):
+    try:
+        return f"{int(float(v)):+d}"
+    except Exception:
+        return ""
+
+def _tracker_result_badge(rec):
     result = str(rec.get("Result", "PENDING") or "PENDING").upper()
-    odds = rec.get("Odds")
+    if result == "WIN":
+        return "WIN", "track-good"
+    if result == "LOSS":
+        return "LOSS", "track-risk"
+    if result == "PUSH":
+        return "PUSH", "track-neutral"
+    if result == "VOID":
+        return "VOID", "track-neutral"
+    return None, None
+
+def _total_visual(rec, game):
+    side = str(rec.get("Side") or "").upper()
     try:
-        odds_txt = f"{int(float(odds)):+d}"
+        line = float(rec.get("Market_Line"))
     except Exception:
-        odds_txt = ""
+        return "", "track-neutral", "TRACKING"
+    away_score = _safe_int(game.get("Away_Score"), 0)
+    home_score = _safe_int(game.get("Home_Score"), 0)
+    runs = away_score + home_score
+    state = game_state(game)
 
-    if result in ("WIN", "LOSS", "PUSH", "VOID"):
-        try:
-            units = float(rec.get("Units") or 0)
-            unit_txt = f" • {units:+.2f}u" if result in ("WIN","LOSS") else ""
-        except Exception:
-            unit_txt = ""
-        return f'{rec.get("Pick")} {odds_txt} • {result}{unit_txt}'
-
-    try:
-        away_score = int(game.get("Away_Score"))
-        home_score = int(game.get("Home_Score"))
-    except Exception:
-        away_score = home_score = None
-
-    if market == "MONEYLINE":
-        pick = str(rec.get("Pick", ""))
-        status = "PENDING"
-        if away_score is not None and home_score is not None:
-            away_name = str(game.get("Away") or "")
-            home_name = str(game.get("Home") or "")
-            if team_key(pick) == team_key(away_name):
-                diff = away_score - home_score
-            elif team_key(pick) == team_key(home_name):
-                diff = home_score - away_score
+    final_badge, final_cls = _tracker_result_badge(rec)
+    if final_badge:
+        status, status_cls = final_badge, final_cls
+    else:
+        frac = _inning_fraction(game)
+        expected_to_now = line * frac
+        # Visual pace heuristic only — not a live probability model.
+        if side == "UNDER":
+            ratio = runs / max(expected_to_now, 0.75)
+            if runs >= line:
+                status, status_cls = "AT RISK", "track-risk"
+            elif ratio <= 0.90:
+                status, status_cls = "TRACKING WELL", "track-good"
+            elif ratio <= 1.20:
+                status, status_cls = "NEUTRAL", "track-neutral"
             else:
-                diff = 0
-            status = "AHEAD" if diff > 0 else ("BEHIND" if diff < 0 else "TIED")
-        return f'{pick} ML {odds_txt} • {status}'
-
-    if market == "TOTAL":
-        side = str(rec.get("Side", "")).upper()
-        try:
-            line = float(rec.get("Market_Line"))
-            line_txt = f"{line:.1f}"
-        except Exception:
-            line = None
-            line_txt = ""
-        current_total = None if away_score is None or home_score is None else away_score + home_score
-        if current_total is None or line is None:
-            return f'{side} {line_txt} {odds_txt} • PENDING'
-        if current_total > line:
-            position = "CURRENTLY OVER"
-        elif current_total < line:
-            position = "CURRENTLY UNDER"
+                status, status_cls = "AT RISK", "track-risk"
         else:
-            position = "AT THE LINE"
-        return f'{side} {line_txt} {odds_txt} • {current_total} RUNS • {position}'
+            ratio = runs / max(expected_to_now, 0.75)
+            if runs > line:
+                status, status_cls = "TRACKING WELL", "track-good"
+            elif ratio >= 1.10:
+                status, status_cls = "TRACKING WELL", "track-good"
+            elif ratio >= 0.80:
+                status, status_cls = "NEUTRAL", "track-neutral"
+            else:
+                status, status_cls = "BEHIND PACE", "track-risk"
 
-    return f'{rec.get("Pick")} {odds_txt} • {result}'
+    scale_max = max(line * 1.65, runs + 2, 12)
+    fill_pct = max(0, min(100, runs / scale_max * 100))
+    line_pct = max(2, min(96, line / scale_max * 100))
+    pick = f"{side} {line:.1f} {_odds_text(rec.get('Odds'))}".strip()
+
+    html = (
+        f'<div class="bet-section-head"><div>'
+        f'<div class="bet-pick">{pick}</div>'
+        f'<div class="bet-type">Total Runs</div></div>'
+        f'<div class="track-pill {status_cls}">{status}</div></div>'
+        f'<div class="progress-label"><span>Runs scored</span><b>{runs:g} / {line:g}</b></div>'
+        f'<div class="run-track">'
+        f'<div class="run-fill {status_cls}" style="width:{fill_pct:.1f}%"></div>'
+        f'<div class="line-marker" style="left:{line_pct:.1f}%"></div>'
+        f'</div>'
+        f'<div class="run-axis"><span>0</span><span style="left:{line_pct:.1f}%">{line:g}</span><span>{scale_max:.0f}+</span></div>'
+    )
+    return html, status_cls, status
+
+def _moneyline_visual(rec, game):
+    pick = str(rec.get("Pick") or "")
+    odds = _odds_text(rec.get("Odds"))
+    away = str(game.get("Away") or "")
+    home = str(game.get("Home") or "")
+    away_score = _safe_int(game.get("Away_Score"), 0)
+    home_score = _safe_int(game.get("Home_Score"), 0)
+
+    final_badge, final_cls = _tracker_result_badge(rec)
+    if final_badge:
+        status, status_cls = final_badge, final_cls
+    else:
+        if team_key(pick) == team_key(away):
+            margin = away_score - home_score
+        elif team_key(pick) == team_key(home):
+            margin = home_score - away_score
+        else:
+            margin = 0
+        status = "LEADING" if margin > 0 else ("TRAILING" if margin < 0 else "TIED")
+        status_cls = "track-good" if margin > 0 else ("track-risk" if margin < 0 else "track-neutral")
+
+    # Visual lead meter centered at 50%. This is not live win probability.
+    if team_key(pick) == team_key(away):
+        margin = away_score - home_score
+    else:
+        margin = home_score - away_score
+    meter = max(8, min(92, 50 + margin * 8))
+    try:
+        pregame_prob = float(rec.get("Model_Probability")) * 100
+        prob_text = f"Pregame model {pregame_prob:.0f}%"
+    except Exception:
+        prob_text = "Model pick"
+
+    html = (
+        f'<div class="bet-section-head"><div>'
+        f'<div class="bet-pick">{pick} Moneyline {odds}</div>'
+        f'<div class="bet-type">Moneyline</div></div>'
+        f'<div class="track-pill {status_cls}">{status}</div></div>'
+        f'<div class="ml-meter-wrap">'
+        f'<div class="ml-meter-line"></div>'
+        f'<div class="ml-meter-mid"></div>'
+        f'<div class="ml-meter-dot {status_cls}" style="left:{meter:.1f}%"></div>'
+        f'</div>'
+        f'<div class="ml-meter-labels"><span>Trailing</span><b>{prob_text}</b><span>Leading</span></div>'
+    )
+    return html, status_cls, status
+
+def _score_rows(game):
+    away = str(game.get("Away") or "Away")
+    home = str(game.get("Home") or "Home")
+    away_score = game.get("Away_Score")
+    home_score = game.get("Home_Score")
+    try:
+        away_score = int(away_score)
+    except Exception:
+        away_score = "-"
+    try:
+        home_score = int(home_score)
+    except Exception:
+        home_score = "-"
+    return (
+        f'<div class="team-row"><span>{away}</span><b>{away_score}</b></div>'
+        f'<div class="team-row"><span>{home}</span><b>{home_score}</b></div>'
+    )
+
+def _visual_tracked_card(rec, game):
+    market = str(rec.get("Market") or "").upper()
+    state = game_state(game)
+    state_label = "FINAL" if state == "FINAL" else "LIVE"
+    inning = "FINAL" if state == "FINAL" else inning_status_text(game)
+    if market == "TOTAL":
+        bet_html, _, _ = _total_visual(rec, game)
+    else:
+        bet_html, _, _ = _moneyline_visual(rec, game)
+
+    return (
+        f'<div class="visual-bet-card">'
+        f'<div class="visual-score-head">'
+        f'<div class="score-teams">{_score_rows(game)}</div>'
+        f'<div class="live-meta"><div class="live-dot-wrap"><span class="mini-dot"></span>{state_label}</div>'
+        f'<div class="inning-meta">{inning}</div></div>'
+        f'<div class="diamond-mini"><i></i><i></i><i></i><i></i></div>'
+        f'</div>'
+        f'<div class="visual-divider"></div>'
+        f'{bet_html}'
+        f'</div>'
+    )
 
 def render_live_scoreboard(games, fresh_scoreboard, tracker_df):
-    """Dedicated live/final page with score, inning and tracked-model-pick progress."""
+    """Visual live bet tracker modeled after the approved product mockup."""
     fresh_games = []
     for g0 in games:
         g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
-        state = game_state(g)
-        if state in ("LIVE", "FINAL"):
+        if game_state(g) in ("LIVE", "FINAL"):
             fresh_games.append(g)
 
     live_list = [g for g in fresh_games if game_state(g) == "LIVE"]
     final_list = [g for g in fresh_games if game_state(g) == "FINAL"]
 
-    st.markdown('<div class="kicker">Live Scores</div>', unsafe_allow_html=True)
-    st.caption("Scores and innings come from MLB. Tracked model picks are shown underneath the game they belong to.")
+    tracked_live = []
+    for g in live_list:
+        rows = tracked_rows_for_game(g.get("GamePk"), tracker_df)
+        if not rows.empty:
+            for _, rec in rows.iterrows():
+                tracked_live.append((g, rec))
 
-    if live_list:
-        for g in live_list:
-            score = live_score_text(g)
-            inning = inning_status_text(g)
-            tracked = tracked_rows_for_game(g.get("GamePk"), tracker_df)
-            track_html = ""
-            if not tracked.empty:
-                bits = []
-                for _, rec in tracked.iterrows():
-                    bits.append(f'<div class="track-row">🎯 {live_tracking_text(rec, g)}</div>')
-                track_html = '<div class="track-wrap">' + "".join(bits) + '</div>'
-            st.markdown(
-                f'<div class="score-card">'
-                f'<div class="score-top"><div><div class="score-state">{inning}</div>'
-                f'<div class="score-main">{score}</div></div>'
-                f'<div class="score-badge">LIVE</div></div>'
-                f'{track_html}</div>',
-                unsafe_allow_html=True,
-            )
+    tracked_final = []
+    for g in final_list:
+        rows = tracked_rows_for_game(g.get("GamePk"), tracker_df)
+        if not rows.empty:
+            for _, rec in rows.iterrows():
+                tracked_final.append((g, rec))
+
+    st.markdown(
+        f'<div class="tracker-title-row"><div><div class="tracker-title">Bet Tracker '
+        f'<span class="tracker-count">{len(tracked_live)}</span></div>'
+        f'<div class="tracker-sub">Live progress on your tracked model bets</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if tracked_live:
+        for g, rec in tracked_live:
+            st.markdown(_visual_tracked_card(rec, g), unsafe_allow_html=True)
     else:
-        st.caption("No games are currently in progress.")
+        st.info("No tracked bets are live right now.")
 
-    if final_list:
-        with st.expander(f"Final Games — {len(final_list)}", expanded=False):
-            for g in final_list:
-                tracked = tracked_rows_for_game(g.get("GamePk"), tracker_df)
-                track_html = ""
-                if not tracked.empty:
-                    bits = []
-                    for _, rec in tracked.iterrows():
-                        bits.append(f'<div class="track-row">🎯 {live_tracking_text(rec, g)}</div>')
-                    track_html = '<div class="track-wrap">' + "".join(bits) + '</div>'
+    if tracked_final:
+        with st.expander(f"Completed Tracked Bets — {len(tracked_final)}", expanded=False):
+            for g, rec in tracked_final:
+                st.markdown(_visual_tracked_card(rec, g), unsafe_allow_html=True)
+
+    untracked_live = [g for g in live_list if tracked_rows_for_game(g.get("GamePk"), tracker_df).empty]
+    if untracked_live:
+        with st.expander(f"Other Live Games — {len(untracked_live)}", expanded=False):
+            for g in untracked_live:
                 st.markdown(
-                    f'<div class="score-card">'
-                    f'<div class="score-top"><div><div class="score-state">FINAL</div>'
-                    f'<div class="score-main">{live_score_text(g)}</div></div>'
-                    f'<div class="score-badge">FINAL</div></div>'
-                    f'{track_html}</div>',
+                    f'<div class="plain-live-card"><div><div class="score-state">{inning_status_text(g)}</div>'
+                    f'<div class="score-main">{live_score_text(g)}</div></div><div class="score-badge">LIVE</div></div>',
                     unsafe_allow_html=True,
                 )
+
 
 def render_performance_page():
     tracker_df = load_tracker()
@@ -1941,17 +2104,16 @@ else:
     st.markdown('<div class="kicker">Navigation</div>', unsafe_allow_html=True)
     main_view = st.radio(
         "Navigation",
-        ["Betting Board", "Live Scores", "Performance"],
+        ["Betting Board", "Bet Tracker", "Performance"],
         horizontal=True,
         label_visibility="collapsed",
         key="main_navigation",
     )
 
-    if main_view == "Live Scores":
+    if main_view == "Bet Tracker":
         tracker_df = load_tracker()
         render_live_scoreboard(games, fresh_scoreboard, tracker_df)
-        st.markdown('<div class="kicker">About This View</div>', unsafe_allow_html=True)
-        st.caption("Tracked picks shown here are frozen model recommendations from the forward-performance ledger. Live status is informational only; no in-game betting recommendations are generated.")
+        st.caption("Live tracking is visual only; the app does not generate in-game betting recommendations.")
         st.stop()
 
     if main_view == "Performance":
@@ -1980,7 +2142,7 @@ else:
         single_group = "Upcoming"
         single_pool = upcoming_single
         if not single_pool:
-            st.info("No upcoming games remain. Use the **Live Scores** tab for games already underway or final.")
+            st.info("No upcoming games remain. Use the **Bet Tracker** tab for games already underway or final.")
             st.stop()
         labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
         st.markdown('<div class="kicker">Matchup</div>', unsafe_allow_html=True)
