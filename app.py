@@ -29,7 +29,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.7-TRACKER-LIVE-FIRST"
+APP_VERSION = "3.2.8-TRACKER-MIDNIGHT-CARRY"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -1818,6 +1818,19 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     letter-spacing:0;
 }
 
+
+/* ===== v3.2.8 midnight tracker carry ===== */
+.midnight-carry-note{
+    margin:8px 0 12px;
+    padding:9px 11px;
+    border-radius:12px;
+    background:rgba(56,189,248,.07);
+    border:1px solid rgba(56,189,248,.18);
+    color:#9bc7df;
+    font-size:.61rem;
+    font-weight:800;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -3273,6 +3286,53 @@ def _live_tracker_bucket(rec, game, win_prob):
 
     return "NEUTRAL"
 
+
+def _tracker_date_set(slate_date):
+    """Normalize Tracker scope to one or many YYYY-MM-DD slate dates."""
+    if isinstance(slate_date, (list, tuple, set)):
+        vals = slate_date
+    else:
+        vals = [slate_date]
+    out = set()
+    for v in vals:
+        try:
+            out.add(str(pd.Timestamp(v).date()))
+        except Exception:
+            out.add(str(v))
+    return out
+
+
+def _active_tracker_dates(tracker_df, selected_date):
+    """Carry unfinished prior-day official bets across midnight.
+
+    The Tracker follows the bet/game until it reaches a terminal result instead
+    of disappearing just because the calendar date changed.
+    """
+    dates = {str(pd.Timestamp(selected_date).date())}
+
+    if tracker_df is None or tracker_df.empty:
+        return sorted(dates)
+
+    pending = tracker_df[
+        ~tracker_df["Result"].astype(str).str.upper().isin(["WIN", "LOSS", "PUSH", "VOID"])
+    ].copy()
+
+    # Keep pending bets from the previous two calendar days. MLB games cannot
+    # realistically remain active beyond this window, while this also covers
+    # long extra-inning / delayed games crossing midnight.
+    today = pd.Timestamp.now(tz="America/New_York").date()
+    for value in pending.get("Slate_Date", pd.Series(dtype=str)).astype(str):
+        try:
+            d = pd.Timestamp(value).date()
+            age = (today - d).days
+            if 0 <= age <= 2:
+                dates.add(str(d))
+        except Exception:
+            continue
+
+    return sorted(dates)
+
+
 def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
     if tracker_df is None or tracker_df.empty:
         return {
@@ -3280,7 +3340,8 @@ def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
             "on_track":0,"neutral":0,"needs_help":0,"units":0.0,"status":"NO TRACKED BETS"
         }
 
-    today_rows = tracker_df[tracker_df["Slate_Date"].astype(str) == str(slate_date)].copy()
+    active_dates = _tracker_date_set(slate_date)
+    today_rows = tracker_df[tracker_df["Slate_Date"].astype(str).isin(active_dates)].copy()
     if today_rows.empty:
         return {
             "tracked":0,"upcoming":0,"live":0,"final":0,"wins":0,"losses":0,"pushes":0,
@@ -3343,7 +3404,7 @@ def _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date):
     out["status"] = status
     return out
 
-def _slate_pulse_html(summary):
+def _slate_pulse_html(summary, cross_day=False):
     record = f'{summary["wins"]}-{summary["losses"]}'
     if summary["pushes"]:
         record += f'-{summary["pushes"]}P'
@@ -3353,7 +3414,7 @@ def _slate_pulse_html(summary):
     )
     return (
         f'<div class="slate-pulse">'
-        f'<div class="pulse-head"><div><div class="pulse-kicker">TODAY\'S TRACKED SLATE</div>'
+        f'<div class="pulse-head"><div><div class="pulse-kicker">{"ACTIVE TRACKED SLATE" if cross_day else "TODAY\'S TRACKED SLATE"}</div>'
         f'<div class="pulse-title">{summary["status"]}</div><div class="pulse-sub">Upcoming + live + final official bets</div></div>'
         f'<div class="pulse-status {status_cls}">{summary["tracked"]} TRACKED</div></div>'
         f'<div class="pulse-grid">'
@@ -3672,8 +3733,9 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
         g = fresh_scoreboard.get(str(g0.get("GamePk")), g0)
         game_map[str(g0.get("GamePk"))] = g
 
+    active_dates = _tracker_date_set(slate_date)
     today_rows = (
-        tracker_df[tracker_df["Slate_Date"].astype(str) == str(slate_date)].copy()
+        tracker_df[tracker_df["Slate_Date"].astype(str).isin(active_dates)].copy()
         if tracker_df is not None and not tracker_df.empty
         else pd.DataFrame(columns=TRACKER_COLUMNS)
     )
@@ -3730,7 +3792,10 @@ def render_live_scoreboard(games, fresh_scoreboard, tracker_df, slate_date):
     )
 
     summary = _slate_tracking_summary(tracker_df, games, fresh_scoreboard, slate_date)
-    st.markdown(_slate_pulse_html(summary), unsafe_allow_html=True)
+    st.markdown(
+        _slate_pulse_html(summary, cross_day=(len(active_dates) > 1)),
+        unsafe_allow_html=True,
+    )
 
     # Priority order in Tracker:
     # 1) Live tracked bets
@@ -3855,15 +3920,53 @@ def render_auto_live_page(games, slate_date):
 
 @_auto_fragment(20)
 def render_auto_tracker_page(games, slate_date):
-    """Refresh scores, live win probability and tracker state without paid odds calls."""
+    """Refresh Tracker across midnight without using paid odds calls.
+
+    If an official bet from yesterday is still pending/live after midnight,
+    Ninth Signal automatically keeps yesterday's schedule + scoreboard attached
+    until the bet reaches a final result.
+    """
     # grade_tracker is internally throttled to once per minute.
     grade_tracker(force=False)
-    fresh = fetch_fresh_scoreboard(slate_date)
     tracker_df = load_tracker()
-    render_live_scoreboard(games, fresh, tracker_df, slate_date)
+    active_dates = _active_tracker_dates(tracker_df, slate_date)
+
+    combined_games = {}
+    combined_fresh = {}
+
+    for d_text in active_dates:
+        try:
+            d = pd.Timestamp(d_text).date()
+        except Exception:
+            d = slate_date
+
+        # Reuse already-loaded current-page games where possible.
+        if str(d) == str(pd.Timestamp(slate_date).date()):
+            day_games = games
+        else:
+            try:
+                day_games = fetch_games_for_date(d)
+            except Exception:
+                day_games = []
+
+        for g in day_games or []:
+            combined_games[str(g.get("GamePk"))] = g
+
+        fresh_day = fetch_fresh_scoreboard(d)
+        combined_fresh.update(fresh_day or {})
+
+    render_live_scoreboard(
+        list(combined_games.values()),
+        combined_fresh,
+        tracker_df,
+        active_dates,
+    )
+
     updated = pd.Timestamp.now(tz="America/New_York")
+    carry = [d for d in active_dates if d != str(pd.Timestamp(slate_date).date())]
+    carry_text = f' • CARRYING {", ".join(carry)}' if carry else ""
     st.markdown(
-        f'<div class="auto-fresh"><span></span>AUTO TRACKING • UPDATED {updated.strftime("%-I:%M:%S %p")}</div>',
+        f'<div class="auto-fresh"><span></span>AUTO TRACKING{carry_text} • UPDATED {updated.strftime("%-I:%M:%S %p")}</div>',
         unsafe_allow_html=True,
     )
 
@@ -4007,9 +4110,9 @@ except Exception:
 slate_date=st.date_input(
     "Slate date",
     value=today_et(),
-    min_value=today_et(),
+    min_value=today_et()-timedelta(days=2),
     max_value=today_et()+timedelta(days=14),
-    help="Current/upcoming MLB dates only.",
+    help="Board date. Tracker automatically carries unfinished prior-day bets across midnight.",
     label_visibility="collapsed",
 )
 st.markdown(
