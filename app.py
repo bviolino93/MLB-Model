@@ -108,10 +108,24 @@ RA9_MULTIPLIER = 1.08
 # Pitching factor clamp, as a multiple of league RA9.
 PITCHING_CLAMP = (0.62, 1.42)
 
-# Home field. Applied additively to the home team's projected runs.
-HOME_RUN_ADVANTAGE = 0.15
+# Home field has TWO separate components and they must not be conflated:
+#   1. a small RUN edge (home teams score marginally more) -- affects TOTALS
+#   2. batting last (the home team stops batting once ahead in the 9th and
+#      wins immediately in extras) -- affects WIN PROBABILITY only
+# The old model had only #1, set to 0.12, which produced a 51.5% home win rate
+# against an MLB reality of 54.0%. Inflating the run edge to close that gap
+# would have pushed every projected total up by ~0.3 runs and reintroduced the
+# level bias we just removed. So the structural piece is applied as a logit
+# shift on win probability instead, leaving totals untouched.
+HOME_RUN_ADVANTAGE = 0.15          # runs; feeds totals AND win prob
+HOME_STRUCTURAL_LOGIT = 0.1005     # win prob only; calibrated to 0.540
 
-# Pythagorean exponent for converting projected runs to win probability.
+# Run distribution. MLB team-game runs are overdispersed relative to Poisson
+# (mean ~4.30, variance ~9.60). Negative binomial: var = mu + mu^2/k.
+RUN_DIST_K = 3.49
+RUN_DIST_MAX = 32                  # runs cap for the convolution
+
+# Retained for reference only -- win_prob no longer uses it. See win_prob().
 PYTH_EXPONENT = 1.83
 
 # Park factors are already regressed toward 1.0 by the source. Applying them at
@@ -256,10 +270,64 @@ def expected_value(prob, odds):
     return float(prob) * profit - (1.0 - float(prob))
 
 
-def win_prob(runs_for, runs_against):
+_NB_CACHE = {}
+
+
+def _nb_pmf(mu, k=None, nmax=None):
+    """Negative binomial PMF over 0..nmax runs. Cached on rounded mean."""
+    k = RUN_DIST_K if k is None else k
+    nmax = RUN_DIST_MAX if nmax is None else nmax
+    mu = max(0.15, round(float(mu), 3))
+    key = (mu, k, nmax)
+    if key in _NB_CACHE:
+        return _NB_CACHE[key]
+    p = k / (k + mu)
+    lp, lq = math.log(p), math.log1p(-p)
+    lgk = math.lgamma(k)
+    out = np.array([
+        math.exp(math.lgamma(x + k) - lgk - math.lgamma(x + 1) + k * lp + x * lq)
+        for x in range(nmax + 1)
+    ])
+    out = out / out.sum()
+    if len(_NB_CACHE) > 4000:
+        _NB_CACHE.clear()
+    _NB_CACHE[key] = out
+    return out
+
+
+def win_prob(runs_for, runs_against, home_is_second=True):
+    """P(first team wins). Convention: win_prob(away_runs, home_runs).
+
+    Replaces the Pythagorean formula. Pythagorean is a SEASON-level identity;
+    applied to a single game it overstates favorites badly, because one game's
+    outcome is dominated by the lumpiness of run scoring rather than by the
+    difference in means. Measured error at the extremes:
+
+        proj runs     Pythagorean     this model
+        5.2 v 3.8        -178            -159
+        6.0 v 3.0        -356            -239
+
+    Here both teams' run totals are modelled as negative binomial and the two
+    distributions are convolved exactly, so P(win) falls out by construction.
+    Ties go to extra innings, which the home side wins about 52% of the time.
+    A logit shift then adds the batting-last advantage.
+    """
     rf = max(0.01, float(runs_for))
     ra = max(0.01, float(runs_against))
-    return (rf ** PYTH_EXPONENT) / ((rf ** PYTH_EXPONENT) + (ra ** PYTH_EXPONENT))
+
+    A = _nb_pmf(rf)
+    H = _nb_pmf(ra)
+    cumH = np.cumsum(H)
+    p_first = float((A[1:] * cumH[:-1]).sum())      # first team outscores
+    p_tie = float((A * H).sum())
+    p_first += p_tie * 0.48                          # extras: home wins ~52%
+
+    if home_is_second and HOME_STRUCTURAL_LOGIT:
+        p_home = clamp(1.0 - p_first, 1e-6, 1 - 1e-6)
+        z = math.log(p_home / (1 - p_home)) + HOME_STRUCTURAL_LOGIT
+        p_first = 1.0 - 1.0 / (1.0 + math.exp(-z))
+
+    return clamp(p_first, 0.001, 0.999)
 
 
 def get_json(url, params=None, cache_key=None):
@@ -1071,12 +1139,347 @@ def selftest():
     print(f"  at Oracle (x0.96): {lo * 0.96:5.2f}")
     print("  [old model spread was 1.70 runs, 8.22 to 9.92]")
 
+    print("\nWIN PROBABILITY (exact convolution vs old Pythagorean)")
+    def _pyth(a, h):
+        return a ** PYTH_EXPONENT / (a ** PYTH_EXPONENT + h ** PYTH_EXPONENT)
+    print("  %-16s %10s %10s" % ("away v home", "old ML", "new ML"))
+    for a, h in ((4.30, 4.30), (4.6, 4.2), (5.0, 4.0), (5.4, 3.6), (6.0, 3.0)):
+        old = fair_ml(_pyth(a, h + 0.12))
+        new = fair_ml(win_prob(a, h + HOME_RUN_ADVANTAGE))
+        print("  %-16s %10d %10d" % (f"{a} v {h}", old, new))
+    _even = 1 - win_prob(LEAGUE_RUNS_PER_TEAM,
+                         LEAGUE_RUNS_PER_TEAM + HOME_RUN_ADVANTAGE)
+    print(f"  even teams -> home wins {_even:.3f}  (MLB actual ~0.540)")
+
     print("\nMONEYLINE (most lopsided matchup the model can build)")
     a = LEAGUE_RUNS_PER_TEAM * hi_off * hi_pf
     h = LEAGUE_RUNS_PER_TEAM * lo_off * lo_pf + HOME_RUN_ADVANTAGE
     wp = win_prob(a, h)
     print(f"  away {a:.2f} vs home {h:.2f} -> win prob {wp:.3f} -> fair ML {fair_ml(wp):+d}")
     print("  [old model could not exceed -134]\n")
+
+# =============================================================================
+# POINT-IN-TIME BACKTEST
+# =============================================================================
+# The quick backtest() above re-runs the model with TODAY's statistics against
+# games already played. For a game in June that means feeding the model July,
+# August and September data that did not exist yet, plus a "recent form" window
+# anchored to today rather than to the game. The further back you go the more
+# incoherent the inputs, which is why its slope decayed from 1.24 (30d) to 0.89
+# (90d) and its residual bounced +0.44 / -0.04 / +0.77 across consecutive
+# stretches of the same season.
+#
+# The functions below rebuild each game's inputs as they stood the morning of
+# that game, and optionally compare the result against the closing total.
+#
+# COST: this is much slower than backtest(). Team hitting splits must be
+# fetched per (team, date), so a 14-day window is roughly 500-900 API calls.
+# Start small.
+
+PIT_SEASON_START = "{}-03-01"
+
+
+def _season_start(as_of):
+    return PIT_SEASON_START.format(as_of.year)
+
+
+def _pit_team_offense(team_name, as_of, use_recent=True):
+    """Offense factor using only games played before `as_of`."""
+    prior_day = as_of - timedelta(days=1)
+    season = _hitting_rates(
+        _team_hitting_stats(team_name, "byDateRange", _season_start(as_of), prior_day)
+    )
+    if not season or season["PA"] < 200:
+        return {"Factor": 1.0, "OPS": LEAGUE_OPS, "PA": season["PA"] if season else 0,
+                "Available": False}
+
+    ops = season["OPS"]
+    if use_recent:
+        recent = _hitting_rates(
+            _team_hitting_stats(team_name, "byDateRange",
+                                as_of - timedelta(days=15), prior_day)
+        )
+        if recent and recent["PA"] >= 120:
+            rw = clamp(recent["PA"] / (recent["PA"] + OFFENSE_RECENT_PA_ANCHOR),
+                       0.0, OFFENSE_RECENT_MAX_WEIGHT)
+            ops = (1 - rw) * ops + rw * recent["OPS"]
+
+    w = clamp(season["PA"] / 1500.0, 0.0, 1.0)
+    ops = w * ops + (1 - w) * LEAGUE_OPS
+    return {"Factor": clamp((ops / LEAGUE_OPS) ** OFFENSE_EXPONENT, *OFFENSE_CLAMP),
+            "OPS": ops, "PA": season["PA"], "Available": True}
+
+
+def _pit_starter(player_id, as_of):
+    """Starter RA9 and expected IP from game-log rows dated before `as_of`.
+
+    Uses the cached full-season game log and filters by date, so this costs no
+    extra API calls beyond the one log fetch per pitcher.
+    """
+    league_ra9 = LEAGUE_FIP * RA9_MULTIPLIER
+    if not player_id:
+        return {"RA9": league_ra9, "ExpIP": 5.0, "Starts": 0, "Available": False}
+
+    log = _pitcher_game_log(player_id)
+    if log.empty:
+        return {"RA9": league_ra9, "ExpIP": 5.0, "Starts": 0, "Available": False}
+
+    cutoff = str(as_of)
+    prior = log[log["Date"].astype(str) < cutoff]
+    if prior.empty:
+        return {"RA9": league_ra9, "ExpIP": 5.0, "Starts": 0, "Available": False}
+
+    ip = float(prior["IP"].sum())
+    if ip <= 0:
+        return {"RA9": league_ra9, "ExpIP": 5.0, "Starts": 0, "Available": False}
+
+    er = float(prior["ER"].sum())
+    hr = float(prior["HR"].sum())
+    bb = float(prior["BB"].sum())
+    k = float(prior["K"].sum())
+    starts = int(prior["Started"].sum())
+
+    era = 9.0 * er / ip
+    fip = _fip_from_counts(ip, hr, bb, k)
+    if math.isfinite(fip) and math.isfinite(era):
+        skill = 0.70 * fip + 0.30 * era
+    elif math.isfinite(fip):
+        skill = fip
+    elif math.isfinite(era):
+        skill = era
+    else:
+        skill = LEAGUE_FIP
+
+    w_season = clamp(ip / SP_SEASON_IP_ANCHOR, 0.0, 1.0)
+    skill = w_season * skill + (1 - w_season) * LEAGUE_FIP
+
+    # recent form = last 5 starts BEFORE this game
+    rs = prior[prior["Started"] == 1].head(5)
+    if not rs.empty:
+        r_ip = float(rs["IP"].sum())
+        if r_ip > 0:
+            r_fip = _fip_from_counts(r_ip, float(rs["HR"].sum()),
+                                     float(rs["BB"].sum()), float(rs["K"].sum()))
+            if math.isfinite(r_fip):
+                w_r = clamp(r_ip / SP_RECENT_IP_ANCHOR, 0.0, 1.0) * SP_RECENT_MAX_WEIGHT
+                skill = (1 - w_r) * skill + w_r * r_fip
+
+    role = clamp(starts / 6.0, 0.25, 1.0)
+    skill = role * skill + (1 - role) * LEAGUE_FIP
+
+    if not rs.empty:
+        vals = rs["IP"].to_numpy(dtype=float)
+        exp_ip = float(np.average(vals, weights=np.arange(len(vals), 0, -1, dtype=float)))
+    else:
+        exp_ip = 5.0
+    return {"RA9": clamp(skill * RA9_MULTIPLIER, 2.20, 8.00),
+            "ExpIP": clamp(exp_ip, 3.8, 6.8), "Starts": starts, "Available": True}
+
+
+def _pit_bullpen(team_name, as_of):
+    """Relief RA9 before `as_of`. Falls back to league average if the split is
+    not available for a date range (the MLB API is inconsistent here)."""
+    if not TEAM_IDS:
+        load_team_ids()
+    tid = TEAM_IDS.get(team_name)
+    fallback = {"RA9": LEAGUE_BULLPEN_ERA * RA9_MULTIPLIER, "Available": False}
+    if not tid:
+        return fallback
+    data = get_json(
+        f"{MLB_API}/v1/teams/{tid}/stats",
+        {"stats": "byDateRange", "group": "pitching", "season": as_of.year,
+         "sitCodes": "rp", "startDate": _season_start(as_of),
+         "endDate": str(as_of - timedelta(days=1))},
+        cache_key=("pitbp", tid, str(as_of)),
+    )
+    try:
+        stat = data["stats"][0]["splits"][0]["stat"]
+        ip = ip_to_decimal(stat.get("inningsPitched", 0))
+        er = safe_float(stat.get("earnedRuns"), np.nan)
+    except Exception:
+        return fallback
+    if ip <= 0 or not math.isfinite(er):
+        return fallback
+    era = 9.0 * er / ip
+    w = clamp(ip / BULLPEN_IP_ANCHOR, 0.0, 1.0)
+    shrunk = w * era + (1 - w) * LEAGUE_BULLPEN_ERA
+    return {"RA9": clamp(shrunk * RA9_MULTIPLIER, 2.80, 7.00), "Available": True}
+
+
+def _pit_project(g, as_of, use_recent=True):
+    """Rebuild one game's projected total as it would have stood that morning.
+
+    Lineups and platoon splits are deliberately excluded: lineups are not
+    posted at projection time, and the MLB API does not expose point-in-time
+    platoon splits. Weather is excluded too -- historical forecasts are not
+    retrievable, and using actual observed weather would be look-ahead.
+    Park IS applied.
+    """
+    asp = _pit_starter(g.get("Away_SP_ID"), as_of)
+    hsp = _pit_starter(g.get("Home_SP_ID"), as_of)
+    abp = _pit_bullpen(g.get("Away"), as_of)
+    hbp = _pit_bullpen(g.get("Home"), as_of)
+    aoff = _pit_team_offense(g.get("Away"), as_of, use_recent)
+    hoff = _pit_team_offense(g.get("Home"), as_of, use_recent)
+
+    home_pf, _ = _pitching_factor(hsp["RA9"], hbp["RA9"], hsp["ExpIP"])
+    away_pf, _ = _pitching_factor(asp["RA9"], abp["RA9"], asp["ExpIP"])
+
+    away_runs = LEAGUE_RUNS_PER_TEAM * aoff["Factor"] * home_pf
+    home_runs = LEAGUE_RUNS_PER_TEAM * hoff["Factor"] * away_pf + HOME_RUN_ADVANTAGE
+
+    park = PARKS.get(g.get("Venue", ""), {})
+    pf = 1.0 + (safe_float(park.get("factor"), 1.0) - 1.0) * PARK_WEIGHT
+    total = clamp((away_runs + home_runs) * pf + TOTAL_CALIBRATION_OFFSET, *TOTAL_CLAMP)
+
+    return {
+        "projected": total,
+        "inputs_ok": all([asp["Available"], hsp["Available"],
+                          aoff["Available"], hoff["Available"]]),
+        "bullpen_ok": abp["Available"] and hbp["Available"],
+        "away_sp_ra9": asp["RA9"], "home_sp_ra9": hsp["RA9"],
+        "away_off": aoff["Factor"], "home_off": hoff["Factor"],
+        "park_factor": pf,
+    }
+
+
+# --- closing lines ---------------------------------------------------------
+
+def _norm_team(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def _closing_totals_for_date(api_key, d):
+    """Consensus closing total per game from The Odds API historical endpoint.
+
+    Historical odds are a separate paid add-on. If the call fails or is not
+    included in your plan this returns {} and the benchmark is skipped rather
+    than silently reporting nothing.
+    """
+    if not api_key:
+        return {}, "no ODDS_API_KEY configured"
+    snap = f"{d}T23:00:00Z"
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
+            params={"apiKey": api_key, "regions": "us", "markets": "totals",
+                    "oddsFormat": "american", "date": snap},
+            timeout=25,
+        )
+        if r.status_code in (401, 403):
+            return {}, "historical odds not included in this API plan"
+        if r.status_code == 422:
+            return {}, "historical endpoint rejected the date"
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        return {}, f"historical odds request failed: {e}"
+
+    events = payload.get("data", payload) or []
+    out = {}
+    for ev in events:
+        pts = []
+        for bk in ev.get("bookmakers", []):
+            for mk in bk.get("markets", []):
+                if mk.get("key") != "totals":
+                    continue
+                for oc in mk.get("outcomes", []):
+                    p = safe_float(oc.get("point"), np.nan)
+                    if math.isfinite(p):
+                        pts.append(p)
+        if pts:
+            key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
+            out[key] = float(statistics.median(pts))
+    return out, None
+
+
+def pit_backtest(days_back=14, use_recent=True, use_lines=True,
+                 api_key=None, progress=None):
+    """Honest backtest: point-in-time inputs, optional closing-line benchmark.
+
+    Returns a dict, or None if too few games were assembled.
+    """
+    end = today_et() - timedelta(days=1)
+    proj, actual, lines = [], [], []
+    skipped = 0
+    bullpen_ok = 0
+    line_note = None
+
+    for i in range(days_back):
+        d = end - timedelta(days=i)
+        if progress:
+            progress(i + 1, days_back, str(d))
+        try:
+            games = fetch_games_for_date(d)
+            finals = _final_scores_for_date(d)
+        except Exception:
+            continue
+        if not games or not finals:
+            continue
+
+        day_lines = {}
+        if use_lines:
+            day_lines, note = _closing_totals_for_date(api_key, d)
+            if note and not line_note:
+                line_note = note
+
+        for g in games:
+            gp = g.get("GamePk")
+            if gp not in finals or not g.get("Away_SP_ID") or not g.get("Home_SP_ID"):
+                continue
+            try:
+                res = _pit_project(g, d, use_recent)
+            except Exception:
+                skipped += 1
+                continue
+            if not res["inputs_ok"]:
+                skipped += 1
+                continue
+            proj.append(res["projected"])
+            actual.append(finals[gp])
+            bullpen_ok += 1 if res["bullpen_ok"] else 0
+            key = (_norm_team(g.get("Away")), _norm_team(g.get("Home")))
+            lines.append(day_lines.get(key))
+
+    if len(proj) < 30:
+        return {"error": f"only {len(proj)} usable games -- widen the window",
+                "n": len(proj), "skipped": skipped}
+
+    p, a = np.array(proj), np.array(actual)
+    slope, intercept = np.polyfit(p, a, 1)
+    resid = a - p
+
+    out = {
+        "n": int(len(p)), "skipped": int(skipped),
+        "bullpen_coverage": round(bullpen_ok / len(p), 3),
+        "slope": float(slope), "intercept": float(intercept),
+        "mean_residual": float(resid.mean()),
+        "model_mae": float(np.abs(resid).mean()),
+        "model_rmse": float(np.sqrt((resid ** 2).mean())),
+        "proj_sd": float(p.std()), "actual_sd": float(a.std()),
+        "line_note": line_note,
+    }
+
+    # --- benchmark against the closing line -------------------------------
+    idx = [j for j, v in enumerate(lines) if v is not None]
+    out["n_with_line"] = len(idx)
+    if len(idx) >= 30:
+        pl = p[idx]
+        al = a[idx]
+        ln = np.array([lines[j] for j in idx], dtype=float)
+        out["line_mae"] = float(np.abs(al - ln).mean())
+        out["model_mae_matched"] = float(np.abs(al - pl).mean())
+        out["mae_gap"] = out["model_mae_matched"] - out["line_mae"]
+        out["line_mean"] = float(ln.mean())
+        out["model_mean_matched"] = float(pl.mean())
+        out["corr_model_line"] = float(np.corrcoef(pl, ln)[0, 1])
+        # does disagreement with the line predict the actual deviation?
+        edge = pl - ln
+        dev = al - ln
+        out["edge_slope"] = float(np.polyfit(edge, dev, 1)[0])
+        out["edge_corr"] = float(np.corrcoef(edge, dev)[0, 1])
+        out["beats_line"] = bool(out["mae_gap"] < 0)
+    return out
 
 
 # =============================================================================
@@ -3593,6 +3996,12 @@ def thresholds(odds):
 
 
 def grade(prob, odds, confidence, lineup_confirmed):
+    # Routed through the price-neutral grader. The legacy body below is kept
+    # for reference but no longer runs.
+    v, edge, ev, imp, redge = ml_grade_v2(prob, odds, confidence, lineup_confirmed)
+    return v, edge, ev, imp
+
+def _grade_legacy(prob, odds, confidence, lineup_confirmed):
     imp=implied_prob(odds); edge=prob-imp; ev=expected_value(prob,odds)
     b_edge,b_ev,a_edge,a_ev=thresholds(odds)
     # Official bets require known starters. Unconfirmed lineups may still qualify, but need stronger confidence.
@@ -3607,6 +4016,86 @@ def grade(prob, odds, confidence, lineup_confirmed):
 
 
 
+# --- price-neutral moneyline metrics ---------------------------------------
+# A flat probability-edge gate structurally excludes favorites: the same model
+# conviction yields ~3.5x less probability edge at -350 than at +250, because
+# probability space compresses at the extremes. Measured, 0.40 runs of
+# conviction gives 4.2% edge at +250 but only 1.2% at -350. Grading on run
+# conviction and EV instead makes the test price-neutral.
+
+def _wp_to_runs(p, base=None):
+    """Run differential that reproduces win probability p. Bisection."""
+    base = LEAGUE_RUNS_PER_TEAM if base is None else base
+    p = clamp(float(p), 0.005, 0.995)
+    lo, hi = -6.0, 6.0
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if win_prob(base + mid, base + HOME_RUN_ADVANTAGE) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def run_edge(model_prob, market_prob):
+    """Model conviction in RUNS. Price-neutral: 0.40 means the model likes
+    this side by 0.40 runs more than the market does."""
+    try:
+        return _wp_to_runs(model_prob) - _wp_to_runs(market_prob)
+    except Exception:
+        return 0.0
+
+
+# RUN CONVICTION is the gate. It is the only price-neutral measure available:
+# 0.40 runs means the same thing at -300 as at +300. EV is kept only as a
+# positivity sanity check, NOT as a second gate -- an EV floor reintroduces the
+# dog bias, because equal conviction always yields more EV at longer prices
+# (0.40 runs = 14.8% EV at +250 but 2.3% at -250).
+#
+# NOT BACKTESTED. These values are set so a favorite and a dog with equal
+# conviction face an equal test. Whether 0.28 runs is the right cutoff at all
+# is unknown.
+ML_BET_RUNS, ML_BET_EV = 0.28, 0.015
+ML_BEST_RUNS, ML_BEST_EV = 0.48, 0.030
+
+
+def ml_grade_v2(prob, odds, confidence, lineup_confirmed, market_prob=None):
+    """Price-neutral moneyline grade. Returns (verdict, edge, ev, imp, redge)."""
+    imp = implied_prob(odds)
+    edge = prob - imp
+    ev = expected_value(prob, odds)
+    redge = run_edge(prob, market_prob if market_prob is not None else imp)
+
+    official_conf = 78 if lineup_confirmed else 82
+    o = float(odds)
+
+    if o >= 500:
+        return "PASS", edge, ev, imp, redge
+    # Long dogs: thin sample, model error is amplified by the price.
+    if o >= 300:
+        cap = "LEAN"
+    # Heavy favorites: a model error costs far more than it wins.
+    elif o <= -250:
+        cap = "BET" if confidence >= 85 else "LEAN"
+    else:
+        cap = "BEST BET"
+
+    if confidence >= official_conf and redge >= ML_BEST_RUNS and ev >= ML_BEST_EV:
+        v = "BEST BET"
+    elif (confidence >= max(70, official_conf - 8)
+          and redge >= ML_BET_RUNS and ev >= ML_BET_EV):
+        v = "BET"
+    elif redge >= 0.15 and ev >= 0.015:
+        v = "LEAN"
+    else:
+        v = "PASS"
+
+    order = ["PASS", "LEAN", "BET", "BEST BET"]
+    if order.index(v) > order.index(cap):
+        v = cap
+    return v, edge, ev, imp, redge
+
+
 def smart_card_label(side, confidence, lineup_confirmed):
     """Edge-driven selection layer; model probabilities/calibration stay unchanged."""
     if side.get("odds") is None or side.get("edge") is None or side.get("ev") is None:
@@ -3619,6 +4108,12 @@ def smart_card_label(side, confidence, lineup_confirmed):
     # Preserve hard production rejections (invalid/very long prices, etc.).
     if legacy == "PASS":
         return "PASS"
+
+    # Price-neutral path: the legacy probability-edge buckets below are what
+    # excluded favorites in the first place, so trust the grader's verdict for
+    # anything that is not a long dog.
+    if odds < 200:
+        return legacy
 
     # Thin historical sample for +200 and longer dogs: require materially more edge.
     if odds >= 200:
@@ -5849,3 +6344,108 @@ with st.expander("Export diagnostics bundle", expanded=False):
             use_container_width=True,
             key="diag_download",
         )
+
+with st.expander("Point-in-time backtest (advanced)", expanded=False):
+    st.caption(
+        "Rebuilds each game's inputs as they stood that morning -- season "
+        "stats cut off the day before, recent form anchored to the game -- "
+        "then optionally compares the projection against the closing total. "
+        "This is the honest version. The quick check above uses today's "
+        "stats and cannot measure level bias."
+    )
+    st.caption(
+        "Excluded by design: lineups (not posted at projection time), platoon "
+        "splits (no point-in-time source) and weather (historical forecasts "
+        "are not retrievable). Park IS applied."
+    )
+    st.warning(
+        "Slow. Team splits are fetched per team per date, so roughly 500-900 "
+        "API calls for 14 days. Start small and do not close the tab."
+    )
+    _pd1, _pd2 = st.columns(2)
+    _pit_days = _pd1.slider("Days", 7, 45, 14, key="pit_days")
+    _pit_recent = _pd2.checkbox("Include 14-day recent form", value=True,
+                                key="pit_recent",
+                                help="Doubles the number of API calls")
+    _pit_lines = st.checkbox(
+        "Benchmark against closing lines", value=True, key="pit_lines",
+        help="Requires the historical odds add-on on your Odds API plan")
+    if st.button("Run point-in-time backtest", key="pit_run"):
+        _bar = st.progress(0.0, text="starting...")
+
+        def _prog(i, n, label):
+            _bar.progress(i / n, text=f"{label}  ({i}/{n} days)")
+
+        try:
+            st.session_state["pit_result"] = pit_backtest(
+                days_back=_pit_days, use_recent=_pit_recent,
+                use_lines=_pit_lines,
+                api_key=st.secrets.get("ODDS_API_KEY", ""),
+                progress=_prog)
+        except Exception as e:
+            st.session_state["pit_result"] = {"error": str(e)}
+        _bar.empty()
+
+    _pr = st.session_state.get("pit_result")
+    if _pr and _pr.get("error"):
+        st.error(_pr["error"])
+    elif _pr:
+        st.markdown("**Projection quality**")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Games", _pr["n"])
+        a2.metric("Slope", f"{_pr['slope']:.2f}")
+        a3.metric("Mean residual", f"{_pr['mean_residual']:+.2f}")
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Model MAE", f"{_pr['model_mae']:.2f}")
+        b2.metric("Projected SD", f"{_pr['proj_sd']:.2f}")
+        b3.metric("Bullpen coverage", f"{_pr['bullpen_coverage']*100:.0f}%")
+        if _pr.get("skipped"):
+            st.caption(f"{_pr['skipped']} games skipped for incomplete inputs.")
+
+        if abs(_pr["mean_residual"]) > 0.20:
+            st.info(
+                f"Point-in-time level bias is {_pr['mean_residual']:+.2f}. "
+                "Unlike the quick check this number is trustworthy -- if it "
+                "holds across two different windows, put it in "
+                "TOTAL_CALIBRATION_OFFSET.")
+        else:
+            st.success("No meaningful level bias. Leave the offset at 0.0.")
+
+        st.markdown("**Versus the closing line**")
+        if _pr.get("line_note"):
+            st.warning(f"Lines unavailable: {_pr['line_note']}")
+        elif _pr.get("n_with_line", 0) < 30:
+            st.warning(
+                f"Only {_pr.get('n_with_line', 0)} games matched a closing "
+                "line -- not enough to compare.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Model MAE", f"{_pr['model_mae_matched']:.2f}")
+            c2.metric("Line MAE", f"{_pr['line_mae']:.2f}")
+            c3.metric("Gap", f"{_pr['mae_gap']:+.2f}", delta_color="inverse")
+            d1, d2 = st.columns(2)
+            d1.metric("Edge slope", f"{_pr['edge_slope']:.2f}",
+                      help="1.0 means your disagreement with the line is fully "
+                           "predictive. 0.0 means it is noise.")
+            d2.metric("Edge corr", f"{_pr['edge_corr']:.2f}")
+            st.caption(f"Matched on {_pr['n_with_line']} games.")
+
+            if _pr["mae_gap"] < -0.05:
+                st.success(
+                    f"Model beats the closing line by {abs(_pr['mae_gap']):.2f} "
+                    "runs of MAE. That is the first real evidence of an edge. "
+                    "Confirm on a second window before staking.")
+            elif _pr["mae_gap"] > 0.05:
+                st.error(
+                    f"Line beats the model by {_pr['mae_gap']:.2f} runs of MAE. "
+                    "No edge. Betting into this loses to vig regardless of how "
+                    "good the calibration looks.")
+            else:
+                st.warning("Model and line are within noise of each other. "
+                           "No demonstrated edge.")
+            if _pr["edge_corr"] < 0.15:
+                st.error(
+                    f"Edge correlation {_pr['edge_corr']:.2f}: your "
+                    "disagreements with the line carry almost no information "
+                    "about the outcome. This is the same failure the old model "
+                    "had at 0.05.")
