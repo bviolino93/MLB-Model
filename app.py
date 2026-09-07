@@ -12,6 +12,7 @@ Layout:
 """
 
 import argparse
+import json
 import math
 import re
 import statistics
@@ -5620,53 +5621,231 @@ with st.expander("Model details & limitations", expanded=False):
 
 
 # =============================================================================
-# PART 4 -- CALIBRATION PANEL
+# PART 4 -- DIAGNOSTICS
 # =============================================================================
-# Runs the dispersion check from inside the app so you never need a terminal.
-# Collapsed by default; it does not affect any picks.
+# One button, one file. Everything needed to review the model is bundled into a
+# single JSON export: config constants, per-game model inputs and outputs,
+# market comparison, calibration results and the tracker.
+
+def _json_safe(o):
+    """NaN/NumPy/Timestamp -> something json.dumps can handle."""
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return None if (o != o) else float(o)
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    if isinstance(o, float) and o != o:
+        return None
+    return str(o)
+
+
+def _clean_record(d):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, float) and v != v:
+            out[k] = None
+        elif isinstance(v, (np.integer, np.floating, np.bool_)):
+            out[k] = _json_safe(v)
+        else:
+            out[k] = v
+    return out
+
+
+def diagnostics_bundle():
+    """Assemble the full review package as one dict."""
+    bundle = {}
+
+    bundle["meta"] = {
+        "generated_at_et": _now_et_iso(),
+        "app_version": APP_VERSION,
+        "model_version": MODEL_VERSION,
+        "python": sys.version.split()[0],
+        "packages": {
+            "streamlit": getattr(st, "__version__", "?"),
+            "pandas": pd.__version__,
+            "numpy": np.__version__,
+            "requests": requests.__version__,
+        },
+    }
+
+    # Every tunable constant, so the numbers below can be reproduced exactly.
+    bundle["config"] = {
+        "LEAGUE_RUNS_PER_TEAM": LEAGUE_RUNS_PER_TEAM,
+        "LEAGUE_OPS": LEAGUE_OPS,
+        "LEAGUE_FIP": LEAGUE_FIP,
+        "LEAGUE_BULLPEN_ERA": LEAGUE_BULLPEN_ERA,
+        "OFFENSE_EXPONENT": OFFENSE_EXPONENT,
+        "OFFENSE_CLAMP": list(OFFENSE_CLAMP),
+        "PITCHING_CLAMP": list(PITCHING_CLAMP),
+        "RA9_MULTIPLIER": RA9_MULTIPLIER,
+        "HOME_RUN_ADVANTAGE": HOME_RUN_ADVANTAGE,
+        "PYTH_EXPONENT": PYTH_EXPONENT,
+        "PARK_WEIGHT": PARK_WEIGHT,
+        "TEMP_RUNS_PER_DEGREE": TEMP_RUNS_PER_DEGREE,
+        "TOTAL_CALIBRATION_OFFSET": TOTAL_CALIBRATION_OFFSET,
+        "TOTAL_CLAMP": list(TOTAL_CLAMP),
+        "TOTALS_MODEL_WEIGHT": TOTALS_MODEL_WEIGHT,
+        "TOTALS_RESIDUAL_SD": TOTALS_RESIDUAL_SD,
+        "TOTALS_GRADE_THRESHOLDS": {"BEST BET": 0.125, "BET": 0.075, "LEAN": 0.05},
+    }
+
+    # Offline factor ranges -- proves dispersion without needing the API.
+    _bp = LEAGUE_BULLPEN_ERA * RA9_MULTIPLIER
+    bundle["factor_ranges"] = {
+        "offense": {
+            f"{o:.3f}": round(LEAGUE_RUNS_PER_TEAM
+                              * clamp((o / LEAGUE_OPS) ** OFFENSE_EXPONENT,
+                                      *OFFENSE_CLAMP), 3)
+            for o in (0.640, 0.680, 0.720, 0.760, 0.800)
+        },
+        "pitching": {
+            f"FIP{f:.2f}": round(LEAGUE_RUNS_PER_TEAM
+                                 * _pitching_factor(f * RA9_MULTIPLIER, _bp, ip)[0], 3)
+            for f, ip in ((2.80, 6.2), (3.50, 5.9), (4.20, 5.4),
+                          (5.00, 5.0), (5.60, 4.6))
+        },
+    }
+
+    # Calibration result, if the panel has been run this session.
+    bundle["calibration"] = st.session_state.get("cal_result")
+
+    # Per-game: model inputs, projection, park/weather, market, pick.
+    rows = []
+    mdf = globals().get("model_df")
+    gms = globals().get("games") or []
+    payload = globals().get("totals_payload") or {}
+    if mdf is not None and hasattr(mdf, "empty") and not mdf.empty:
+        for _, r in mdf.iterrows():
+            d = r.to_dict()
+            try:
+                ctx = totals_projection(d)
+            except Exception as e:
+                ctx = {"error": str(e)}
+            rec = _clean_record(d)
+            rec.update(_clean_record(ctx))
+            gobj = next((g for g in gms
+                         if g.get("GamePk") == d.get("GamePk")), None)
+            try:
+                ev = match_event(payload.get("events", []), gobj) if gobj else None
+                tm = totals_market(ev) if ev else None
+            except Exception:
+                tm = None
+            if tm:
+                rec["Market_Total"] = tm.get("total")
+                rec["Market_Over_Odds"] = tm.get("over_best")
+                rec["Market_Under_Odds"] = tm.get("under_best")
+                rec["Market_Books"] = tm.get("books")
+                try:
+                    tp = build_total_pick(float(ctx["Projected_Total"]), tm)
+                except Exception:
+                    tp = None
+                if tp:
+                    rec["Pick_Side"] = tp["side"]
+                    rec["Pick_Prob"] = tp["prob"]
+                    rec["Pick_Edge"] = tp["edge"]
+                    rec["Pick_EV"] = tp["ev"]
+                    rec["Pick_Grade"] = tp["grade"]
+                    rec["Calibrated_Total"] = tp["calibrated_total"]
+            else:
+                rec["Market_Total"] = None
+            rows.append(rec)
+    bundle["slate"] = rows
+    bundle["slate_note"] = (
+        "empty means no slate was loaded in this session -- open the Board "
+        "page first, then export"
+    )
+
+    # Full tracker history.
+    try:
+        tdf = load_tracker()
+        bundle["tracker"] = [_clean_record(x) for x in tdf.to_dict("records")]
+    except Exception as e:
+        bundle["tracker"] = {"error": str(e)}
+
+    return bundle
+
+
+st.markdown('<div class="kicker">Diagnostics</div>', unsafe_allow_html=True)
 
 with st.expander("Model calibration", expanded=False):
     st.caption(
         "Regresses actual totals on projected totals over recent completed "
         "games. Uses current season-to-date stats, so it carries look-ahead "
-        "bias -- it is a dispersion check, NOT a profitability test."
+        "bias -- a dispersion check, NOT a profitability test."
     )
     _cal_days = st.slider("Days of completed games", 14, 90, 45, key="cal_days")
     if st.button("Run calibration check", key="cal_run"):
         with st.spinner("Pulling completed games and re-running the model..."):
             _res = backtest(days_back=_cal_days, verbose=False)
-        if not _res:
-            st.warning("Not enough completed games returned. Try a longer window.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Games", _res["n"])
-            c2.metric("Slope", f"{_res['slope']:.2f}", help="Target is 1.0")
-            c3.metric("Mean residual", f"{_res['mean_residual']:+.2f}")
-            c4, c5 = st.columns(2)
-            c4.metric("Projected SD", f"{_res['proj_sd']:.2f}")
-            c5.metric("MAE", f"{_res['mae']:.2f}")
-
-            if _res["slope"] > 1.3:
-                st.error(
-                    f"Still too flat. Raise OFFENSE_EXPONENT (currently "
-                    f"{OFFENSE_EXPONENT}) toward "
-                    f"{OFFENSE_EXPONENT * _res['slope']:.2f} and rerun."
-                )
-            elif _res["slope"] < 0.8:
-                st.error(
-                    f"Overshooting. Lower OFFENSE_EXPONENT (currently "
-                    f"{OFFENSE_EXPONENT}) toward "
-                    f"{OFFENSE_EXPONENT * _res['slope']:.2f} and rerun."
-                )
-            else:
-                st.success("Dispersion looks reasonable.")
-
-            if abs(_res["mean_residual"]) > 0.25:
-                st.warning(
-                    f"Set TOTAL_CALIBRATION_OFFSET = "
-                    f"{_res['mean_residual']:+.2f} and rerun."
-                )
-            st.caption(
-                "Both constants live in the CALIBRATION BLOCK near the top of "
-                "this file."
+        st.session_state["cal_result"] = _res
+    _res = st.session_state.get("cal_result")
+    if _res:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Games", _res["n"])
+        c2.metric("Slope", f"{_res['slope']:.2f}", help="Target is 1.0")
+        c3.metric("Mean residual", f"{_res['mean_residual']:+.2f}")
+        c4, c5 = st.columns(2)
+        c4.metric("Projected SD", f"{_res['proj_sd']:.2f}")
+        c5.metric("MAE", f"{_res['mae']:.2f}")
+        if _res["slope"] > 1.3:
+            st.error(
+                f"Still too flat. Raise OFFENSE_EXPONENT (currently "
+                f"{OFFENSE_EXPONENT}) toward "
+                f"{OFFENSE_EXPONENT * _res['slope']:.2f} and rerun."
             )
+        elif _res["slope"] < 0.8:
+            st.error(
+                f"Overshooting. Lower OFFENSE_EXPONENT (currently "
+                f"{OFFENSE_EXPONENT}) toward "
+                f"{OFFENSE_EXPONENT * _res['slope']:.2f} and rerun."
+            )
+        else:
+            st.success("Dispersion looks reasonable.")
+        if abs(_res["mean_residual"]) > 0.25:
+            st.warning(
+                f"Set TOTAL_CALIBRATION_OFFSET = "
+                f"{_res['mean_residual']:+.2f} and rerun."
+            )
+        st.caption("Both constants are in the CALIBRATION BLOCK at the top of this file.")
+
+with st.expander("Export diagnostics bundle", expanded=False):
+    st.caption(
+        "One file containing everything needed to review the model: config "
+        "constants, factor ranges, every game on the loaded slate with its "
+        "model inputs / projection / park / weather / market / pick, the "
+        "calibration result, and the full tracker."
+    )
+    st.caption(
+        "Load the Board page first so a slate is in memory, and run the "
+        "calibration check above if you want it included."
+    )
+    if st.button("Build diagnostics bundle", key="diag_build"):
+        with st.spinner("Assembling..."):
+            try:
+                _b = diagnostics_bundle()
+                st.session_state["diag_bundle"] = json.dumps(
+                    _b, indent=2, default=_json_safe
+                )
+                st.session_state["diag_counts"] = (
+                    len(_b.get("slate") or []),
+                    len(_b.get("tracker") or []),
+                    bool(_b.get("calibration")),
+                )
+            except Exception as e:
+                st.session_state["diag_bundle"] = None
+                st.error(f"Could not build bundle: {e}")
+    if st.session_state.get("diag_bundle"):
+        _g, _t, _c = st.session_state.get("diag_counts", (0, 0, False))
+        st.success(
+            f"{_g} games on slate, {_t} tracker rows, "
+            f"calibration {'included' if _c else 'not run'}"
+        )
+        st.download_button(
+            "Download diagnostics bundle",
+            data=st.session_state["diag_bundle"].encode("utf-8"),
+            file_name=f"ninth_signal_diagnostics_{today_et()}.json",
+            mime="application/json",
+            use_container_width=True,
+            key="diag_download",
+        )
