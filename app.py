@@ -125,6 +125,15 @@ HOME_STRUCTURAL_LOGIT = 0.1005     # win prob only; calibrated to 0.540
 RUN_DIST_K = 3.49
 RUN_DIST_MAX = 32                  # runs cap for the convolution
 
+# Price band you are actually willing to bet. Moneylines outside this band are
+# graded PASS regardless of how much the model likes them -- they still appear
+# on the full board for reference, they just stop being recommendations.
+# This is a staking preference, not a model judgement: a -300 favourite at a
+# true 78% is the same quality of bet as a +200 dog at a true 38%, it simply
+# ties up more capital per unit of profit. Adjustable in the Diagnostics panel.
+ML_PRICE_FLOOR = -175              # do not recommend favourites shorter than this
+ML_PRICE_CEILING = 300             # do not recommend dogs longer than this
+
 # Retained for reference only -- win_prob no longer uses it. See win_prob().
 PYTH_EXPONENT = 1.83
 
@@ -4059,6 +4068,15 @@ ML_BET_RUNS, ML_BET_EV = 0.28, 0.015
 ML_BEST_RUNS, ML_BEST_EV = 0.48, 0.030
 
 
+def _ml_price_band():
+    """Live price band, overridable from the Diagnostics panel."""
+    try:
+        return (float(st.session_state.get("ml_floor", ML_PRICE_FLOOR)),
+                float(st.session_state.get("ml_ceiling", ML_PRICE_CEILING)))
+    except Exception:
+        return float(ML_PRICE_FLOOR), float(ML_PRICE_CEILING)
+
+
 def ml_grade_v2(prob, odds, confidence, lineup_confirmed, market_prob=None):
     """Price-neutral moneyline grade. Returns (verdict, edge, ev, imp, redge)."""
     imp = implied_prob(odds)
@@ -4068,6 +4086,13 @@ def ml_grade_v2(prob, odds, confidence, lineup_confirmed, market_prob=None):
 
     official_conf = 78 if lineup_confirmed else 82
     o = float(odds)
+
+    # Staking preference: outside the band it is not a recommendation.
+    floor, ceiling = _ml_price_band()
+    if o < 0 and o < floor:
+        return "PASS", edge, ev, imp, redge
+    if o > 0 and o > ceiling:
+        return "PASS", edge, ev, imp, redge
 
     if o >= 500:
         return "PASS", edge, ev, imp, redge
@@ -6262,6 +6287,26 @@ def diagnostics_bundle():
 
 
 st.markdown('<div class="kicker">Diagnostics</div>', unsafe_allow_html=True)
+
+with st.expander("Moneyline price band", expanded=False):
+    st.caption(
+        "Moneylines outside this band are graded PASS no matter how much the "
+        "model likes them. They still show on the full board -- they just stop "
+        "being recommendations. This is a staking preference, not a model "
+        "judgement."
+    )
+    _mb1, _mb2 = st.columns(2)
+    _mb1.slider("Shortest favourite you would bet", -400, -100,
+                int(ML_PRICE_FLOOR), step=5, key="ml_floor")
+    _mb2.slider("Longest dog you would bet", 100, 500,
+                int(ML_PRICE_CEILING), step=10, key="ml_ceiling")
+    st.caption(
+        f"Currently recommending only prices between "
+        f"{int(st.session_state.get('ml_floor', ML_PRICE_FLOOR))} and "
+        f"+{int(st.session_state.get('ml_ceiling', ML_PRICE_CEILING))}. "
+        "Reload the board after changing these."
+    )
+
 
 with st.expander("Model calibration", expanded=False):
     st.caption(
