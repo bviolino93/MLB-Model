@@ -6121,16 +6121,42 @@ if "totals_payload" not in st.session_state:
 odds_payload=st.session_state.odds_payload if st.session_state.get("odds_loaded") else {"events":[],"error":"","quota":{}}
 totals_payload=st.session_state.totals_payload if st.session_state.get("totals_loaded") else {"events":[],"error":"","quota":{}}
 
-with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
-    games=fetch_games_for_date(slate_date)
-    model_df=run_model(games) if games else pd.DataFrame()
-    candidates=build_candidates(model_df,games,odds_payload.get("events",[])) if not model_df.empty else []
+# Only the Board consumes model_df / candidates. Live and Tracker take `games`
+# and the live scoreboard; Bets and More take neither. Running the full
+# projection before the router meant every page paid for per-pitcher game logs,
+# team splits, bullpen and lineup fetches it then threw away.
+_view = st.session_state.get("ninth_page", "Board")
+
+# The Board's model run is now explicit. Nothing projects until you ask for it,
+# so opening the app costs one schedule call. The flag is keyed to the slate
+# date, so changing dates correctly requires a fresh run.
+_board_ready = st.session_state.get("board_loaded_for") == str(slate_date)
+_needs_model = (_view == "Board") and _board_ready
+
+if _needs_model:
+    with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
+        games = fetch_games_for_date(slate_date)
+        model_df = run_model(games) if games else pd.DataFrame()
+        candidates = build_candidates(
+            model_df, games, odds_payload.get("events", [])
+        ) if not model_df.empty else []
+else:
+    with st.spinner("Loading schedule…"):
+        games = fetch_games_for_date(slate_date)
+    model_df = pd.DataFrame()
+    candidates = []
 
 fresh_scoreboard = fetch_fresh_scoreboard(slate_date)
 
-# Forward-test tracker: freeze the first official recommendation at the price that triggered it.
-_new_ml = track_current_official_recommendations(candidates, games, slate_date)
-_new_totals = track_current_total_recommendations(candidates, games, model_df, totals_payload, slate_date)
+# Forward-test tracker: freeze the first official recommendation at the price
+# that triggered it. Requires candidates, so it only runs on the Board. Grading
+# of already-tracked bets is independent and always runs.
+if _needs_model:
+    _new_ml = track_current_official_recommendations(candidates, games, slate_date)
+    _new_totals = track_current_total_recommendations(
+        candidates, games, model_df, totals_payload, slate_date)
+else:
+    _new_ml = _new_totals = 0
 _graded_now = grade_tracker(force=False)
 if _new_ml or _new_totals:
     st.toast(f"Tracked {_new_ml + _new_totals} new official model recommendation(s).")
@@ -6160,7 +6186,7 @@ if not games:
     st.info(f"No MLB games were returned for {slate_date.strftime('%B %-d, %Y')}.")
     st.stop()
 
-if not candidates:
+if _needs_model and not candidates:
     st.warning("The model could not produce game rows for today.")
 else:
     if "ninth_page" not in st.session_state:
@@ -6199,7 +6225,35 @@ else:
         render_diagnostics()
         st.stop()
 
-    st.markdown('<div class="board-head"><span>BETTING BOARD</span><b>Choose a workflow</b></div>', unsafe_allow_html=True)
+    if not _board_ready:
+        st.markdown(
+            '<div class="board-head"><span>BETTING BOARD</span>'
+            '<b>Model not loaded</b></div>', unsafe_allow_html=True)
+        st.caption(
+            f"{len(games)} games on the {slate_date.strftime('%b %-d')} slate. "
+            "Running the model fetches starter game logs, team splits, bullpen "
+            "numbers and lineups for every game, so it is the slow part of the "
+            "app. Nothing else needs it."
+        )
+        if st.button("Run model for this slate", key="board_run",
+                     type="primary", use_container_width=True):
+            st.session_state["board_loaded_for"] = str(slate_date)
+            st.rerun()
+        st.caption("Live, Tracker and Bets work without it.")
+        st.stop()
+
+    _bh1, _bh2 = st.columns([3, 1])
+    _bh1.markdown('<div class="board-head"><span>BETTING BOARD</span>'
+                  '<b>Choose a workflow</b></div>', unsafe_allow_html=True)
+    if _bh2.button("Refresh", key="board_refresh", use_container_width=True,
+                   help="Re-run the model with the latest lineups and stats"):
+        try:
+            reset_dynamic_caches()
+        except Exception:
+            pass
+        st.session_state["board_loaded_for"] = str(slate_date)
+        st.rerun()
+
     mode = st.radio(
         "View mode",
         ["Single Game", "Full Slate"],
