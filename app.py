@@ -799,12 +799,22 @@ def final_offense(team_name, lineup, opposing_hand):
     lineup_used = len(lineup) >= 8
     lf = lineup_factor(lineup) if lineup_used else 1.0
 
+    # Renormalise over AVAILABLE components only. Previously an unavailable
+    # platoon split was set to a neutral 1.0 and still given its full blend
+    # weight -- which is not an absence, it is an assertion that the team is
+    # exactly league average against that handedness. That silently shrank
+    # every team's deviation from neutral by 22% (no lineup, no platoon) to
+    # 38% (lineups only), in both directions. Dropping the weight instead of
+    # blending against 1.0 removes that compression.
+    parts = [(OFFENSE_BLEND_WITH_LINEUP["base"] if lineup_used
+              else OFFENSE_BLEND_NO_LINEUP["base"], base["Factor"])]
+    if platoon["Available"]:
+        parts.append(((OFFENSE_BLEND_WITH_LINEUP if lineup_used
+                       else OFFENSE_BLEND_NO_LINEUP)["platoon"], platoon["Factor"]))
     if lineup_used:
-        b = OFFENSE_BLEND_WITH_LINEUP
-        factor = b["base"] * base["Factor"] + b["platoon"] * platoon["Factor"] + b["lineup"] * lf
-    else:
-        b = OFFENSE_BLEND_NO_LINEUP
-        factor = b["base"] * base["Factor"] + b["platoon"] * platoon["Factor"]
+        parts.append((OFFENSE_BLEND_WITH_LINEUP["lineup"], lf))
+    _w = sum(w for w, _ in parts)
+    factor = sum(w * v for w, v in parts) / _w if _w else base["Factor"]
 
     return {
         "Factor": clamp(factor, *OFFENSE_CLAMP),
@@ -1516,6 +1526,260 @@ engine = types.SimpleNamespace(
     PARKS=PARKS,
 )
 
+
+# =============================================================================
+# FIRST FIVE INNINGS (F5)
+# =============================================================================
+# Why F5 rather than the full game.
+#
+# The full-game model measured out at edge correlation 0.02 against closing
+# lines over 187 point-in-time games -- i.e. its disagreements with the market
+# carried no information. Two structural reasons to expect F5 to be different:
+#
+#   1. NO BULLPEN. Roughly 40% of a full game is relief innings, and relief
+#      usage is the least knowable input in the whole model -- you do not know
+#      who is available, who is warming, or how the manager will sequence them.
+#      F5 is mostly the starter, which is the input we model best.
+#   2. THINNER MARKET. Fewer books post F5, limits are lower, and far less
+#      sharp money shapes the number. Full-game MLB totals are among the most
+#      efficient markets in sport; F5 is not.
+#
+# This is a measurement build, not a betting board. It projects F5 totals and
+# scores them against F5 closing lines so we can read edge correlation for this
+# market specifically. If it comes back near 0.02 like the full game, F5 is
+# dead too and we stop. Nothing here feeds the board yet, by design.
+
+LEAGUE_F5_RUNS_PER_TEAM = 2.30     # league average runs per team, innings 1-5
+F5_RUN_DIST_K = 2.10               # lower mean -> refit dispersion
+F5_HOME_RUN_ADVANTAGE = 0.06       # smaller than full game; no walk-off effect
+F5_TOTAL_CLAMP = (2.5, 10.0)
+F5_CALIBRATION_OFFSET = 0.0
+
+
+def _f5_pitching_factor(sp_ra9, bp_ra9, sp_ip):
+    """Runs-allowed multiplier over innings 1-5 only.
+
+    The starter covers min(expected_IP, 5) of those innings; anything short is
+    covered by relief. A starter going 6+ means the bullpen never appears in
+    the F5 window at all, which is the point of this market.
+    """
+    sp_innings = clamp(min(float(sp_ip), 5.0), 0.0, 5.0)
+    bp_innings = 5.0 - sp_innings
+    combined = (sp_innings * sp_ra9 + bp_innings * bp_ra9) / 5.0
+    league = LEAGUE_F5_RUNS_PER_TEAM * (9.0 / 5.0) * RA9_MULTIPLIER
+    return clamp(combined / league, *PITCHING_CLAMP), combined
+
+
+def f5_projection(row):
+    """Projected first-five total. Park applies; weather is left out because
+    its effect is concentrated in ball carry over a full game and the F5
+    signal is not worth the extra failure mode."""
+    a_sp = safe_float(row.get("Away_SP_RA9"), LEAGUE_FIP * RA9_MULTIPLIER)
+    h_sp = safe_float(row.get("Home_SP_RA9"), LEAGUE_FIP * RA9_MULTIPLIER)
+    a_bp = safe_float(row.get("Away_Bullpen_RA9"), LEAGUE_BULLPEN_ERA * RA9_MULTIPLIER)
+    h_bp = safe_float(row.get("Home_Bullpen_RA9"), LEAGUE_BULLPEN_ERA * RA9_MULTIPLIER)
+    a_ip = safe_float(row.get("Away_SP_ExpIP"), 5.0)
+    h_ip = safe_float(row.get("Home_SP_ExpIP"), 5.0)
+    a_off = safe_float(row.get("Away_Offense"), 1.0)
+    h_off = safe_float(row.get("Home_Offense"), 1.0)
+
+    home_pf, _ = _f5_pitching_factor(h_sp, h_bp, h_ip)
+    away_pf, _ = _f5_pitching_factor(a_sp, a_bp, a_ip)
+
+    away = LEAGUE_F5_RUNS_PER_TEAM * a_off * home_pf
+    home = LEAGUE_F5_RUNS_PER_TEAM * h_off * away_pf + F5_HOME_RUN_ADVANTAGE
+
+    park = PARKS.get(row.get("Venue", ""), {})
+    pf = 1.0 + (safe_float(park.get("factor"), 1.0) - 1.0) * PARK_WEIGHT
+    total = clamp((away + home) * pf + F5_CALIBRATION_OFFSET, *F5_TOTAL_CLAMP)
+    return {"F5_Away_Runs": away, "F5_Home_Runs": home,
+            "F5_Projected_Total": total, "F5_Park_Factor": pf,
+            "F5_SP_Covers": min(a_ip, 5.0) + min(h_ip, 5.0)}
+
+
+def _pit_f5_project(g, as_of, use_recent=True):
+    """Point-in-time F5 projection, same cutoff discipline as _pit_project."""
+    asp = _pit_starter(g.get("Away_SP_ID"), as_of)
+    hsp = _pit_starter(g.get("Home_SP_ID"), as_of)
+    abp = _pit_bullpen(g.get("Away"), as_of)
+    hbp = _pit_bullpen(g.get("Home"), as_of)
+    aoff = _pit_team_offense(g.get("Away"), as_of, use_recent)
+    hoff = _pit_team_offense(g.get("Home"), as_of, use_recent)
+    row = {
+        "Away_SP_RA9": asp["RA9"], "Home_SP_RA9": hsp["RA9"],
+        "Away_Bullpen_RA9": abp["RA9"], "Home_Bullpen_RA9": hbp["RA9"],
+        "Away_SP_ExpIP": asp["ExpIP"], "Home_SP_ExpIP": hsp["ExpIP"],
+        "Away_Offense": aoff["Factor"], "Home_Offense": hoff["Factor"],
+        "Venue": g.get("Venue", ""),
+    }
+    out = f5_projection(row)
+    out["inputs_ok"] = all([asp["Available"], hsp["Available"],
+                            aoff["Available"], hoff["Available"]])
+    return out
+
+
+def _f5_final_scores_for_date(d):
+    """Actual runs through 5 innings, from the linescore innings array."""
+    data = get_json(f"{MLB_API}/v1/schedule",
+                    {"sportId": 1, "date": str(d), "hydrate": "linescore"},
+                    cache_key=("f5final", str(d)))
+    out = {}
+    for block in data.get("dates", []):
+        for g in block.get("games", []):
+            if g.get("status", {}).get("abstractGameState") != "Final":
+                continue
+            innings = (g.get("linescore", {}) or {}).get("innings", []) or []
+            if len(innings) < 5:
+                continue          # shortened game: no valid F5
+            tot = 0.0
+            ok = True
+            for inn in innings[:5]:
+                a = safe_float((inn.get("away", {}) or {}).get("runs"), np.nan)
+                h = safe_float((inn.get("home", {}) or {}).get("runs"), np.nan)
+                # bottom 5 can be legitimately unplayed if home leads
+                if not math.isfinite(a):
+                    ok = False
+                    break
+                tot += a + (h if math.isfinite(h) else 0.0)
+            if ok:
+                out[g.get("gamePk")] = tot
+    return out
+
+
+F5_MARKET_KEYS = ("totals_1st_5_innings", "totals_h1", "totals_1st_half")
+
+
+def _f5_closing_totals_for_date(api_key, d):
+    """Consensus F5 closing total per game. Tries the known market keys in
+    order, since The Odds API naming has varied."""
+    if not api_key:
+        return {}, "no ODDS_API_KEY configured"
+    snap = f"{d}T23:00:00Z"
+    last_note = None
+    for mkey in F5_MARKET_KEYS:
+        try:
+            r = requests.get(
+                f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
+                params={"apiKey": api_key, "regions": "us", "markets": mkey,
+                        "oddsFormat": "american", "date": snap},
+                timeout=25,
+            )
+            if r.status_code in (401, 403):
+                return {}, "historical odds not included in this API plan"
+            if r.status_code in (404, 422):
+                last_note = f"market key '{mkey}' not served"
+                continue
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            last_note = f"F5 odds request failed: {e}"
+            continue
+
+        events = payload.get("data", payload) or []
+        out = {}
+        for ev in events:
+            pts = []
+            for bk in ev.get("bookmakers", []):
+                for mk in bk.get("markets", []):
+                    if mk.get("key") != mkey:
+                        continue
+                    for oc in mk.get("outcomes", []):
+                        p = safe_float(oc.get("point"), np.nan)
+                        if math.isfinite(p):
+                            pts.append(p)
+            if pts:
+                key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
+                out[key] = float(statistics.median(pts))
+        if out:
+            return out, None
+        last_note = f"market key '{mkey}' returned no F5 lines"
+    return {}, last_note or "no F5 market available"
+
+
+def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
+    """Point-in-time F5 backtest with the closing-line benchmark.
+
+    Same discipline as pit_backtest. The number that matters is edge_corr:
+    the full-game model scored 0.02 on it, which is why we are here.
+    """
+    end = today_et() - timedelta(days=1)
+    proj, actual, lines = [], [], []
+    skipped = 0
+    line_note = None
+
+    for i in range(days_back):
+        d = end - timedelta(days=i)
+        if progress:
+            progress(i + 1, days_back, str(d))
+        try:
+            games = fetch_games_for_date(d)
+            finals = _f5_final_scores_for_date(d)
+        except Exception:
+            continue
+        if not games or not finals:
+            continue
+
+        day_lines, note = _f5_closing_totals_for_date(api_key, d)
+        if note and not line_note:
+            line_note = note
+
+        for g in games:
+            gp = g.get("GamePk")
+            if gp not in finals or not g.get("Away_SP_ID") or not g.get("Home_SP_ID"):
+                continue
+            try:
+                res = _pit_f5_project(g, d, use_recent)
+            except Exception:
+                skipped += 1
+                continue
+            if not res["inputs_ok"]:
+                skipped += 1
+                continue
+            proj.append(res["F5_Projected_Total"])
+            actual.append(finals[gp])
+            key = (_norm_team(g.get("Away")), _norm_team(g.get("Home")))
+            lines.append(day_lines.get(key))
+
+    if len(proj) < 30:
+        return {"error": f"only {len(proj)} usable F5 games -- widen the window",
+                "n": len(proj), "skipped": skipped, "line_note": line_note}
+
+    p, a = np.array(proj), np.array(actual)
+    slope, intercept = np.polyfit(p, a, 1)
+    resid = a - p
+    out = {
+        "n": int(len(p)), "skipped": int(skipped),
+        "slope": float(slope), "intercept": float(intercept),
+        "mean_residual": float(resid.mean()),
+        "model_mae": float(np.abs(resid).mean()),
+        "proj_sd": float(p.std()), "actual_sd": float(a.std()),
+        "actual_mean": float(a.mean()), "proj_mean": float(p.mean()),
+        "line_note": line_note,
+    }
+
+    idx = [j for j, v in enumerate(lines) if v is not None]
+    out["n_with_line"] = len(idx)
+    if len(idx) >= 30:
+        pl, al = p[idx], a[idx]
+        ln = np.array([lines[j] for j in idx], dtype=float)
+        out["line_mae"] = float(np.abs(al - ln).mean())
+        out["model_mae_matched"] = float(np.abs(al - pl).mean())
+        out["mae_gap"] = out["model_mae_matched"] - out["line_mae"]
+        out["line_mean"] = float(ln.mean())
+        edge, dev = pl - ln, al - ln
+        out["edge_slope"] = float(np.polyfit(edge, dev, 1)[0])
+        out["edge_corr"] = float(np.corrcoef(edge, dev)[0, 1])
+        # what that edge slope is worth at -110, given the residual spread
+        from math import erf, sqrt
+        b = out["edge_slope"]
+        sd = float(np.std(dev)) or 1.0
+        z = b * 1.0 / sd
+        winp = 0.5 * (1 + erf(z / sqrt(2)))
+        out["implied_win_rate"] = float(winp)
+        out["implied_ev"] = float(winp * (100 / 110) - (1 - winp))
+    return out
+
+
 # =============================================================================
 # PART 2.5 -- DIAGNOSTICS (defined before the app so the
 #              router can call it; see NOTE ON PLACEMENT below)
@@ -1779,6 +2043,87 @@ def render_diagnostics():
                 use_container_width=True,
                 key="diag_download",
             )
+
+
+    with st.expander("First-five-innings edge test (F5)", expanded=False):
+        st.caption(
+            "The full-game model measured edge correlation 0.02 against closing "
+            "lines -- its disagreements with the market carried no information. "
+            "F5 removes the bullpen (the least knowable input) and trades a very "
+            "efficient market for a thinner one. This tests whether that helps."
+        )
+        st.caption(
+            "This is a measurement only. Nothing here feeds the board until the "
+            "numbers justify it."
+        )
+        _f1, _f2 = st.columns(2)
+        _f5_days = _f1.slider("Days", 7, 45, 21, key="f5_days")
+        _f5_recent = _f2.checkbox("Recent form", value=True, key="f5_recent")
+        if st.button("Run F5 edge test", key="f5_run"):
+            _fb = st.progress(0.0, text="starting...")
+
+            def _fprog(i, n, label):
+                _fb.progress(i / n, text=f"{label}  ({i}/{n} days)")
+
+            try:
+                st.session_state["f5_result"] = f5_backtest(
+                    days_back=_f5_days, use_recent=_f5_recent,
+                    api_key=st.secrets.get("ODDS_API_KEY", ""), progress=_fprog)
+            except Exception as e:
+                st.session_state["f5_result"] = {"error": str(e)}
+            _fb.empty()
+
+        _fr = st.session_state.get("f5_result")
+        if _fr and _fr.get("error"):
+            st.error(_fr["error"])
+            if _fr.get("line_note"):
+                st.warning(f"Lines: {_fr['line_note']}")
+        elif _fr:
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Games", _fr["n"])
+            g2.metric("Slope", f"{_fr['slope']:.2f}")
+            g3.metric("Mean residual", f"{_fr['mean_residual']:+.2f}")
+            h1, h2 = st.columns(2)
+            h1.metric("Projected F5", f"{_fr['proj_mean']:.2f}")
+            h2.metric("Actual F5", f"{_fr['actual_mean']:.2f}")
+
+            st.markdown("**Versus the F5 closing line**")
+            if _fr.get("line_note"):
+                st.warning(f"Lines unavailable: {_fr['line_note']}")
+            elif _fr.get("n_with_line", 0) < 30:
+                st.warning(
+                    f"Only {_fr.get('n_with_line', 0)} games matched an F5 line.")
+            else:
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Model MAE", f"{_fr['model_mae_matched']:.2f}")
+                k2.metric("Line MAE", f"{_fr['line_mae']:.2f}")
+                k3.metric("Gap", f"{_fr['mae_gap']:+.2f}", delta_color="inverse")
+                j1, j2, j3 = st.columns(3)
+                j1.metric("Edge corr", f"{_fr['edge_corr']:.2f}",
+                          help="Full game scored 0.02")
+                j2.metric("Edge slope", f"{_fr['edge_slope']:.2f}")
+                j3.metric("Implied win rate",
+                          f"{_fr['implied_win_rate']*100:.1f}%",
+                          help="Break-even at -110 is 52.4%")
+                st.caption(f"Matched on {_fr['n_with_line']} games.")
+
+                if _fr["implied_ev"] > 0.01:
+                    st.success(
+                        f"Implied EV {_fr['implied_ev']*100:+.1f}% per bet at "
+                        f"-110. This is the first positive signal in the "
+                        f"project. Confirm on a second window before betting."
+                    )
+                elif _fr["edge_corr"] < 0.10:
+                    st.error(
+                        f"Edge correlation {_fr['edge_corr']:.2f} -- no better "
+                        f"than the full game. F5 is not the answer either."
+                    )
+                else:
+                    st.warning(
+                        f"Edge correlation {_fr['edge_corr']:.2f}: some signal, "
+                        f"but implied EV {_fr['implied_ev']*100:+.1f}% is not "
+                        f"enough to beat vig. Break-even needs edge slope ~0.26."
+                    )
 
     with st.expander("Point-in-time backtest (advanced)", expanded=False):
         st.caption(
@@ -6218,6 +6563,10 @@ else:
 
     if main_view == "Bets":
         render_performance_page()
+        # Diagnostics also lives here: the "More" nav button is the last item in
+        # the bar and can sit underneath the preview overlay on mobile, making
+        # it untappable. Only one route renders per run, so no key collisions.
+        render_diagnostics()
         st.stop()
 
     if main_view == "More":
