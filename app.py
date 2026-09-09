@@ -1549,7 +1549,11 @@ engine = types.SimpleNamespace(
 # market specifically. If it comes back near 0.02 like the full game, F5 is
 # dead too and we stop. Nothing here feeds the board yet, by design.
 
-LEAGUE_F5_RUNS_PER_TEAM = 2.30     # league average runs per team, innings 1-5
+# Measured on 278 point-in-time games: actual F5 totals averaged 5.10 while the
+# model projected 4.53. This anchor was set from a rough 5/9 share of a full
+# game, which undercounts -- early innings out-score late ones, and the home
+# team often does not bat in the 9th. Set from the observed mean instead.
+LEAGUE_F5_RUNS_PER_TEAM = 2.52     # league average runs per team, innings 1-5
 F5_RUN_DIST_K = 2.10               # lower mean -> refit dispersion
 F5_HOME_RUN_ADVANTAGE = 0.06       # smaller than full game; no walk-off effect
 F5_TOTAL_CLAMP = (2.5, 10.0)
@@ -1566,7 +1570,10 @@ def _f5_pitching_factor(sp_ra9, bp_ra9, sp_ip):
     sp_innings = clamp(min(float(sp_ip), 5.0), 0.0, 5.0)
     bp_innings = 5.0 - sp_innings
     combined = (sp_innings * sp_ra9 + bp_innings * bp_ra9) / 5.0
-    league = LEAGUE_F5_RUNS_PER_TEAM * (9.0 / 5.0) * RA9_MULTIPLIER
+    # Normalise against the league PITCHER baseline, not against the F5 run
+    # anchor. Deriving it from the anchor made the two cancel, so changing
+    # LEAGUE_F5_RUNS_PER_TEAM had no effect on the projected level at all.
+    league = LEAGUE_FIP * RA9_MULTIPLIER
     return clamp(combined / league, *PITCHING_CLAMP), combined
 
 
@@ -1650,50 +1657,81 @@ F5_MARKET_KEYS = ("totals_1st_5_innings", "totals_h1", "totals_1st_half")
 
 
 def _f5_closing_totals_for_date(api_key, d):
-    """Consensus F5 closing total per game. Tries the known market keys in
-    order, since The Odds API naming has varied."""
+    """Consensus F5 closing total per game.
+
+    The Odds API does not serve period markets on the bulk /odds endpoint --
+    only core markets (h2h, spreads, totals) come back there, which is why the
+    first attempt returned nothing for every F5 key. Additional markets require
+    a per-event request. So: fetch the historical event list for the date, then
+    request F5 totals for each event individually.
+
+    That costs one call per game rather than one per day, so it is materially
+    more expensive in credits. Worth it only because this is the measurement
+    that decides whether F5 is worth pursuing at all.
+    """
     if not api_key:
         return {}, "no ODDS_API_KEY configured"
     snap = f"{d}T23:00:00Z"
-    last_note = None
-    for mkey in F5_MARKET_KEYS:
-        try:
-            r = requests.get(
-                f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
-                params={"apiKey": api_key, "regions": "us", "markets": mkey,
-                        "oddsFormat": "american", "date": snap},
-                timeout=25,
-            )
-            if r.status_code in (401, 403):
-                return {}, "historical odds not included in this API plan"
-            if r.status_code in (404, 422):
-                last_note = f"market key '{mkey}' not served"
-                continue
-            r.raise_for_status()
-            payload = r.json()
-        except Exception as e:
-            last_note = f"F5 odds request failed: {e}"
-            continue
 
-        events = payload.get("data", payload) or []
-        out = {}
-        for ev in events:
-            pts = []
-            for bk in ev.get("bookmakers", []):
-                for mk in bk.get("markets", []):
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/events",
+            params={"apiKey": api_key, "date": snap}, timeout=25)
+        if r.status_code in (401, 403):
+            return {}, "historical odds not included in this API plan"
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        return {}, f"historical event list failed: {e}"
+
+    events = payload.get("data", payload) or []
+    if not events:
+        return {}, "no historical events returned for this date"
+
+    out = {}
+    note = None
+    for ev in events:
+        eid = ev.get("id")
+        if not eid:
+            continue
+        pts = []
+        used_key = None
+        for mkey in F5_MARKET_KEYS:
+            try:
+                er = requests.get(
+                    f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}"
+                    f"/events/{eid}/odds",
+                    params={"apiKey": api_key, "regions": "us", "markets": mkey,
+                            "oddsFormat": "american", "date": snap}, timeout=25)
+                if er.status_code in (401, 403):
+                    return out, "historical odds not included in this API plan"
+                if er.status_code in (404, 422):
+                    continue
+                er.raise_for_status()
+                ed = er.json()
+            except Exception as e:
+                note = note or f"F5 event odds failed: {e}"
+                continue
+            body = ed.get("data", ed) or {}
+            for bk in body.get("bookmakers", []) or []:
+                for mk in bk.get("markets", []) or []:
                     if mk.get("key") != mkey:
                         continue
-                    for oc in mk.get("outcomes", []):
-                        p = safe_float(oc.get("point"), np.nan)
-                        if math.isfinite(p):
-                            pts.append(p)
+                    for oc in mk.get("outcomes", []) or []:
+                        pv = safe_float(oc.get("point"), np.nan)
+                        if math.isfinite(pv):
+                            pts.append(pv)
             if pts:
-                key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
-                out[key] = float(statistics.median(pts))
-        if out:
-            return out, None
-        last_note = f"market key '{mkey}' returned no F5 lines"
-    return {}, last_note or "no F5 market available"
+                used_key = mkey
+                break
+        if pts:
+            key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
+            out[key] = float(statistics.median(pts))
+
+    if not out:
+        return {}, (note or "no book posted F5 totals for these events -- "
+                    "F5 historical coverage may not exist on this plan")
+    return out, None
 
 
 def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
@@ -1942,6 +1980,81 @@ def diagnostics_bundle():
 def render_diagnostics():
     st.markdown('<div class="kicker">Diagnostics</div>', unsafe_allow_html=True)
 
+
+
+    with st.expander("Permanent storage (GitHub Gist)", expanded=False):
+        _tok = _gh_token()
+        _gid = _gist_id()
+        _src = st.session_state.get("_tracker_source", "local")
+        if _tok and _gid:
+            st.success(f"Connected. Tracker loaded from {_src}; every save is "
+                       f"pushed to gist {_gid[:8]}…")
+        elif _tok:
+            st.warning("Token found, no gist yet. Create one below, then add "
+                       "its ID to secrets so it is reused after redeploys.")
+            if st.button("Create tracker gist", key="gist_create"):
+                if gist_save_tracker(load_tracker()):
+                    st.success("Created. Add this to Streamlit secrets:")
+                    st.code(f'TRACKER_GIST_ID = "'
+                            f'{st.session_state.get("_tracker_gist_id","")}"')
+                else:
+                    st.error(st.session_state.get("_gist_error", "failed"))
+        else:
+            st.info(
+                "Not configured — the tracker is local only and will be wiped "
+                "on the next redeploy or sleep."
+            )
+            st.markdown(
+                "1. github.com/settings/tokens → classic token, **gist** scope only\n"
+                "2. Streamlit → Settings → Secrets → add `GITHUB_TOKEN = \"ghp_…\"`\n"
+                "3. Reload, then press **Create tracker gist** here\n"
+                "4. Add the `TRACKER_GIST_ID` it gives you to secrets as well"
+            )
+        if st.session_state.get("_gist_error"):
+            st.caption(f"Last gist error: {st.session_state['_gist_error']}")
+
+    with st.expander("Restore / merge tracker from CSV", expanded=False):
+        st.caption(
+            "Streamlit Cloud storage is ephemeral: the tracker lives in a "
+            ".mlb_tracker folder that is wiped on every redeploy and whenever "
+            "the app sleeps. Upload a previously downloaded tracker CSV to "
+            "restore it. Rows are merged, not replaced -- anything already "
+            "tracked for the same game, market and slate date is kept."
+        )
+        _up = st.file_uploader("Tracker CSV", type=["csv"], key="tracker_import")
+        if _up is not None:
+            try:
+                _inc = pd.read_csv(_up)
+                _cur = load_tracker()
+                _keys = ["Slate_Date", "Game", "Market", "Side"]
+                _keys = [k for k in _keys if k in _inc.columns and k in _cur.columns]
+                if _cur.empty:
+                    _merged, _added = _inc, len(_inc)
+                elif _keys:
+                    _have = set(map(tuple, _cur[_keys].astype(str).values.tolist()))
+                    _mask = [tuple(r) not in _have
+                             for r in _inc[_keys].astype(str).values.tolist()]
+                    _new = _inc[_mask]
+                    _merged = pd.concat([_cur, _new], ignore_index=True)
+                    _added = len(_new)
+                else:
+                    _merged, _added = pd.concat([_cur, _inc], ignore_index=True), len(_inc)
+                st.write(f"{len(_inc)} rows in file, {_added} new, "
+                         f"{len(_merged)} total after merge.")
+                if st.button("Restore these rows", key="tracker_import_go"):
+                    save_tracker(_merged)
+                    st.success(f"Restored. Tracker now holds {len(_merged)} rows.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Could not read that file: {e}")
+
+    if not (_gh_token() and _gist_id()):
+        st.info(
+            "Download the tracker before every redeploy. Local cloud storage is "
+            "wiped on deploy and on sleep. Set up gist storage above to stop "
+            "losing the record."
+        )
+
     with st.expander("Moneyline price band", expanded=False):
         st.caption(
             "Moneylines outside this band are graded PASS no matter how much the "
@@ -2056,8 +2169,13 @@ def render_diagnostics():
             "This is a measurement only. Nothing here feeds the board until the "
             "numbers justify it."
         )
+        st.warning(
+            "F5 lines need one API call per game (period markets are not served "
+            "on the bulk endpoint), so a 21-day run is ~300 odds credits. Try 7 "
+            "days first to confirm coverage before spending more."
+        )
         _f1, _f2 = st.columns(2)
-        _f5_days = _f1.slider("Days", 7, 45, 21, key="f5_days")
+        _f5_days = _f1.slider("Days", 7, 45, 14, key="f5_days")
         _f5_recent = _f2.checkbox("Recent form", value=True, key="f5_recent")
         if st.button("Run F5 edge test", key="f5_run"):
             _fb = st.progress(0.0, text="starting...")
@@ -5097,16 +5215,117 @@ def _tracker_clean(df):
 
     return out
 
+# --- permanent tracker storage (GitHub Gist) --------------------------------
+# The local .mlb_tracker folder lives on the Streamlit Cloud container and is
+# wiped on every redeploy and whenever the app sleeps -- which is how 52 graded
+# bets were lost. A Gist gives free, permanent, version-history storage and,
+# unlike committing to the app repo, writing to it does NOT trigger a redeploy.
+#
+# Setup (once):
+#   1. github.com/settings/tokens -> generate a classic token, "gist" scope only
+#   2. In Streamlit: Settings -> Secrets, add
+#        GITHUB_TOKEN = "ghp_..."
+#   3. Save a bet, or hit "Create tracker gist" on the Bets page. The app makes
+#      the gist and shows its ID. Add that too:
+#        TRACKER_GIST_ID = "abc123..."
+# Without a token nothing changes: local file only, same as before.
+
+GIST_API = "https://api.github.com/gists"
+GIST_FILENAME = "ninth_signal_tracker.csv"
+
+
+def _gh_token():
+    try:
+        return st.secrets.get("GITHUB_TOKEN", "") or ""
+    except Exception:
+        return ""
+
+
+def _gist_id():
+    gid = st.session_state.get("_tracker_gist_id")
+    if gid:
+        return gid
+    try:
+        return st.secrets.get("TRACKER_GIST_ID", "") or ""
+    except Exception:
+        return ""
+
+
+def _gist_headers(tok):
+    return {"Authorization": f"Bearer {tok}",
+            "Accept": "application/vnd.github+json"}
+
+
+def gist_load_tracker():
+    """Pull the tracker CSV from the gist. Returns a DataFrame or None."""
+    tok, gid = _gh_token(), _gist_id()
+    if not tok or not gid:
+        return None
+    try:
+        r = requests.get(f"{GIST_API}/{gid}", headers=_gist_headers(tok), timeout=20)
+        r.raise_for_status()
+        files = r.json().get("files", {})
+        blob = files.get(GIST_FILENAME) or (list(files.values())[0] if files else None)
+        if not blob:
+            return None
+        content = blob.get("content")
+        if content is None and blob.get("raw_url"):
+            content = requests.get(blob["raw_url"], timeout=20).text
+        if not content:
+            return None
+        from io import StringIO
+        return pd.read_csv(StringIO(content))
+    except Exception as e:
+        st.session_state["_gist_error"] = str(e)
+        return None
+
+
+def gist_save_tracker(df):
+    """Push the tracker to the gist, creating it on first use."""
+    tok = _gh_token()
+    if not tok:
+        return False
+    payload_files = {GIST_FILENAME: {"content": df.to_csv(index=False)}}
+    gid = _gist_id()
+    try:
+        if gid:
+            r = requests.patch(f"{GIST_API}/{gid}", headers=_gist_headers(tok),
+                               json={"files": payload_files}, timeout=25)
+        else:
+            r = requests.post(GIST_API, headers=_gist_headers(tok),
+                              json={"description": "Ninth Signal bet tracker",
+                                    "public": False, "files": payload_files},
+                              timeout=25)
+        r.raise_for_status()
+        new_id = r.json().get("id")
+        if new_id:
+            st.session_state["_tracker_gist_id"] = new_id
+        st.session_state["_gist_error"] = ""
+        return True
+    except Exception as e:
+        st.session_state["_gist_error"] = str(e)
+        return False
+
+
 def load_tracker():
     if "_model_tracker_df" in st.session_state:
         return _tracker_clean(st.session_state["_model_tracker_df"])
-    try:
-        if TRACKER_PATH.exists():
-            df = pd.read_csv(TRACKER_PATH)
-        else:
+
+    # Gist is the source of truth when configured; the local file is a cache
+    # that survives reruns but not redeploys.
+    df = None
+    if not st.session_state.get("_gist_loaded"):
+        df = gist_load_tracker()
+        st.session_state["_gist_loaded"] = True
+        if df is not None:
+            st.session_state["_tracker_source"] = "gist"
+    if df is None:
+        try:
+            df = pd.read_csv(TRACKER_PATH) if TRACKER_PATH.exists() else empty_tracker()
+        except Exception:
             df = empty_tracker()
-    except Exception:
-        df = empty_tracker()
+        st.session_state.setdefault("_tracker_source", "local")
+
     st.session_state["_model_tracker_df"] = _tracker_clean(df)
     return _tracker_clean(df)
 
@@ -5119,6 +5338,7 @@ def save_tracker(df):
         df.to_csv(tmp, index=False)
         tmp.replace(TRACKER_PATH)
         st.session_state["_tracker_storage_error"] = ""
+        gist_save_tracker(df)          # best effort; local write already done
         return True
     except Exception as e:
         st.session_state["_tracker_storage_error"] = str(e)
@@ -6726,6 +6946,42 @@ else:
             st.session_state.totals_loaded = True
             st.session_state.totals_scope = "full slate totals"
             st.rerun()
+
+        # Surface API failures. Previously fetch_odds() returned its error into
+        # session state and nothing ever rendered it, so a 401/429 looked
+        # identical to "you haven't pressed the button yet" -- the board just
+        # kept saying "load current lines" with no explanation.
+        _op = st.session_state.get("odds_payload", {}) or {}
+        _tp = st.session_state.get("totals_payload", {}) or {}
+        _oerr, _terr = _op.get("error", ""), _tp.get("error", "")
+        if _oerr or _terr:
+            for _e in {_oerr, _terr}:
+                if _e:
+                    st.error(_e)
+            _q = _op.get("quota") or _tp.get("quota") or {}
+            if _q.get("remaining") is not None:
+                st.caption(
+                    f"Odds API credits — remaining {_q.get('remaining')}, "
+                    f"used {_q.get('used')}, last call cost {_q.get('last')}."
+                )
+            st.caption(
+                "The backtest panels spend the same credit pool: the F5 test "
+                "costs one call per game. If credits are exhausted, they reset "
+                "on your plan's monthly cycle."
+            )
+        elif st.session_state.get("odds_loaded"):
+            _q = _op.get("quota") or {}
+            _n = len(_op.get("events") or [])
+            st.caption(
+                f"Lines loaded: {_n} events"
+                + (f" • {_q.get('remaining')} credits remaining"
+                   if _q.get("remaining") is not None else "")
+            )
+            if _n == 0:
+                st.warning(
+                    "The API returned no events. MLB odds are usually posted "
+                    "the morning of the slate; if it is early, try again later."
+                )
 
         upcoming = sorted([x for x in candidates if x.get("pregame")], key=start_sort)
         live_now = sorted([x for x in candidates if x.get("game_state") == "LIVE"], key=start_sort)
