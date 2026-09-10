@@ -2388,6 +2388,133 @@ def _auto_fragment(seconds):
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+/* ==========================================================================
+   NINTH SIGNAL — foundation
+   One source of truth for colour, type and the chrome around the data.
+   Component classes below (cards, meters, tracker) keep their own layout and
+   inherit from these tokens.
+
+   Three rules:
+     1. Chrome is quiet, data is loud.
+     2. Colour encodes model state. Never decoration.
+     3. Every figure is monospaced with tabular numerals, so odds, lines and
+        probabilities align down a column and can be scanned, not read.
+   ========================================================================== */
+:root{
+  --ns-ground:#10161d;  --ns-panel:#161e27;  --ns-panel-2:#1e2833;
+  --ns-rule:#24303d;    --ns-rule-soft:#1c2733;
+  --ns-ink:#e8edf2;     --ns-dim:#8a9bad;    --ns-dimmer:#5f7186;
+  --ns-pos:#2f9e6b;     --ns-neg:#c4574d;    --ns-flag:#c9a227;   --ns-live:#4a9fd8;
+  --ns-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,monospace;
+  --ns-sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+}
+
+html,body,.stApp,[data-testid="stAppViewContainer"]{
+  background:var(--ns-ground)!important;color:var(--ns-ink)!important;
+  font-family:var(--ns-sans)!important;
+}
+[data-testid="stAppViewContainer"] .main .block-container{
+  padding-top:.4rem!important;padding-bottom:5rem!important;max-width:820px!important;
+}
+[data-testid="stVerticalBlock"]{gap:.5rem!important;}
+
+/* Figures. */
+.mono,.odds,.edge,.ev,.num,.sl-stat b,.sl-date,.sl-age,
+[data-testid="stMetricValue"],[data-testid="stDataFrame"] *{
+  font-family:var(--ns-mono)!important;font-variant-numeric:tabular-nums!important;
+  font-feature-settings:"tnum" 1!important;
+}
+
+/* Header — one line, not a hero. */
+.ninth-brand-header{
+  display:flex!important;align-items:center!important;gap:9px!important;
+  background:none!important;background-image:none!important;
+  min-height:0!important;padding:4px 0 7px!important;margin:0 0 6px!important;
+  border:0!important;border-bottom:1px solid var(--ns-rule)!important;
+  border-radius:0!important;box-shadow:none!important;
+}
+.ninth-brand-header::before{display:none!important;}
+.ninth-brand-mark img{width:22px!important;height:22px!important;border-radius:4px!important;}
+.ninth-hero,.hero{display:flex!important;align-items:center!important;gap:10px!important;
+  flex:1!important;padding:0!important;margin:0!important;}
+.ninth-hero .sub,.hero .sub,.free-data-note{display:none!important;}
+.ninth-hero .title,.hero .title{font-size:.92rem!important;font-weight:600!important;
+  letter-spacing:-.01em!important;color:var(--ns-ink)!important;margin:0!important;}
+.ninth-hero .title .signal{color:var(--ns-dim)!important;font-weight:400!important;}
+.pill{margin:0!important;padding:2px 7px!important;border-radius:3px!important;
+  background:none!important;border:1px solid var(--ns-pos)!important;color:var(--ns-pos)!important;
+  font-size:.58rem!important;font-weight:500!important;letter-spacing:.02em!important;}
+
+/* Tracked-out caps eyebrows above every heading are template chrome. */
+.eyebrow,.branded-hero-copy .eyebrow,.tracker-eyebrow,.pulse-kicker,.page-kicker{
+  display:none!important;
+}
+.board-head,.kicker,.page-head,.pulse-head{
+  margin:12px 0 6px!important;padding-bottom:5px!important;
+  border-bottom:1px solid var(--ns-rule)!important;
+}
+.board-head span{display:none!important;}
+.board-head b,.kicker,.page-title,.pulse-title,.tracker-title{
+  font-size:.82rem!important;font-weight:600!important;color:var(--ns-dim)!important;
+  letter-spacing:0!important;text-transform:none!important;margin:0!important;
+}
+
+/* Slate bar. */
+.slate-bar{display:flex;align-items:baseline;gap:14px;padding:7px 2px 8px;
+  margin:0 0 4px;border-bottom:1px solid var(--ns-rule);}
+.slate-bar .sl-date{font-size:.78rem;font-weight:600;color:var(--ns-ink);}
+.sl-stat{display:inline-flex;align-items:baseline;gap:4px;}
+.sl-stat b{font-size:.82rem;font-weight:600;}
+.sl-stat b.u{color:var(--ns-ink);} .sl-stat b.l{color:var(--ns-live);}
+.sl-stat b.f{color:var(--ns-dim);} .sl-stat b.z{color:var(--ns-dimmer);font-weight:400;}
+.sl-stat i{font-style:normal;font-size:.68rem;color:var(--ns-dimmer);}
+.slate-bar .sl-age{margin-left:auto;font-size:.66rem;color:var(--ns-dimmer);}
+.status.ninth-status{display:none!important;}
+
+/* Controls. */
+[data-testid="stWidgetLabel"]{display:none!important;}
+.stButton>button{width:100%;min-height:0!important;padding:10px 14px!important;
+  border-radius:4px!important;font-weight:500!important;font-size:.84rem!important;
+  background:var(--ns-panel)!important;color:var(--ns-ink)!important;
+  border:1px solid var(--ns-rule)!important;box-shadow:none!important;}
+.stButton>button:hover{background:var(--ns-panel-2)!important;border-color:#31404f!important;}
+.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{
+  background:var(--ns-pos)!important;color:#07120c!important;border:0!important;font-weight:600!important;}
+.stButton>button[kind="primary"]:hover{background:#37b07a!important;}
+.stButton>button:disabled{background:var(--ns-panel)!important;color:var(--ns-dimmer)!important;
+  border-color:var(--ns-rule)!important;}
+
+div[class*="st-key-production_view_mode"] label{
+  margin:0!important;padding:7px 18px!important;border:0!important;border-radius:0!important;
+  background:none!important;min-height:0!important;box-shadow:none!important;}
+div[class*="st-key-production_view_mode"] label:has(input:checked){background:var(--ns-panel-2)!important;}
+div[class*="st-key-production_view_mode"] label p{font-size:.78rem!important;font-weight:500!important;color:var(--ns-dim)!important;}
+div[class*="st-key-production_view_mode"] label:has(input:checked) p{color:var(--ns-ink)!important;font-weight:600!important;}
+div[class*="st-key-production_view_mode"] [data-baseweb="radio"]>div:first-child{display:none!important;}
+
+/* Nav. */
+div[class*="st-key-main_navigation"] label,
+div[class*="st-key-main_navigation"] [role="radiogroup"]>div{
+  border:0!important;box-shadow:none!important;}
+div[class*="st-key-main_navigation"] label{min-height:54px!important;}
+div[class*="st-key-main_navigation"] label p{font-size:.6rem!important;font-weight:500!important;}
+div[class*="st-key-main_navigation"] label:has(input:checked) p{color:var(--ns-live)!important;font-weight:600!important;}
+div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74,159,216,.08)!important;}
+
+/* Surfaces. */
+[data-testid="stExpander"]{border:1px solid var(--ns-rule)!important;border-radius:6px!important;
+  background:var(--ns-panel)!important;}
+[data-testid="stExpander"] summary{font-size:.78rem!important;font-weight:500!important;color:var(--ns-dim)!important;}
+[data-testid="stDataFrame"]{border:1px solid var(--ns-rule)!important;border-radius:6px!important;}
+[data-testid="stDataFrame"] *{font-size:.74rem!important;}
+[data-testid="stMetricValue"]{font-size:1.35rem!important;font-weight:500!important;color:var(--ns-ink)!important;}
+[data-testid="stMetricLabel"]{font-size:.68rem!important;color:var(--ns-dim)!important;font-weight:400!important;}
+.stCaption,[data-testid="stCaptionContainer"]{color:var(--ns-dimmer)!important;font-size:.72rem!important;}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+:focus-visible{outline:2px solid var(--ns-live)!important;outline-offset:2px!important;}
+
 :root{--bg:#06111f;--panel:#0b1728;--panel2:#0f2035;--text:#f3f7fb;--muted:#8fa3ba;--blue:#7dd3fc;--green:#86efac;--amber:#fde68a;--red:#fda4af}
 .stApp{background:radial-gradient(circle at 15% -5%,rgba(59,130,246,.17),transparent 28%),linear-gradient(180deg,#071321 0%,#06111f 55%,#050d18 100%);color:var(--text)}
 .block-container{max-width:980px!important;padding-top:1rem!important;padding-bottom:4rem!important}
@@ -2538,14 +2665,18 @@ small {
 [data-testid="stTextInput"] input,
 [data-testid="stNumberInput"] input,
 [data-testid="stDateInput"] input {
-    background: #f4f7fa !important;
-    color: #162638 !important;
-    border-color: #afbecb !important;
+    background: var(--panel) !important;
+    color: var(--ink) !important;
+    border: 1px solid var(--rule) !important;
+    border-radius: 4px !important;
 }
 [data-baseweb="select"] span,
-[data-baseweb="select"] input {
-    color: #162638 !important;
+[data-baseweb="select"] input,
+[data-baseweb="select"] div {
+    color: var(--ink) !important;
 }
+[data-baseweb="popover"] li { background: var(--panel) !important; color: var(--ink) !important; }
+[data-baseweb="popover"] li:hover { background: var(--panel-2) !important; }
 [data-testid="stWidgetLabel"] p,
 label {
     color: #dbe7f1 !important;
@@ -3712,13 +3843,14 @@ div[class*="st-key-refresh_scores_top"] button{
 
 /* True segmented control for Single Game / Full Slate */
 div[class*="st-key-production_view_mode"] [role="radiogroup"]{
-    display:grid!important;
-    grid-template-columns:1fr 1fr!important;
-    gap:5px!important;
-    padding:4px!important;
-    border-radius:14px!important;
-    background:#081a2b!important;
-    border:1px solid #24435c!important;
+    display:inline-flex!important;
+    gap:0!important;
+    padding:0!important;
+    border-radius:4px!important;
+    background:var(--panel)!important;
+    border:1px solid var(--rule)!important;
+    overflow:hidden!important;
+    width:auto!important;
 }
 div[class*="st-key-production_view_mode"] label{
     min-height:42px!important;
@@ -4172,289 +4304,6 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     font-size:.61rem;
     font-weight:800;
 }
-
-
-/* ==========================================================================
-   TERMINAL — design pass
-   Reframes the app from consumer-sportsbook to research terminal. The user
-   reads financial dashboards all day; the visual language should match that,
-   not a betting app. Three rules drive everything below:
-     1. Chrome is quiet, data is loud.
-     2. Colour encodes model state only. Never decoration.
-     3. Every figure is monospaced with tabular numerals so odds, lines and
-        probabilities align down a column and can be scanned rather than read.
-   ========================================================================== */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-
-:root{
-  --ground:#10161d;   /* deep slate, deliberately not near-black */
-  --panel:#161e27;
-  --panel-2:#1b242f;
-  --rule:#24303d;
-  --ink:#e8edf2;
-  --dim:#8a9bad;
-  --dimmer:#5f7186;
-  --pos:#2f9e6b;      /* muted, not acid */
-  --neg:#c4574d;
-  --flag:#c9a227;
-  --live:#4a9fd8;
-}
-
-html,body,.stApp,[data-testid="stAppViewContainer"]{
-  background:var(--ground)!important;
-  font-family:'IBM Plex Sans',system-ui,sans-serif!important;
-  color:var(--ink)!important;
-}
-[data-testid="stAppViewContainer"] .main .block-container{
-  padding-top:.5rem!important;max-width:820px!important;
-}
-
-/* Numbers get tabular figures everywhere they appear. */
-.mono,.odds,.edge,.ev,.num,
-[data-testid="stMetricValue"],
-.card-line b,.pick-odds,.total-line{
-  font-family:'IBM Plex Mono',ui-monospace,monospace!important;
-  font-variant-numeric:tabular-nums!important;
-  font-feature-settings:"tnum" 1!important;
-  letter-spacing:-.01em!important;
-}
-
-/* --- header: status bar, not hero ------------------------------------- */
-/* The hero cost roughly a fifth of the viewport on every load and carried
-   no information. Collapsed to a single rule-bounded line.                */
-.ninth-brand-header{
-  display:flex!important;align-items:center!important;gap:10px!important;
-  padding:6px 2px 8px!important;margin:0 0 8px!important;
-  background:none!important;border:0!important;border-radius:0!important;
-  border-bottom:1px solid var(--rule)!important;box-shadow:none!important;
-}
-.ninth-brand-header::before{display:none!important;}
-.ninth-brand-mark img{
-  width:24px!important;height:24px!important;border-radius:5px!important;
-}
-.ninth-hero,.hero{padding:0!important;margin:0!important;flex:1!important;}
-.ninth-hero .sub,.hero .sub{display:none!important;}
-/* ALL-CAPS eyebrows above every heading are template chrome. */
-.eyebrow,.branded-hero-copy .eyebrow,.tracker-eyebrow{display:none!important;}
-.ninth-hero .title,.hero .title{
-  font-size:.95rem!important;font-weight:600!important;
-  letter-spacing:-.01em!important;color:var(--ink)!important;
-}
-.ninth-hero .title .signal{color:var(--dim)!important;font-weight:400!important;}
-.pill,.ninth-hero .pill{
-  margin:0!important;padding:2px 7px!important;border-radius:3px!important;
-  background:none!important;border:1px solid var(--pos)!important;
-  color:var(--pos)!important;font-size:.6rem!important;
-  font-weight:500!important;letter-spacing:.02em!important;
-}
-.free-data-note{display:none!important;}
-
-/* --- section heads: rule + label, no stacked caps ---------------------- */
-.board-head{
-  margin:16px 0 8px!important;padding-bottom:5px!important;
-  border-bottom:1px solid var(--rule)!important;
-}
-.board-head span{display:none!important;}
-.board-head b{
-  font-size:.82rem!important;font-weight:600!important;
-  color:var(--dim)!important;letter-spacing:.01em!important;margin:0!important;
-}
-.kicker{
-  font-size:.72rem!important;font-weight:600!important;color:var(--dim)!important;
-  letter-spacing:0!important;text-transform:none!important;
-  margin:14px 0 6px!important;padding-bottom:4px!important;
-  border-bottom:1px solid var(--rule)!important;
-}
-
-/* --- controls: recede until needed ------------------------------------ */
-[data-testid="stDateInput"] input{
-  background:var(--panel)!important;color:var(--ink)!important;
-  border:1px solid var(--rule)!important;border-radius:4px!important;
-  font-family:'IBM Plex Mono',monospace!important;font-size:.82rem!important;
-  padding:6px 10px!important;
-}
-[data-testid="stDateInput"] label{display:none!important;}
-
-div[class*="st-key-board_refresh"] button{
-  background:none!important;border:1px solid var(--rule)!important;
-  color:var(--dim)!important;font-size:.72rem!important;
-  padding:4px 10px!important;border-radius:4px!important;min-height:0!important;
-}
-.stButton>button{
-  border-radius:4px!important;font-weight:500!important;
-  font-size:.82rem!important;letter-spacing:0!important;
-}
-.stButton>button[kind="primary"]{
-  background:var(--pos)!important;border:0!important;color:#08130d!important;
-  font-weight:600!important;
-}
-.stButton>button[kind="secondary"]{
-  background:var(--panel)!important;border:1px solid var(--rule)!important;
-  color:var(--ink)!important;
-}
-
-/* --- verdict chips: the one place colour is allowed ------------------- */
-.verdict,.grade-chip{
-  font-family:'IBM Plex Mono',monospace!important;
-  font-size:.62rem!important;font-weight:600!important;
-  border-radius:3px!important;padding:3px 8px!important;
-  letter-spacing:.02em!important;
-}
-.verdict.best,.grade-best{background:none!important;border:1px solid var(--pos)!important;color:var(--pos)!important;}
-.verdict.bet,.grade-bet{background:none!important;border:1px solid var(--live)!important;color:var(--live)!important;}
-.verdict.lean,.grade-lean{background:none!important;border:1px solid var(--flag)!important;color:var(--flag)!important;}
-.verdict.pass,.grade-pass{background:none!important;border:1px solid var(--rule)!important;color:var(--dimmer)!important;}
-
-/* --- cards: hairline containers, not floating tiles ------------------- */
-.game-card,.play-card,.pick-row,.slate-card{
-  background:var(--panel)!important;
-  border:1px solid var(--rule)!important;border-radius:6px!important;
-  box-shadow:none!important;
-}
-
-/* --- metrics: terminal readouts --------------------------------------- */
-[data-testid="stMetricValue"]{font-size:1.35rem!important;font-weight:500!important;color:var(--ink)!important;}
-[data-testid="stMetricLabel"]{font-size:.68rem!important;color:var(--dim)!important;font-weight:400!important;}
-
-/* --- tables ------------------------------------------------------------ */
-[data-testid="stDataFrame"]{border:1px solid var(--rule)!important;border-radius:6px!important;}
-[data-testid="stDataFrame"] *{font-family:'IBM Plex Mono',monospace!important;font-size:.74rem!important;}
-
-/* --- nav: quieter ------------------------------------------------------ */
-div[class*="st-key-main_navigation"] label p{font-size:.6rem!important;font-weight:500!important;}
-div[class*="st-key-main_navigation"] label:has(input:checked) p{color:var(--live)!important;font-weight:600!important;}
-div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74,159,216,.08)!important;}
-
-/* --- expanders --------------------------------------------------------- */
-[data-testid="stExpander"]{border:1px solid var(--rule)!important;border-radius:6px!important;background:var(--panel)!important;}
-[data-testid="stExpander"] summary{font-size:.78rem!important;font-weight:500!important;color:var(--dim)!important;}
-
-.stCaption,[data-testid="stCaptionContainer"]{color:var(--dimmer)!important;font-size:.72rem!important;}
-
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
-:focus-visible{outline:2px solid var(--live)!important;outline-offset:2px!important;}
-
-
-/* --- slate bar: figures with labels, no middle-dot meta string --------- */
-.slate-bar{
-  display:flex;align-items:baseline;gap:14px;
-  padding:7px 2px 8px;margin:0 0 4px;
-  border-bottom:1px solid var(--rule);
-}
-.slate-bar .sl-date{
-  font-family:'IBM Plex Mono',monospace;font-size:.78rem;font-weight:600;
-  color:var(--ink);letter-spacing:-.01em;
-}
-.sl-stat{display:inline-flex;align-items:baseline;gap:4px;}
-.sl-stat b{
-  font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;
-  font-size:.82rem;font-weight:600;
-}
-.sl-stat b.u{color:var(--ink);}
-.sl-stat b.l{color:var(--live);}
-.sl-stat b.f{color:var(--dim);}
-.sl-stat b.z{color:var(--dimmer);font-weight:400;}
-.sl-stat i{font-style:normal;font-size:.68rem;color:var(--dimmer);}
-.slate-bar .sl-age{
-  margin-left:auto;font-family:'IBM Plex Mono',monospace;
-  font-size:.66rem;color:var(--dimmer);
-}
-.status.ninth-status{display:none!important;}
-
-
-/* ==========================================================================
-   TERMINAL — pass 2. Fixes from looking at the build on device.
-   ========================================================================== */
-
-/* 1. The header collapsed but its container kept its gradient and height,
-      leaving a tall empty panel. Flatten the wrapper itself.               */
-.ninth-brand-header,
-div:has(> .ninth-brand-header){
-  background:none!important;background-image:none!important;
-  min-height:0!important;height:auto!important;
-  padding:4px 0 6px!important;margin:0!important;
-  border-radius:0!important;box-shadow:none!important;
-}
-.ninth-brand-header{border-bottom:1px solid var(--rule)!important;}
-.branded-hero-copy{padding:0!important;margin:0!important;}
-
-/* 2. Streamlit inputs are Base Web components; styling the bare <input> was
-      not enough, so date and matchup were still rendering as white slabs.  */
-div[data-baseweb="input"],
-div[data-baseweb="select"]>div,
-div[data-baseweb="base-input"]{
-  background:var(--panel)!important;
-  border:1px solid var(--rule)!important;
-  border-radius:4px!important;
-  min-height:0!important;
-}
-div[data-baseweb="input"] input,
-div[data-baseweb="select"] div,
-div[data-baseweb="select"] span,
-.stDateInput input,.stSelectbox div{
-  background:transparent!important;color:var(--ink)!important;
-  font-size:.82rem!important;
-}
-.stDateInput input{
-  font-family:'IBM Plex Mono',monospace!important;
-  font-variant-numeric:tabular-nums!important;
-}
-div[data-baseweb="select"] svg{fill:var(--dim)!important;}
-div[data-baseweb="popover"] li{
-  background:var(--panel)!important;color:var(--ink)!important;font-size:.8rem!important;
-}
-
-/* 3. Default vertical rhythm was leaving large dead gaps between controls. */
-[data-testid="stVerticalBlock"]{gap:.55rem!important;}
-[data-testid="stElementContainer"]{margin-bottom:0!important;}
-
-/* 4. A stray centred "View mode" label was still rendering above the radio. */
-.stRadio>label,[data-testid="stWidgetLabel"]>div>p{
-  display:none!important;
-}
-.stRadio [role="radiogroup"]{gap:6px!important;}
-
-/* 5. Radio pills: were an oversized rounded slab with a red dot. Now a
-      compact segmented control, which is what a two-way toggle should be.  */
-div[class*="st-key-production_view_mode"] [role="radiogroup"]{
-  display:inline-flex!important;border:1px solid var(--rule)!important;
-  border-radius:4px!important;overflow:hidden!important;padding:0!important;
-  background:var(--panel)!important;
-}
-div[class*="st-key-production_view_mode"] label{
-  margin:0!important;padding:6px 16px!important;border:0!important;
-  border-radius:0!important;background:none!important;min-height:0!important;
-}
-div[class*="st-key-production_view_mode"] label:has(input:checked){
-  background:var(--panel-2)!important;
-}
-div[class*="st-key-production_view_mode"] label p{
-  font-size:.78rem!important;font-weight:500!important;color:var(--dim)!important;
-}
-div[class*="st-key-production_view_mode"] label:has(input:checked) p{
-  color:var(--ink)!important;font-weight:600!important;
-}
-div[class*="st-key-production_view_mode"] [data-baseweb="radio"] div:first-child{
-  display:none!important;
-}
-
-/* 6. Primary button was a saturated consumer green. Muted to the signal
-      tone already used for BEST BET, so the palette stays coherent.        */
-.stButton>button[kind="primary"]{
-  background:var(--pos)!important;color:#07120c!important;
-  min-height:0!important;padding:9px 14px!important;
-}
-.stButton>button[kind="primary"]:hover{background:#37b07a!important;}
-
-/* 7. Nav had visible column dividers cutting the bar into five boxes.      */
-div[class*="st-key-main_navigation"] [role="radiogroup"]>*{
-  border:0!important;border-right:0!important;
-}
-div[class*="st-key-main_navigation"] label{border:0!important;}
-
-/* 8. Section heads sat too far from the content they introduce.            */
-.board-head{margin:12px 0 6px!important;}
-.kicker{margin:12px 0 5px!important;}
 
 </style>
 """, unsafe_allow_html=True)
