@@ -6695,15 +6695,35 @@ _view = st.session_state.get("ninth_page", "Board")
 # The Board's model run is now explicit. Nothing projects until you ask for it,
 # so opening the app costs one schedule call. The flag is keyed to the slate
 # date, so changing dates correctly requires a fresh run.
-_board_ready = st.session_state.get("board_loaded_for") == str(slate_date)
+def _board_key(d):
+    """Identity of what was projected. Changing date, workflow or the selected
+    game invalidates the run, so the board never shows a projection that does
+    not match the current selection."""
+    return (f"{d}|{st.session_state.get('production_view_mode','Full Slate')}"
+            f"|{st.session_state.get('board_single_pk')}")
+
+
+_board_ready = st.session_state.get("board_loaded_for") == _board_key(slate_date)
 _needs_model = (_view == "Board") and _board_ready
 
 if _needs_model:
-    with st.spinner("Loading MLB schedule, starters, lineups and model data…"):
+    with st.spinner("Loading schedule…"):
         games = fetch_games_for_date(slate_date)
-        model_df = run_model(games) if games else pd.DataFrame()
+    # Project only what the chosen workflow needs. Single Game used to run the
+    # full slate first and then let you pick one -- on a 15-game day that is
+    # 14 games of starter logs, team splits and lineups fetched and discarded.
+    _mode_pre = st.session_state.get("production_view_mode", "Full Slate")
+    _pk_pre = st.session_state.get("board_single_pk")
+    if _mode_pre == "Single Game" and _pk_pre:
+        _model_games = [g for g in games if str(g.get("GamePk")) == str(_pk_pre)]
+    else:
+        _model_games = games
+    _label = ("1 game" if len(_model_games) == 1
+              else f"{len(_model_games)} games")
+    with st.spinner(f"Running model — starters, lineups and splits for {_label}…"):
+        model_df = run_model(_model_games) if _model_games else pd.DataFrame()
         candidates = build_candidates(
-            model_df, games, odds_payload.get("events", [])
+            model_df, _model_games, odds_payload.get("events", [])
         ) if not model_df.empty else []
 else:
     with st.spinner("Loading schedule…"):
@@ -6797,16 +6817,43 @@ else:
     if not _board_ready:
         st.markdown(
             '<div class="board-head"><span>BETTING BOARD</span>'
-            '<b>Model not loaded</b></div>', unsafe_allow_html=True)
+            '<b>Choose a workflow</b></div>', unsafe_allow_html=True)
+
+        # The workflow choice happens BEFORE the model runs, so Single Game
+        # only ever projects the one game you asked for. These widgets share
+        # keys with the post-load controls; only one set renders per run
+        # (this branch stops), so the selection carries straight through.
+        _pre_mode = st.radio(
+            "View mode", ["Single Game", "Full Slate"], horizontal=True,
+            label_visibility="collapsed", key="production_view_mode")
+
+        _pre_games = sorted(
+            [g for g in games if is_pregame(g)],
+            key=lambda g: pd.to_datetime(g.get("GameDate"), utc=True,
+                                         errors="coerce") or pd.Timestamp.max)
+        if _pre_mode == "Single Game":
+            if not _pre_games:
+                st.info("No upcoming games remain. Use **Live** for scores or "
+                        "**Tracker** for tracked bets.")
+                st.stop()
+            _opts = {f"{g.get('TimeLabel','')} • {g.get('Away')} @ {g.get('Home')}":
+                     g.get("GamePk") for g in _pre_games}
+            _pick = st.selectbox("Matchup", list(_opts.keys()), index=0,
+                                 key="board_pre_matchup")
+            st.session_state["board_single_pk"] = _opts[_pick]
+            _cost = "one game"
+        else:
+            st.session_state["board_single_pk"] = None
+            _cost = f"all {len(games)} games"
+
         st.caption(
-            f"{len(games)} games on the {slate_date.strftime('%b %-d')} slate. "
-            "Running the model fetches starter game logs, team splits, bullpen "
-            "numbers and lineups for every game, so it is the slow part of the "
-            "app. Nothing else needs it."
+            f"Projecting {_cost}. The model fetches starter game logs, team "
+            f"splits, bullpen numbers and lineups, so this is the slow step — "
+            f"single game is much faster."
         )
-        if st.button("Run model for this slate", key="board_run",
-                     type="primary", use_container_width=True):
-            st.session_state["board_loaded_for"] = str(slate_date)
+        if st.button("Run model", key="board_run", type="primary",
+                     use_container_width=True):
+            st.session_state["board_loaded_for"] = _board_key(slate_date)
             st.rerun()
         st.caption("Live, Tracker and Bets work without it.")
         st.stop()
@@ -6820,7 +6867,7 @@ else:
             reset_dynamic_caches()
         except Exception:
             pass
-        st.session_state["board_loaded_for"] = str(slate_date)
+        st.session_state["board_loaded_for"] = _board_key(slate_date)
         st.rerun()
 
     mode = st.radio(
