@@ -4361,6 +4361,101 @@ div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74
 }
 .status.ninth-status{display:none!important;}
 
+
+/* ==========================================================================
+   TERMINAL — pass 2. Fixes from looking at the build on device.
+   ========================================================================== */
+
+/* 1. The header collapsed but its container kept its gradient and height,
+      leaving a tall empty panel. Flatten the wrapper itself.               */
+.ninth-brand-header,
+div:has(> .ninth-brand-header){
+  background:none!important;background-image:none!important;
+  min-height:0!important;height:auto!important;
+  padding:4px 0 6px!important;margin:0!important;
+  border-radius:0!important;box-shadow:none!important;
+}
+.ninth-brand-header{border-bottom:1px solid var(--rule)!important;}
+.branded-hero-copy{padding:0!important;margin:0!important;}
+
+/* 2. Streamlit inputs are Base Web components; styling the bare <input> was
+      not enough, so date and matchup were still rendering as white slabs.  */
+div[data-baseweb="input"],
+div[data-baseweb="select"]>div,
+div[data-baseweb="base-input"]{
+  background:var(--panel)!important;
+  border:1px solid var(--rule)!important;
+  border-radius:4px!important;
+  min-height:0!important;
+}
+div[data-baseweb="input"] input,
+div[data-baseweb="select"] div,
+div[data-baseweb="select"] span,
+.stDateInput input,.stSelectbox div{
+  background:transparent!important;color:var(--ink)!important;
+  font-size:.82rem!important;
+}
+.stDateInput input{
+  font-family:'IBM Plex Mono',monospace!important;
+  font-variant-numeric:tabular-nums!important;
+}
+div[data-baseweb="select"] svg{fill:var(--dim)!important;}
+div[data-baseweb="popover"] li{
+  background:var(--panel)!important;color:var(--ink)!important;font-size:.8rem!important;
+}
+
+/* 3. Default vertical rhythm was leaving large dead gaps between controls. */
+[data-testid="stVerticalBlock"]{gap:.55rem!important;}
+[data-testid="stElementContainer"]{margin-bottom:0!important;}
+
+/* 4. A stray centred "View mode" label was still rendering above the radio. */
+.stRadio>label,[data-testid="stWidgetLabel"]>div>p{
+  display:none!important;
+}
+.stRadio [role="radiogroup"]{gap:6px!important;}
+
+/* 5. Radio pills: were an oversized rounded slab with a red dot. Now a
+      compact segmented control, which is what a two-way toggle should be.  */
+div[class*="st-key-production_view_mode"] [role="radiogroup"]{
+  display:inline-flex!important;border:1px solid var(--rule)!important;
+  border-radius:4px!important;overflow:hidden!important;padding:0!important;
+  background:var(--panel)!important;
+}
+div[class*="st-key-production_view_mode"] label{
+  margin:0!important;padding:6px 16px!important;border:0!important;
+  border-radius:0!important;background:none!important;min-height:0!important;
+}
+div[class*="st-key-production_view_mode"] label:has(input:checked){
+  background:var(--panel-2)!important;
+}
+div[class*="st-key-production_view_mode"] label p{
+  font-size:.78rem!important;font-weight:500!important;color:var(--dim)!important;
+}
+div[class*="st-key-production_view_mode"] label:has(input:checked) p{
+  color:var(--ink)!important;font-weight:600!important;
+}
+div[class*="st-key-production_view_mode"] [data-baseweb="radio"] div:first-child{
+  display:none!important;
+}
+
+/* 6. Primary button was a saturated consumer green. Muted to the signal
+      tone already used for BEST BET, so the palette stays coherent.        */
+.stButton>button[kind="primary"]{
+  background:var(--pos)!important;color:#07120c!important;
+  min-height:0!important;padding:9px 14px!important;
+}
+.stButton>button[kind="primary"]:hover{background:#37b07a!important;}
+
+/* 7. Nav had visible column dividers cutting the bar into five boxes.      */
+div[class*="st-key-main_navigation"] [role="radiogroup"]>*{
+  border:0!important;border-right:0!important;
+}
+div[class*="st-key-main_navigation"] label{border:0!important;}
+
+/* 8. Section heads sat too far from the content they introduce.            */
+.board-head{margin:12px 0 6px!important;}
+.kicker{margin:12px 0 5px!important;}
+
 </style>
 """, unsafe_allow_html=True)
 
