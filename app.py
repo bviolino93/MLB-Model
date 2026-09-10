@@ -4173,6 +4173,194 @@ div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
     font-weight:800;
 }
 
+
+/* ==========================================================================
+   TERMINAL — design pass
+   Reframes the app from consumer-sportsbook to research terminal. The user
+   reads financial dashboards all day; the visual language should match that,
+   not a betting app. Three rules drive everything below:
+     1. Chrome is quiet, data is loud.
+     2. Colour encodes model state only. Never decoration.
+     3. Every figure is monospaced with tabular numerals so odds, lines and
+        probabilities align down a column and can be scanned rather than read.
+   ========================================================================== */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --ground:#10161d;   /* deep slate, deliberately not near-black */
+  --panel:#161e27;
+  --panel-2:#1b242f;
+  --rule:#24303d;
+  --ink:#e8edf2;
+  --dim:#8a9bad;
+  --dimmer:#5f7186;
+  --pos:#2f9e6b;      /* muted, not acid */
+  --neg:#c4574d;
+  --flag:#c9a227;
+  --live:#4a9fd8;
+}
+
+html,body,.stApp,[data-testid="stAppViewContainer"]{
+  background:var(--ground)!important;
+  font-family:'IBM Plex Sans',system-ui,sans-serif!important;
+  color:var(--ink)!important;
+}
+[data-testid="stAppViewContainer"] .main .block-container{
+  padding-top:.5rem!important;max-width:820px!important;
+}
+
+/* Numbers get tabular figures everywhere they appear. */
+.mono,.odds,.edge,.ev,.num,
+[data-testid="stMetricValue"],
+.card-line b,.pick-odds,.total-line{
+  font-family:'IBM Plex Mono',ui-monospace,monospace!important;
+  font-variant-numeric:tabular-nums!important;
+  font-feature-settings:"tnum" 1!important;
+  letter-spacing:-.01em!important;
+}
+
+/* --- header: status bar, not hero ------------------------------------- */
+/* The hero cost roughly a fifth of the viewport on every load and carried
+   no information. Collapsed to a single rule-bounded line.                */
+.ninth-brand-header{
+  display:flex!important;align-items:center!important;gap:10px!important;
+  padding:6px 2px 8px!important;margin:0 0 8px!important;
+  background:none!important;border:0!important;border-radius:0!important;
+  border-bottom:1px solid var(--rule)!important;box-shadow:none!important;
+}
+.ninth-brand-header::before{display:none!important;}
+.ninth-brand-mark img{
+  width:24px!important;height:24px!important;border-radius:5px!important;
+}
+.ninth-hero,.hero{padding:0!important;margin:0!important;flex:1!important;}
+.ninth-hero .sub,.hero .sub{display:none!important;}
+/* ALL-CAPS eyebrows above every heading are template chrome. */
+.eyebrow,.branded-hero-copy .eyebrow,.tracker-eyebrow{display:none!important;}
+.ninth-hero .title,.hero .title{
+  font-size:.95rem!important;font-weight:600!important;
+  letter-spacing:-.01em!important;color:var(--ink)!important;
+}
+.ninth-hero .title .signal{color:var(--dim)!important;font-weight:400!important;}
+.pill,.ninth-hero .pill{
+  margin:0!important;padding:2px 7px!important;border-radius:3px!important;
+  background:none!important;border:1px solid var(--pos)!important;
+  color:var(--pos)!important;font-size:.6rem!important;
+  font-weight:500!important;letter-spacing:.02em!important;
+}
+.free-data-note{display:none!important;}
+
+/* --- section heads: rule + label, no stacked caps ---------------------- */
+.board-head{
+  margin:16px 0 8px!important;padding-bottom:5px!important;
+  border-bottom:1px solid var(--rule)!important;
+}
+.board-head span{display:none!important;}
+.board-head b{
+  font-size:.82rem!important;font-weight:600!important;
+  color:var(--dim)!important;letter-spacing:.01em!important;margin:0!important;
+}
+.kicker{
+  font-size:.72rem!important;font-weight:600!important;color:var(--dim)!important;
+  letter-spacing:0!important;text-transform:none!important;
+  margin:14px 0 6px!important;padding-bottom:4px!important;
+  border-bottom:1px solid var(--rule)!important;
+}
+
+/* --- controls: recede until needed ------------------------------------ */
+[data-testid="stDateInput"] input{
+  background:var(--panel)!important;color:var(--ink)!important;
+  border:1px solid var(--rule)!important;border-radius:4px!important;
+  font-family:'IBM Plex Mono',monospace!important;font-size:.82rem!important;
+  padding:6px 10px!important;
+}
+[data-testid="stDateInput"] label{display:none!important;}
+
+div[class*="st-key-board_refresh"] button{
+  background:none!important;border:1px solid var(--rule)!important;
+  color:var(--dim)!important;font-size:.72rem!important;
+  padding:4px 10px!important;border-radius:4px!important;min-height:0!important;
+}
+.stButton>button{
+  border-radius:4px!important;font-weight:500!important;
+  font-size:.82rem!important;letter-spacing:0!important;
+}
+.stButton>button[kind="primary"]{
+  background:var(--pos)!important;border:0!important;color:#08130d!important;
+  font-weight:600!important;
+}
+.stButton>button[kind="secondary"]{
+  background:var(--panel)!important;border:1px solid var(--rule)!important;
+  color:var(--ink)!important;
+}
+
+/* --- verdict chips: the one place colour is allowed ------------------- */
+.verdict,.grade-chip{
+  font-family:'IBM Plex Mono',monospace!important;
+  font-size:.62rem!important;font-weight:600!important;
+  border-radius:3px!important;padding:3px 8px!important;
+  letter-spacing:.02em!important;
+}
+.verdict.best,.grade-best{background:none!important;border:1px solid var(--pos)!important;color:var(--pos)!important;}
+.verdict.bet,.grade-bet{background:none!important;border:1px solid var(--live)!important;color:var(--live)!important;}
+.verdict.lean,.grade-lean{background:none!important;border:1px solid var(--flag)!important;color:var(--flag)!important;}
+.verdict.pass,.grade-pass{background:none!important;border:1px solid var(--rule)!important;color:var(--dimmer)!important;}
+
+/* --- cards: hairline containers, not floating tiles ------------------- */
+.game-card,.play-card,.pick-row,.slate-card{
+  background:var(--panel)!important;
+  border:1px solid var(--rule)!important;border-radius:6px!important;
+  box-shadow:none!important;
+}
+
+/* --- metrics: terminal readouts --------------------------------------- */
+[data-testid="stMetricValue"]{font-size:1.35rem!important;font-weight:500!important;color:var(--ink)!important;}
+[data-testid="stMetricLabel"]{font-size:.68rem!important;color:var(--dim)!important;font-weight:400!important;}
+
+/* --- tables ------------------------------------------------------------ */
+[data-testid="stDataFrame"]{border:1px solid var(--rule)!important;border-radius:6px!important;}
+[data-testid="stDataFrame"] *{font-family:'IBM Plex Mono',monospace!important;font-size:.74rem!important;}
+
+/* --- nav: quieter ------------------------------------------------------ */
+div[class*="st-key-main_navigation"] label p{font-size:.6rem!important;font-weight:500!important;}
+div[class*="st-key-main_navigation"] label:has(input:checked) p{color:var(--live)!important;font-weight:600!important;}
+div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74,159,216,.08)!important;}
+
+/* --- expanders --------------------------------------------------------- */
+[data-testid="stExpander"]{border:1px solid var(--rule)!important;border-radius:6px!important;background:var(--panel)!important;}
+[data-testid="stExpander"] summary{font-size:.78rem!important;font-weight:500!important;color:var(--dim)!important;}
+
+.stCaption,[data-testid="stCaptionContainer"]{color:var(--dimmer)!important;font-size:.72rem!important;}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+:focus-visible{outline:2px solid var(--live)!important;outline-offset:2px!important;}
+
+
+/* --- slate bar: figures with labels, no middle-dot meta string --------- */
+.slate-bar{
+  display:flex;align-items:baseline;gap:14px;
+  padding:7px 2px 8px;margin:0 0 4px;
+  border-bottom:1px solid var(--rule);
+}
+.slate-bar .sl-date{
+  font-family:'IBM Plex Mono',monospace;font-size:.78rem;font-weight:600;
+  color:var(--ink);letter-spacing:-.01em;
+}
+.sl-stat{display:inline-flex;align-items:baseline;gap:4px;}
+.sl-stat b{
+  font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;
+  font-size:.82rem;font-weight:600;
+}
+.sl-stat b.u{color:var(--ink);}
+.sl-stat b.l{color:var(--live);}
+.sl-stat b.f{color:var(--dim);}
+.sl-stat b.z{color:var(--dimmer);font-weight:400;}
+.sl-stat i{font-style:normal;font-size:.68rem;color:var(--dimmer);}
+.slate-bar .sl-age{
+  margin-left:auto;font-family:'IBM Plex Mono',monospace;
+  font-size:.66rem;color:var(--dimmer);
+}
+.status.ninth-status{display:none!important;}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -6534,12 +6722,21 @@ def render_auto_slate_status(games, slate_date):
     live = sum(1 for x in states if x == "LIVE")
     final = sum(1 for x in states if x == "FINAL")
     now_et = pd.Timestamp.now(tz="America/New_York")
+    # Counts as figures with labels, not a middle-dot meta string. Zero states
+    # stay dim so the eye lands on what is actually happening on the slate.
+    def _stat(v, label, cls):
+        tone = cls if v else "z"
+        return (f'<span class="sl-stat"><b class="{tone}">{v}</b>'
+                f'<i>{label}</i></span>')
+
     st.markdown(
-        f'<div class="status ninth-status"><div><span class="dot"></span>'
-        f'<span class="live">{slate_date.strftime("%b %-d")}</span> '
-        f'• {pre} upcoming • {live} live • {final} final'
-        f'<span class="auto-age"> • auto {now_et.strftime("%-I:%M %p")}</span>'
-        f'</div></div>',
+        f'<div class="slate-bar">'
+        f'<span class="sl-date">{slate_date.strftime("%b %-d")}</span>'
+        f'{_stat(pre, "upcoming", "u")}'
+        f'{_stat(live, "live", "l")}'
+        f'{_stat(final, "final", "f")}'
+        f'<span class="sl-age">{now_et.strftime("%-I:%M")}</span>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
