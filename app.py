@@ -6886,17 +6886,40 @@ else:
             return pd.Timestamp.max.tz_localize("UTC")
 
     if mode == "Single Game":
-        chrono = sorted(candidates, key=start_sort)
-        upcoming_single = [x for x in chrono if x.get("pregame")]
-        single_group = "Upcoming"
-        single_pool = upcoming_single
-        if not single_pool:
+        # Build the picker from the full schedule, not from `candidates`.
+        # In single-game mode only the chosen game is projected, so candidates
+        # holds exactly one row -- driving the dropdown off it left you unable
+        # to switch to any other game.
+        _pool_games = sorted(
+            [g for g in games if is_pregame(g)],
+            key=lambda g: pd.to_datetime(g.get("GameDate"), utc=True,
+                                         errors="coerce") or pd.Timestamp.max)
+        if not _pool_games:
             st.info("No upcoming games remain. Use **Live** for scores or **Tracker** for tracked bets.")
             st.stop()
-        labels = [f"{x['time']} • {x['away']} @ {x['home']}" + (f" • {x['game_state']}" if not x.get("pregame") else "") for x in single_pool]
+        _opts = {f"{g.get('TimeLabel','')} • {g.get('Away')} @ {g.get('Home')}":
+                 g.get("GamePk") for g in _pool_games}
+        _labels = list(_opts.keys())
+        _cur_pk = st.session_state.get("board_single_pk")
+        _idx = next((i for i, l in enumerate(_labels)
+                     if str(_opts[l]) == str(_cur_pk)), 0)
         st.markdown('<div class="kicker">Matchup</div>', unsafe_allow_html=True)
-        selected_label = st.selectbox("Choose matchup", labels, index=0, key="single_game_matchup", label_visibility="collapsed")
-        x = single_pool[labels.index(selected_label)]
+        selected_label = st.selectbox("Choose matchup", _labels, index=_idx,
+                                      key="board_post_matchup",
+                                      label_visibility="collapsed")
+        _new_pk = _opts[selected_label]
+
+        # Switching game re-projects immediately rather than bouncing you back
+        # to the run screen for a second tap.
+        if str(_new_pk) != str(_cur_pk):
+            st.session_state["board_single_pk"] = _new_pk
+            st.session_state["board_loaded_for"] = _board_key(slate_date)
+            st.rerun()
+
+        x = next((c for c in candidates if str(c.get("GamePk")) == str(_new_pk)), None)
+        if x is None:
+            st.warning("That game has not been projected yet — press Refresh.")
+            st.stop()
         selected_game = next((g for g in games if g.get("GamePk") == x["GamePk"]), None)
 
         selected_state = game_state(selected_game)
