@@ -1818,6 +1818,211 @@ def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
     return out
 
 
+
+# =============================================================================
+# SLATE TABLE
+# =============================================================================
+# The card stack presented a slate as 15 stacked recommendations. Two problems.
+# It cost a full screen per game, so comparing the second game to the tenth
+# meant scrolling past eight. And it framed every row as a bet to place, which
+# the measured edge correlation of 0.02 does not support.
+#
+# This is the same data as a table sorted by disagreement. Figures are in RUNS,
+# not percentages: "8.5 -> 9.6, +1.1" says what the model actually thinks in
+# units you can argue with, where "+12.8% edge" is three transforms away from
+# anything real and hides magnitude. Grades survive as a 3px left rule rather
+# than a coloured chip -- glanceable, not shouting.
+
+TEAM_ABBR = {
+    "Arizona Diamondbacks":"ARI","Atlanta Braves":"ATL","Baltimore Orioles":"BAL",
+    "Boston Red Sox":"BOS","Chicago Cubs":"CHC","Chicago White Sox":"CWS",
+    "Cincinnati Reds":"CIN","Cleveland Guardians":"CLE","Colorado Rockies":"COL",
+    "Detroit Tigers":"DET","Houston Astros":"HOU","Kansas City Royals":"KC",
+    "Los Angeles Angels":"LAA","Los Angeles Dodgers":"LAD","Miami Marlins":"MIA",
+    "Milwaukee Brewers":"MIL","Minnesota Twins":"MIN","New York Mets":"NYM",
+    "New York Yankees":"NYY","Athletics":"ATH","Oakland Athletics":"ATH",
+    "Philadelphia Phillies":"PHI","Pittsburgh Pirates":"PIT","San Diego Padres":"SD",
+    "San Francisco Giants":"SF","Seattle Mariners":"SEA","St. Louis Cardinals":"STL",
+    "Tampa Bay Rays":"TB","Texas Rangers":"TEX","Toronto Blue Jays":"TOR",
+    "Washington Nationals":"WSH",
+}
+
+
+def _abbr(name):
+    if name in TEAM_ABBR:
+        return TEAM_ABBR[name]
+    parts = str(name).split()
+    return (parts[-1][:3] if parts else "???").upper()
+
+
+def _grade_tone(v):
+    return {"BEST BET": "best", "BET": "bet", "LEAN": "lean"}.get(v, "pass")
+
+
+def slate_rows(candidates, totals_payload):
+    """One row per game: what the market says, what the model says, the gap."""
+    rows = []
+    for c in candidates:
+        row = {
+            "pk": c.get("GamePk"), "time": c.get("time", ""),
+            "away": _abbr(c.get("away")), "home": _abbr(c.get("home")),
+            "away_full": c.get("away"), "home_full": c.get("home"),
+            "conf": c.get("confidence", 0),
+            "lineups": bool(c.get("lineup_confirmed")),
+            "away_sp": c.get("away_sp", "TBD"), "home_sp": c.get("home_sp", "TBD"),
+            "mrow": c.get("model_row", {}),
+        }
+
+        # --- totals ---
+        try:
+            ctx = totals_projection(c.get("model_row", {}))
+            row["proj_total"] = float(ctx["Projected_Total"])
+            row["park"] = float(ctx.get("Park_Factor", 1.0))
+        except Exception:
+            row["proj_total"] = None
+            row["park"] = 1.0
+        tm = None
+        try:
+            ev = match_event(totals_payload.get("events", []) or [], 
+                             {"Away": c.get("away"), "Home": c.get("home")})
+            tm = totals_market(ev) if ev else None
+        except Exception:
+            tm = None
+        if tm and row["proj_total"] is not None:
+            row["line"] = float(tm.get("total"))
+            row["tot_gap"] = row["proj_total"] - row["line"]
+            try:
+                tp = build_total_pick(row["proj_total"], tm)
+                row["tot_side"] = tp["side"]
+                row["tot_odds"] = tp["over_odds"] if tp["side"] == "OVER" else tp["under_odds"]
+                row["tot_grade"] = tp["grade"]
+            except Exception:
+                row["tot_side"] = row["tot_odds"] = row["tot_grade"] = None
+        else:
+            row["line"] = row["tot_gap"] = None
+            row["tot_side"] = row["tot_odds"] = row["tot_grade"] = None
+
+        # --- moneyline, expressed in runs of conviction ---
+        b = c.get("best", {}) or {}
+        row["ml_team"] = _abbr(b.get("team")) if b.get("team") else None
+        row["ml_odds"] = b.get("odds")
+        row["ml_grade"] = b.get("selection") or b.get("verdict")
+        row["ml_fair"] = b.get("fair")
+        try:
+            row["ml_gap"] = (run_edge(b["prob"], b["market_prob"])
+                             if b.get("market_prob") is not None else None)
+        except Exception:
+            row["ml_gap"] = None
+
+        gaps = [abs(x) for x in (row["tot_gap"], row["ml_gap"]) if x is not None]
+        row["sort"] = max(gaps) if gaps else -1
+        row["tone"] = _grade_tone(
+            row["tot_grade"] if (row["tot_grade"] in ("BEST BET", "BET"))
+            else row["ml_grade"])
+        rows.append(row)
+    rows.sort(key=lambda r: r["sort"], reverse=True)
+    return rows
+
+
+def _fmt_odds(o):
+    if o is None:
+        return "—"
+    o = int(o)
+    return f"+{o}" if o > 0 else str(o)
+
+
+def render_slate_table(candidates, totals_payload):
+    rows = slate_rows(candidates, totals_payload)
+    if not rows:
+        st.caption("No games projected.")
+        return
+
+    priced = sum(1 for r in rows if r["line"] is not None)
+    st.markdown(
+        f'<div class="tbl-head"><span>{len(rows)} games</span>'
+        f'<span>{priced} priced</span>'
+        f'<span>sorted by disagreement</span></div>',
+        unsafe_allow_html=True)
+
+    html = ['<div class="slate-tbl">']
+    for r in rows:
+        tot = (f'<span class="f">{r["line"]:.1f}</span>'
+               f'<span class="ar">→</span>'
+               f'<span class="f">{r["proj_total"]:.1f}</span>'
+               f'<span class="gap {"up" if r["tot_gap"]>0 else "dn"}">'
+               f'{r["tot_gap"]:+.1f}</span>'
+               f'<span class="side">{(r["tot_side"] or "")[:1]} '
+               f'{_fmt_odds(r["tot_odds"])}</span>'
+               if r["line"] is not None else
+               (f'<span class="f">{r["proj_total"]:.1f}</span>'
+                f'<span class="none">no line</span>'
+                if r["proj_total"] is not None else '<span class="none">—</span>'))
+
+        if r["ml_gap"] is not None:
+            ml = (f'<span class="t">{r["ml_team"]}</span>'
+                  f'<span class="f">{_fmt_odds(r["ml_odds"])}</span>'
+                  f'<span class="ar">→</span>'
+                  f'<span class="f">{_fmt_odds(r["ml_fair"])}</span>'
+                  f'<span class="gap {"up" if r["ml_gap"]>0 else "dn"}">'
+                  f'{r["ml_gap"]:+.2f}r</span>')
+        else:
+            ml = '<span class="none">no line</span>'
+
+        html.append(
+            f'<div class="row {r["tone"]}">'
+            f'  <div class="r1">'
+            f'    <span class="mu">{r["away"]} @ {r["home"]}</span>'
+            f'    <span class="tm">{r["time"]}</span>'
+            f'    <span class="cf{"" if r["lineups"] else " nl"}">{r["conf"]}</span>'
+            f'  </div>'
+            f'  <div class="r2"><i>T</i>{tot}</div>'
+            f'  <div class="r2"><i>M</i>{ml}</div>'
+            f'</div>')
+    html.append('</div>')
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="tbl-key">Gaps are model minus market, in runs. '
+        'Confidence is data completeness, not accuracy — dimmed means lineups '
+        'are not posted.</div>', unsafe_allow_html=True)
+
+    # Inputs drawer. Previously there was no way to interrogate a projection
+    # from the interface -- when the model claimed a road team wins 51% at
+    # Dodger Stadium you could not see what produced it.
+    with st.expander("Inputs behind these numbers"):
+        pick = st.selectbox(
+            "Game", [f'{r["away"]} @ {r["home"]}' for r in rows],
+            key="slate_inputs_pick", label_visibility="collapsed")
+        r = rows[[f'{x["away"]} @ {x["home"]}' for x in rows].index(pick)]
+        m = r["mrow"]
+
+        def _n(k, d=1):
+            v = safe_float(m.get(k), None)
+            return f"{v:.{d}f}" if v is not None and math.isfinite(v) else "—"
+
+        st.markdown(
+            f'<div class="inp">'
+            f'<div class="ic"><b>{r["away"]}</b>'
+            f'<div><i>starter</i>{r["away_sp"]}</div>'
+            f'<div><i>SP RA9</i>{_n("Away_SP_RA9",2)}</div>'
+            f'<div><i>exp IP</i>{_n("Away_SP_ExpIP")}</div>'
+            f'<div><i>bullpen</i>{_n("Away_Bullpen_RA9",2)}</div>'
+            f'<div><i>offense</i>{_n("Away_Offense",3)}</div>'
+            f'<div><i>proj runs</i>{_n("Away_Proj_Runs",2)}</div></div>'
+            f'<div class="ic"><b>{r["home"]}</b>'
+            f'<div><i>starter</i>{r["home_sp"]}</div>'
+            f'<div><i>SP RA9</i>{_n("Home_SP_RA9",2)}</div>'
+            f'<div><i>exp IP</i>{_n("Home_SP_ExpIP")}</div>'
+            f'<div><i>bullpen</i>{_n("Home_Bullpen_RA9",2)}</div>'
+            f'<div><i>offense</i>{_n("Home_Offense",3)}</div>'
+            f'<div><i>proj runs</i>{_n("Home_Proj_Runs",2)}</div></div>'
+            f'</div>'
+            f'<div class="inp-foot">park {r["park"]:.2f}'
+            f' · confidence {r["conf"]}'
+            f'{"" if r["lineups"] else " · lineups not posted"}</div>',
+            unsafe_allow_html=True)
+
+
 # =============================================================================
 # PART 2.5 -- DIAGNOSTICS (defined before the app so the
 #              router can call it; see NOTE ON PLACEMENT below)
@@ -4320,6 +4525,52 @@ div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74
 [data-testid="stRadio"]>label{display:none!important;}
 [data-testid="stWidgetLabel"] p,label{font-weight:500!important;}
 div[data-testid="stDateInput"]{margin-top:0!important;}
+
+/* --- slate table ------------------------------------------------------- */
+.tbl-head{display:flex;gap:14px;padding:4px 2px 6px;font-size:.66rem;
+  color:var(--ns-dimmer);border-bottom:1px solid var(--ns-rule);}
+.tbl-head span:last-child{margin-left:auto;}
+.slate-tbl{border:1px solid var(--ns-rule);border-top:0;border-radius:0 0 5px 5px;overflow:hidden;}
+.slate-tbl .row{border-top:1px solid var(--ns-rule-soft);border-left:3px solid transparent;
+  padding:7px 10px 8px;background:var(--ns-panel);}
+.slate-tbl .row:first-child{border-top:0;}
+.slate-tbl .row.best{border-left-color:var(--ns-pos);}
+.slate-tbl .row.bet{border-left-color:var(--ns-live);}
+.slate-tbl .row.lean{border-left-color:var(--ns-flag);}
+.slate-tbl .row.pass{border-left-color:var(--ns-rule);}
+.slate-tbl .r1{display:flex;align-items:baseline;gap:8px;margin-bottom:3px;}
+.slate-tbl .mu{font-family:var(--ns-mono);font-size:.82rem;font-weight:600;
+  color:var(--ns-ink);letter-spacing:.01em;}
+.slate-tbl .tm{font-size:.64rem;color:var(--ns-dimmer);}
+.slate-tbl .cf{margin-left:auto;font-family:var(--ns-mono);font-size:.66rem;
+  color:var(--ns-dim);font-variant-numeric:tabular-nums;}
+.slate-tbl .cf.nl{color:var(--ns-dimmer);opacity:.55;}
+.slate-tbl .r2{display:flex;align-items:baseline;gap:6px;line-height:1.55;}
+.slate-tbl .r2 i{font-style:normal;font-size:.6rem;color:var(--ns-dimmer);
+  width:11px;flex:0 0 11px;}
+.slate-tbl .f,.slate-tbl .t,.slate-tbl .gap,.slate-tbl .side{
+  font-family:var(--ns-mono);font-variant-numeric:tabular-nums;font-size:.75rem;}
+.slate-tbl .f{color:var(--ns-ink);}
+.slate-tbl .t{color:var(--ns-dim);font-weight:600;}
+.slate-tbl .ar{color:var(--ns-dimmer);font-size:.66rem;}
+.slate-tbl .gap{font-weight:600;}
+.slate-tbl .gap.up{color:var(--ns-pos);}
+.slate-tbl .gap.dn{color:var(--ns-neg);}
+.slate-tbl .side{margin-left:auto;color:var(--ns-dim);font-size:.68rem;}
+.slate-tbl .none{font-size:.68rem;color:var(--ns-dimmer);}
+.tbl-key{font-size:.64rem;color:var(--ns-dimmer);padding:6px 2px 0;line-height:1.5;}
+
+.inp{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.inp .ic{background:var(--ns-panel-2);border:1px solid var(--ns-rule);
+  border-radius:5px;padding:8px 9px;}
+.inp .ic b{display:block;font-family:var(--ns-mono);font-size:.74rem;
+  color:var(--ns-ink);margin-bottom:5px;}
+.inp .ic div{display:flex;justify-content:space-between;gap:8px;
+  font-family:var(--ns-mono);font-variant-numeric:tabular-nums;
+  font-size:.68rem;color:var(--ns-ink);line-height:1.75;}
+.inp .ic i{font-style:normal;color:var(--ns-dimmer);}
+.inp-foot{font-family:var(--ns-mono);font-size:.64rem;color:var(--ns-dimmer);padding-top:7px;}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -7208,6 +7459,8 @@ else:
                     "The API returned no events. MLB odds are usually posted "
                     "the morning of the slate; if it is early, try again later."
                 )
+
+        render_slate_table([x for x in candidates if x.get("pregame")], totals_payload)
 
         upcoming = sorted([x for x in candidates if x.get("pregame")], key=start_sort)
         live_now = sorted([x for x in candidates if x.get("game_state") == "LIVE"], key=start_sort)
