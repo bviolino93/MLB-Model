@@ -80,7 +80,7 @@ import streamlit as st
 # Moneyline is computed but has NOT been revalidated. Leave it alone until the
 # totals slope comes back near 1.0.
 
-MODEL_VERSION = "2.1.0-AUDIT-FIXES"
+MODEL_VERSION = "2.2.0-PEN-PLATOON-XFIP"
 MLB_API = "https://statsapi.mlb.com/api"
 
 # =============================================================================
@@ -236,7 +236,7 @@ def _daily_cache_reset():
         return
     for c in (_json_cache, _json_cache_time, _pitcher_cache, _hitting_cache,
               _platoon_cache, _bullpen_cache, _hitter_cache,
-              _totals_weather_cache, _PIT_BP_DATES_OK):
+              _totals_weather_cache, _PIT_BP_DATES_OK, _bp_avail_cache):
         c.clear()
     _cache_day[0] = d
 
@@ -516,6 +516,7 @@ def _pitcher_game_log(player_id):
             "K": safe_float(st.get("strikeOuts"), np.nan),
             "HR": safe_float(st.get("homeRuns"), np.nan),
             "Pitches": safe_float(st.get("numberOfPitches"), np.nan),
+            "HBP": safe_float(st.get("hitByPitch"), 0.0),
         })
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -523,13 +524,27 @@ def _pitcher_game_log(player_id):
     return df
 
 
-def _fip_from_counts(ip, hr, bb, k):
-    """FIP constant is absorbed by anchoring the result at LEAGUE_FIP."""
+LEAGUE_HR_PER_IP = 0.133       # ~1.2 HR/9, league average
+HR_REGRESS_IP = 150.0           # innings at which a pitcher's own HR rate gets half weight
+
+
+def _fip_from_counts(ip, hr, bb, k, hbp=0.0):
+    """FIP with the home-run term regressed toward the league rate (xFIP-style).
+
+    Home runs are the noisiest part of FIP: a pitcher's HR rate over 30-100
+    innings is mostly luck. Raw FIP let three wind-blown homers in five starts
+    swing a starter by half a run. The HR count is now blended with the league
+    rate, weighted by innings (half own-rate at 150 IP). Strikeouts and walks
+    stabilise fast and are used as-is. HBP is included, as in standard FIP.
+    """
     if not ip or ip <= 0:
         return np.nan
     if not all(math.isfinite(v) for v in [hr, bb, k]):
         return np.nan
-    return (13.0 * hr + 3.0 * bb - 2.0 * k) / ip + 3.15
+    hbp = hbp if (hbp is not None and math.isfinite(hbp)) else 0.0
+    w = ip / (ip + HR_REGRESS_IP)
+    hr_reg = w * hr + (1.0 - w) * LEAGUE_HR_PER_IP * ip
+    return (13.0 * hr_reg + 3.0 * (bb + hbp) - 2.0 * k) / ip + 3.15
 
 
 def starter_quality_v2(player_id):
@@ -560,9 +575,10 @@ def starter_quality_v2(player_id):
     bb = safe_float(st.get("baseOnBalls"), np.nan)
     k = safe_float(st.get("strikeOuts"), np.nan)
     hr = safe_float(st.get("homeRuns"), np.nan)
+    hbp = safe_float(st.get("hitByPitch"), 0.0)
 
     season_era = (9.0 * er / ip) if (ip > 0 and math.isfinite(er)) else np.nan
-    season_fip = _fip_from_counts(ip, hr, bb, k)
+    season_fip = _fip_from_counts(ip, hr, bb, k, hbp)
 
     # Blend ERA and FIP, favouring FIP as the more stable predictor.
     if math.isfinite(season_fip) and math.isfinite(season_era):
@@ -587,7 +603,8 @@ def starter_quality_v2(player_id):
             r_er, r_hr = recent["ER"].sum(), recent["HR"].sum()
             r_bb, r_k = recent["BB"].sum(), recent["K"].sum()
             recent_era = 9.0 * r_er / r_ip
-            recent_fip = _fip_from_counts(r_ip, r_hr, r_bb, r_k)
+            recent_fip = _fip_from_counts(r_ip, r_hr, r_bb, r_k,
+                                          float(recent["HBP"].sum()) if "HBP" in recent else 0.0)
             if math.isfinite(recent_fip):
                 w_recent = clamp(r_ip / SP_RECENT_IP_ANCHOR, 0.0, 1.0) * SP_RECENT_MAX_WEIGHT
                 skill = (1 - w_recent) * skill + w_recent * recent_fip
@@ -684,6 +701,137 @@ def team_bullpen(team_name):
               "IP": ip, "Available": True}
     _bullpen_cache[team_name] = result
     return result
+
+
+# ------------------------------------------------------- bullpen availability --
+# The season relief number says how good a bullpen is. It says nothing about
+# who can pitch tonight. This reads the last three days of box scores, marks
+# relievers who are likely unavailable (or limited), and recomputes tonight's
+# bullpen RA9 from the arms that are left.
+BULLPEN_FATIGUE_DAYS = 3
+BULLPEN_REMOVAL_CAP = 0.60      # never remove more than 60% of the pen's innings
+_bp_avail_cache = {}
+
+
+def _et_date(game_date):
+    try:
+        return pd.to_datetime(game_date, utc=True).tz_convert("America/New_York").date()
+    except Exception:
+        return today_et()
+
+
+def _reliever_unavailability(days):
+    """Probability-like weight (0-1) that a reliever is unavailable tonight.
+    `days` maps days-ago -> pitches; 0 means earlier today (doubleheader)."""
+    y = days.get(0, 0) + days.get(1, 0)
+    d2, d3 = days.get(2, 0), days.get(3, 0)
+    w = 0.0
+    if y >= 30:
+        w = 1.0                      # heavy outing yesterday
+    elif y > 0 and d2 > 0:
+        w = 0.9                      # back-to-back days
+    elif y >= 15:
+        w = 0.5
+    elif y > 0:
+        w = 0.25
+    if d2 >= 30:
+        w = max(w, 0.35)
+    if y + d2 + d3 >= 50:
+        w = max(w, 0.7)              # heavy three-day workload
+    return w
+
+
+def bullpen_availability(team_name, game_date, base):
+    """Tonight's bullpen RA9 after removing tired relievers.
+
+    Each tired reliever's innings share and quality (HR-regressed FIP from his
+    season line, as of his last box score) are taken out of the season relief
+    pool: losing a good closer makes the pen worse, losing a mop-up arm barely
+    matters. Falls back to the season number if anything is missing.
+    """
+    key = (team_name, str(game_date))
+    if key in _bp_avail_cache:
+        return _bp_avail_cache[key]
+    out = {**base, "BaseRA9": base.get("RA9"), "Fatigue": 0.0, "Tired": "",
+           "FatigueAvailable": False}
+    T, bp = float(base.get("IP") or 0.0), float(base.get("RA9"))
+    tid = TEAM_IDS.get(team_name)
+    if not base.get("Available") or T < 100 or not tid:
+        _bp_avail_cache[key] = out
+        return out
+
+    start = game_date - timedelta(days=BULLPEN_FATIGUE_DAYS)
+    sched = get_json(
+        f"{MLB_API}/v1/schedule",
+        {"sportId": 1, "teamId": tid, "startDate": str(start), "endDate": str(game_date)},
+        cache_key=("tsched", tid, str(start), str(game_date)), ttl=900)
+    finals = []
+    for blk in sched.get("dates", []) or []:
+        for gm in blk.get("games", []) or []:
+            if (gm.get("status") or {}).get("abstractGameState") == "Final":
+                try:
+                    finals.append((date.fromisoformat(blk.get("date")), gm.get("gamePk")))
+                except Exception:
+                    pass
+
+    usage = {}
+    for gd, pk in sorted(finals, key=lambda x: (x[0], x[1])):
+        box = get_json(f"{MLB_API}/v1/game/{pk}/boxscore", cache_key=("box", pk))
+        teams = box.get("teams") or {}
+        side = next((sd for sd in ("away", "home")
+                     if ((teams.get(sd) or {}).get("team") or {}).get("id") == tid), None)
+        if not side:
+            continue
+        t = teams[side]
+        roster = t.get("players") or {}
+        for idx, pid in enumerate(t.get("pitchers") or []):
+            if idx == 0:
+                continue                         # that game's starter
+            pl = roster.get(f"ID{pid}") or {}
+            gstat = ((pl.get("stats") or {}).get("pitching") or {})
+            n = safe_float(gstat.get("numberOfPitches", gstat.get("pitchesThrown")), 0.0)
+            if not n:
+                continue
+            ago = (game_date - gd).days
+            u = usage.setdefault(pid, {"name": (pl.get("person") or {}).get("fullName", ""),
+                                       "days": {}, "season": {}})
+            u["days"][ago] = u["days"].get(ago, 0.0) + n
+            ss = ((pl.get("seasonStats") or {}).get("pitching") or {})
+            if ss:
+                u["season"] = ss                 # latest box score wins
+
+    removed_ip = removed_runs = 0.0
+    tired = []
+    for u in usage.values():
+        w = _reliever_unavailability(u["days"])
+        ss = u["season"]
+        if w <= 0 or not ss:
+            continue
+        if safe_float(ss.get("gamesStarted"), 0.0) >= 5:
+            continue                             # a starter used in relief
+        ip = ip_to_decimal(ss.get("inningsPitched", 0))
+        x = _fip_from_counts(ip, safe_float(ss.get("homeRuns"), np.nan),
+                             safe_float(ss.get("baseOnBalls"), np.nan),
+                             safe_float(ss.get("strikeOuts"), np.nan),
+                             safe_float(ss.get("hitByPitch"), 0.0))
+        if ip <= 0 or not math.isfinite(x):
+            continue
+        shrink = ip / (ip + 30.0)
+        ra9 = (shrink * x + (1 - shrink) * LEAGUE_BULLPEN_ERA) * RA9_MULTIPLIER
+        removed_ip += w * ip
+        removed_runs += w * ip * ra9
+        if w >= 0.5 and u["name"]:
+            tired.append(u["name"].split()[-1])
+
+    cap = BULLPEN_REMOVAL_CAP * T
+    if removed_ip > cap:
+        scale = cap / removed_ip
+        removed_ip, removed_runs = removed_ip * scale, removed_runs * scale
+    eff = (bp * T - removed_runs) / (T - removed_ip) if removed_ip > 0 else bp
+    out.update({"RA9": clamp(eff, 2.80, 7.00), "Fatigue": removed_ip / T,
+                "Tired": ", ".join(tired), "FatigueAvailable": True})
+    _bp_avail_cache[key] = out
+    return out
 
 
 # ------------------------------------------------------------------- offense --
@@ -799,14 +947,66 @@ def game_feed(game_pk):
 
 def get_lineup(game_pk, side):
     try:
-        team = game_feed(game_pk)["liveData"]["boxscore"]["teams"][side]
+        feed = game_feed(game_pk)
+        team = feed["liveData"]["boxscore"]["teams"][side]
         order = team.get("battingOrder", [])
         players = team.get("players", {})
+        people = (feed.get("gameData") or {}).get("players") or {}
         return [{"id": pid,
-                 "name": players.get(f"ID{pid}", {}).get("person", {}).get("fullName", "")}
+                 "name": players.get(f"ID{pid}", {}).get("person", {}).get("fullName", ""),
+                 "bats": ((people.get(f"ID{pid}") or {}).get("batSide") or {}).get("code")}
                 for pid in order[:9]]
     except Exception:
         return []
+
+
+# League platoon gap: OPS vs opposite-hand pitchers minus OPS vs same-hand,
+# by batter hand. Lefties have the bigger split. Individual splits are noisy
+# and are regressed to these priors (heavier for righties, whose true platoon
+# skill varies less).
+LEAGUE_PLATOON_GAP = {"L": 0.060, "R": 0.035}
+PLATOON_REGRESS_PA = {"L": 500.0, "R": 1000.0}
+# Share of a hitter's PA against same-hand pitchers (most pitchers are righties).
+SAME_HAND_PA_SHARE = {"L": 0.28, "R": 0.72}
+
+
+_SPLIT_OK = {}   # player_id -> did his vs-L / vs-R splits come back
+
+
+def _hitter_splits(player_id):
+    data = get_json(
+        f"{MLB_API}/v1/people/{player_id}/stats",
+        {"stats": "statSplits", "group": "hitting", "season": season_now(),
+         "sitCodes": "vl,vr"},
+        cache_key=("hsplit", season_now(), player_id),
+    )
+    return _hitting_rates(_split_stat(data, "vl")), _hitting_rates(_split_stat(data, "vr"))
+
+
+def hitter_platoon_ops(player_id, bats, pitcher_hand):
+    """Expected OPS for this hitter against a pitcher of `pitcher_hand`.
+
+    Starts from his (shrunk) overall OPS and applies his platoon gap, which is
+    his own observed vs-L / vs-R difference regressed to the league gap for
+    his batting hand. Switch hitters and unknown hands get overall OPS.
+    """
+    base = hitter_ops(player_id)
+    if pitcher_hand not in ("L", "R") or bats not in ("L", "R"):
+        return base
+    prior = LEAGUE_PLATOON_GAP[bats]
+    gap = prior
+    vl, vr = _hitter_splits(player_id)
+    _SPLIT_OK[player_id] = bool(vl and vr and vl["PA"] > 0 and vr["PA"] > 0)
+    if _SPLIT_OK[player_id]:
+        opp, same = (vl, vr) if bats == "R" else (vr, vl)
+        observed = opp["OPS"] - same["OPS"]
+        n = 2.0 / (1.0 / vl["PA"] + 1.0 / vr["PA"])
+        r = PLATOON_REGRESS_PA[bats]
+        gap = (n * observed + r * prior) / (n + r)
+    s = SAME_HAND_PA_SHARE[bats]
+    if bats == pitcher_hand:
+        return base - (1.0 - s) * gap
+    return base + s * gap
 
 
 def hitter_ops(player_id):
@@ -831,20 +1031,58 @@ def hitter_ops(player_id):
     return ops
 
 
-def lineup_factor(lineup):
+_LINEUP_SPLITS = {}
+
+
+def lineup_factor(lineup, pitcher_hand=None, sp_share=0.6):
+    """Batting-order-weighted lineup quality.
+
+    With the opposing starter's hand known, each hitter is rated against that
+    hand for the starter's share of the game and at his overall level for the
+    bullpen innings (a mixed-hand relief corps).
+    """
     if len(lineup) < 8:
         return 1.0
     weights = np.array([1.15, 1.12, 1.10, 1.08, 1.04, 1.00, .96, .92, .88], dtype=float)
-    vals = np.array([hitter_ops(p["id"]) for p in lineup[:9]], dtype=float)
+    vals = []
+    for p in lineup[:9]:
+        overall = hitter_ops(p["id"])
+        if pitcher_hand in ("L", "R"):
+            vs_sp = hitter_platoon_ops(p["id"], p.get("bats"), pitcher_hand)
+            vals.append(sp_share * vs_sp + (1.0 - sp_share) * overall)
+        else:
+            vals.append(overall)
+    vals = np.array(vals, dtype=float)
+    _LINEUP_SPLITS[id(lineup)] = sum(1 for p in lineup[:9] if _SPLIT_OK.get(p["id"]))
     weighted = float(np.average(vals, weights=weights[:len(vals)]))
     return clamp((weighted / LEAGUE_OPS) ** OFFENSE_EXPONENT, *LINEUP_CLAMP)
 
 
-def final_offense(team_name, lineup, opposing_hand):
+# With a posted lineup rated hitter-by-hitter against the starter's hand, the
+# team-level platoon split would double count, and the actual nine hitters
+# deserve more weight than a season line that includes bench players.
+OFFENSE_BLEND_WITH_PLATOON_LINEUP = {"base": 0.45, "lineup": 0.55}
+
+
+def final_offense(team_name, lineup, opposing_hand, opp_sp_ip=5.5):
     base = team_offense(team_name)
     platoon = team_platoon(team_name, opposing_hand)
     lineup_used = len(lineup) >= 8
-    lf = lineup_factor(lineup) if lineup_used else 1.0
+    sp_share = clamp(float(opp_sp_ip) / 9.0, 0.3, 0.85)
+    lf = lineup_factor(lineup, opposing_hand, sp_share) if lineup_used else 1.0
+
+    if lineup_used and opposing_hand in ("L", "R"):
+        w = OFFENSE_BLEND_WITH_PLATOON_LINEUP
+        factor = w["base"] * base["Factor"] + w["lineup"] * lf
+        return {
+            "Factor": clamp(factor, *OFFENSE_CLAMP),
+            "BaseFactor": base["Factor"], "PlatoonFactor": platoon["Factor"],
+            "PlatoonOPS": platoon["OPS"], "PlatoonAvailable": platoon["Available"],
+            "LineupFactor": lf, "LineupUsed": True, "HitterPlatoon": True,
+            "SplitsFound": _LINEUP_SPLITS.pop(id(lineup), 0),
+            "SplitsNeeded": sum(1 for p in lineup[:9] if p.get("bats") in ("L", "R")),
+            "RecentOffenseUsed": base["RecentUsed"],
+        }
 
     # Renormalise over AVAILABLE components only. Previously an unavailable
     # platoon split was set to a neutral 1.0 and still given its full blend
@@ -867,7 +1105,8 @@ def final_offense(team_name, lineup, opposing_hand):
         "Factor": clamp(factor, *OFFENSE_CLAMP),
         "BaseFactor": base["Factor"], "PlatoonFactor": platoon["Factor"],
         "PlatoonOPS": platoon["OPS"], "PlatoonAvailable": platoon["Available"],
-        "LineupFactor": lf, "LineupUsed": lineup_used,
+        "LineupFactor": lf, "LineupUsed": lineup_used, "HitterPlatoon": False,
+        "SplitsFound": 0, "SplitsNeeded": 0,
         "RecentOffenseUsed": base["RecentUsed"],
     }
 
@@ -1035,13 +1274,15 @@ def run_model(games_to_run):
         aip = expected_sp_ip(g.get("Away_SP_ID"))
         hip = expected_sp_ip(g.get("Home_SP_ID"))
 
-        abp = team_bullpen(g.get("Away"))
-        hbp = team_bullpen(g.get("Home"))
+        gdate = _et_date(g.get("GameDate"))
+        abp = bullpen_availability(g.get("Away"), gdate, team_bullpen(g.get("Away")))
+        hbp = bullpen_availability(g.get("Home"), gdate, team_bullpen(g.get("Home")))
 
         aline = get_lineup(g.get("GamePk"), "away")
         hline = get_lineup(g.get("GamePk"), "home")
-        aoff = final_offense(g.get("Away"), aline, hhand)
-        hoff = final_offense(g.get("Home"), hline, ahand)
+        # Each lineup faces the OTHER team's starter, for his expected innings.
+        aoff = final_offense(g.get("Away"), aline, hhand, hip)
+        hoff = final_offense(g.get("Home"), hline, ahand, aip)
 
         # Away scores against the HOME pitching staff, and vice versa.
         home_pitch_factor, home_ra9 = _pitching_factor(hsp["RA9"], hbp["RA9"], hip)
@@ -1073,6 +1314,13 @@ def run_model(games_to_run):
             "Away_SP_ExpIP": aip, "Home_SP_ExpIP": hip,
             "Away_Bullpen_RA9": abp["RA9"], "Home_Bullpen_RA9": hbp["RA9"],
             "Away_Bullpen_Available": abp["Available"], "Home_Bullpen_Available": hbp["Available"],
+            "Away_Bullpen_Season_RA9": abp.get("BaseRA9"), "Home_Bullpen_Season_RA9": hbp.get("BaseRA9"),
+            "Away_Bullpen_Fatigue": abp.get("Fatigue"), "Home_Bullpen_Fatigue": hbp.get("Fatigue"),
+            "Away_Bullpen_Tired": abp.get("Tired"), "Home_Bullpen_Tired": hbp.get("Tired"),
+            "Away_Hitter_Platoon": aoff.get("HitterPlatoon"), "Home_Hitter_Platoon": hoff.get("HitterPlatoon"),
+            "Away_Splits_Found": aoff.get("SplitsFound"), "Home_Splits_Found": hoff.get("SplitsFound"),
+            "Away_Splits_Needed": aoff.get("SplitsNeeded"), "Home_Splits_Needed": hoff.get("SplitsNeeded"),
+            "Away_Pen_Fatigue_OK": abp.get("FatigueAvailable"), "Home_Pen_Fatigue_OK": hbp.get("FatigueAvailable"),
             "Away_Staff_RA9": away_ra9, "Home_Staff_RA9": home_ra9,
             "Away_Base_Offense": aoff["BaseFactor"], "Home_Base_Offense": hoff["BaseFactor"],
             "Away_Platoon_Factor": aoff["PlatoonFactor"], "Home_Platoon_Factor": hoff["PlatoonFactor"],
@@ -1333,7 +1581,8 @@ def _pit_starter(player_id, as_of):
     starts = int(prior["Started"].sum())
 
     era = 9.0 * er / ip
-    fip = _fip_from_counts(ip, hr, bb, k)
+    fip = _fip_from_counts(ip, hr, bb, k,
+                           float(prior["HBP"].sum()) if "HBP" in prior else 0.0)
     if math.isfinite(fip) and math.isfinite(era):
         skill = 0.70 * fip + 0.30 * era
     elif math.isfinite(fip):
@@ -1429,6 +1678,35 @@ def _pit_bullpen(team_name, as_of):
     return {"RA9": clamp(shrunk * RA9_MULTIPLIER, 2.80, 7.00), "Available": True}
 
 
+def _check_new_feeds(team, tid):
+    """Bullpen box-score read and hitter platoon splits, on live data."""
+    out = {"pen_fatigue_ok": False, "pen_relievers_seen": 0, "hitter_splits_ok": False}
+    try:
+        pen = bullpen_availability(team, today_et(), team_bullpen(team))
+        out["pen_fatigue_ok"] = bool(pen.get("FatigueAvailable"))
+        out["pen_tired"] = pen.get("Tired", "")
+        start = today_et() - timedelta(days=BULLPEN_FATIGUE_DAYS)
+        sched = get_json(f"{MLB_API}/v1/schedule",
+                         {"sportId": 1, "teamId": tid, "startDate": str(start),
+                          "endDate": str(today_et())})
+        pk = next((gm.get("gamePk") for blk in sched.get("dates", []) or []
+                   for gm in blk.get("games", []) or []
+                   if (gm.get("status") or {}).get("abstractGameState") == "Final"), None)
+        if pk:
+            box = get_json(f"{MLB_API}/v1/game/{pk}/boxscore", cache_key=("box", pk))
+            for sd in ("away", "home"):
+                t = (box.get("teams") or {}).get(sd) or {}
+                if (t.get("team") or {}).get("id") == tid:
+                    out["pen_relievers_seen"] = max(0, len(t.get("pitchers") or []) - 1)
+                    batter = next(iter(t.get("batters") or []), None)
+                    if batter:
+                        vl, vr = _hitter_splits(batter)
+                        out["hitter_splits_ok"] = bool(vl and vr and vl["PA"] > 0 and vr["PA"] > 0)
+    except Exception as e:
+        out["new_feeds_error"] = str(e)
+    return out
+
+
 def check_data_sources(team_name=None):
     """Confirm the split endpoints return real splits. Run from Diagnostics.
 
@@ -1461,6 +1739,7 @@ def check_data_sources(team_name=None):
         "platoon_ok": platoon_ok,
         "bullpen_ok": bool(bp.get("Available")), "bullpen_IP": bp.get("IP"),
         "pit_bullpen_dates_ok": _pit_bp_dates_ok(season_now()),
+        **_check_new_feeds(team, tid),
     }
 
 
@@ -1639,6 +1918,22 @@ def _closing_totals_for_date(api_key, d):
     return out, None
 
 
+def _edge_significance(edge, dev):
+    """t-statistic of the edge correlation and standard error of the edge
+    slope. |t| >= 2 is the minimum for a result to be distinguishable from
+    zero; below that, a positive point estimate is noise."""
+    edge, dev = np.asarray(edge, float), np.asarray(dev, float)
+    n = len(edge)
+    r = float(np.corrcoef(edge, dev)[0, 1]) if n > 2 else 0.0
+    t = r * math.sqrt((n - 2) / max(1e-12, 1 - r * r)) if n > 2 else 0.0
+    try:
+        _, cov = np.polyfit(edge, dev, 1, cov=True)
+        se = float(math.sqrt(max(cov[0][0], 0.0)))
+    except Exception:
+        se = float("nan")
+    return {"edge_t": float(t), "edge_slope_se": se}
+
+
 def pit_backtest(days_back=14, use_recent=True, use_lines=True,
                  api_key=None, progress=None):
     """Honest backtest: point-in-time inputs, optional closing-line benchmark.
@@ -1727,6 +2022,7 @@ def pit_backtest(days_back=14, use_recent=True, use_lines=True,
         # The share of your disagreement with the line that actually shows up
         # in results. This is the defensible model weight for the board.
         out["suggested_model_weight"] = float(clamp(out["edge_slope"], 0.0, 1.0))
+        out.update(_edge_significance(edge, dev))
     return out
 
 
@@ -2018,6 +2314,7 @@ def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
         out["edge_slope"] = float(np.polyfit(edge, dev, 1)[0])
         out["edge_corr"] = float(np.corrcoef(edge, dev)[0, 1])
         out["suggested_model_weight"] = float(clamp(out["edge_slope"], 0.0, 1.0))
+        out.update(_edge_significance(edge, dev))
         # what that edge slope is worth at -110, given the residual spread
         from math import erf, sqrt
         b = out["edge_slope"]
@@ -2026,6 +2323,9 @@ def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
         winp = 0.5 * (1 + erf(z / sqrt(2)))
         out["implied_win_rate"] = float(winp)
         out["implied_ev"] = float(winp * (100 / 110) - (1 - winp))
+        # Two-standard-error range on the win rate implied by the slope.
+        for tag, bb in (("lo", b - 2 * out["edge_slope_se"]), ("hi", b + 2 * out["edge_slope_se"])):
+            out[f"win_rate_{tag}"] = float(0.5 * (1 + erf((bb / sd) / sqrt(2))))
     return out
 
 
@@ -2094,8 +2394,11 @@ def slate_rows(candidates, totals_payload):
             row["park"] = 1.0
         tm = None
         try:
-            ev = match_event(totals_payload.get("events", []) or [], 
-                             {"Away": c.get("away"), "Home": c.get("home")})
+            # Pass the start time: without GameDate, game_state() parses NaT,
+            # falls through to "LIVE", and every totals event failed to match.
+            ev = match_event(totals_payload.get("events", []) or [],
+                             {"Away": c.get("away"), "Home": c.get("home"),
+                              "GameDate": (c.get("model_row") or {}).get("GameDate")})
             tm = totals_market(ev) if ev else None
         except Exception:
             tm = None
@@ -2413,13 +2716,17 @@ def render_diagnostics():
             else:
                 for _k, _label in (("platoon_ok", "Platoon splits (vs L / vs R)"),
                                    ("bullpen_ok", "Bullpen split"),
-                                   ("pit_bullpen_dates_ok", "Point-in-time bullpen dates")):
+                                   ("pit_bullpen_dates_ok", "Point-in-time bullpen dates"),
+                                   ("pen_fatigue_ok", "Bullpen fatigue (box scores)"),
+                                   ("hitter_splits_ok", "Hitter platoon splits")):
                     (st.success if _dsc[_k] else st.error)(
                         f"{_label}: {'OK' if _dsc[_k] else 'FAILED'}")
                 st.caption(
                     f"{_dsc['team']}: overall {_dsc['overall_PA']:.0f} PA = "
                     f"vs L {_dsc['vsL_PA']:.0f} + vs R {_dsc['vsR_PA']:.0f}; "
-                    f"bullpen IP {_dsc.get('bullpen_IP') or 0:.1f}")
+                    f"bullpen IP {_dsc.get('bullpen_IP') or 0:.1f}; relievers in last "
+                    f"box score {_dsc.get('pen_relievers_seen', 0)}; tired tonight: "
+                    f"{_dsc.get('pen_tired') or 'none'}")
 
 
 
@@ -2667,12 +2974,22 @@ def render_diagnostics():
                 st.caption(f"Matched on {_fr['n_with_line']} games. Suggested model "
                            f"weight: {_fr.get('suggested_model_weight', 0):.2f}")
 
-                if _fr["implied_ev"] > 0.01:
+                if "win_rate_lo" in _fr:
+                    st.caption(
+                        f"Win-rate range (±2 SE): {_fr['win_rate_lo']*100:.1f}% – "
+                        f"{_fr['win_rate_hi']*100:.1f}%. Break-even at -110 is 52.4%. "
+                        f"Edge t-stat {_fr.get('edge_t', 0):.2f} (needs 2.0).")
+                if _fr["implied_ev"] > 0.01 and _fr.get("edge_t", 0) >= 2.0:
                     st.success(
                         f"Implied EV {_fr['implied_ev']*100:+.1f}% per bet at "
                         f"-110. This is the first positive signal in the "
                         f"project. Confirm on a second window before betting."
                     )
+                elif _fr["implied_ev"] > 0.01:
+                    st.warning(
+                        f"Point estimate is positive ({_fr['implied_ev']*100:+.1f}% "
+                        f"EV) but not distinguishable from zero at this sample "
+                        f"size. Not a signal.")
                 elif _fr["edge_corr"] < 0.10:
                     st.error(
                         f"Edge correlation {_fr['edge_corr']:.2f} -- no better "
@@ -2772,7 +3089,7 @@ def render_diagnostics():
                            f"model weight: {_pr.get('suggested_model_weight', 0):.2f} "
                            f"(currently {TOTALS_MODEL_WEIGHT:.2f})")
 
-                if _pr["mae_gap"] < -0.05:
+                if _pr["mae_gap"] < -0.05 and _pr.get("edge_t", 0) >= 2.0:
                     st.success(
                         f"Model beats the closing line by {abs(_pr['mae_gap']):.2f} "
                         "runs of MAE. That is the first real evidence of an edge. "
@@ -2815,7 +3132,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.3.0-AUDIT-FIXES"
+APP_VERSION = "3.7.1-DATA-STATUS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -3405,6 +3722,123 @@ def totals_market(event):
             "market_mean": float(market_mean), "my_book": bool(mine)}
 
 
+# --- fair prices from the market ---------------------------------------------
+# The model has no edge (see backtests), so the Prices page bets the only other
+# thing that can be wrong: 734's number. "Fair" is the market's no-vig price
+# with 734 removed -- Pinnacle alone when the feed carries it (add "eu" to
+# ODDS_REGIONS in secrets; doubles the credit cost), otherwise the median of
+# each book's own no-vig price.
+SHARP_BOOK_KEYS = ("pinnacle",)
+PRICE_MIN_EV_DEFAULT = 0.02
+
+
+def _price_regions():
+    try:
+        return str(st.secrets.get("ODDS_REGIONS", "us") or "us")
+    except Exception:
+        return "us"
+
+
+def market_fair_ml(event):
+    """Fair win probabilities (away, home) with 734 excluded, plus 734's own
+    prices if the feed carries them."""
+    if not event:
+        return None
+    ak, hk = team_key(event.get("away_team")), team_key(event.get("home_team"))
+    per, sharp, mine = [], None, None
+    for book in event.get("bookmakers", []) or []:
+        px = {}
+        for m in book.get("markets", []) or []:
+            if m.get("key") != "h2h":
+                continue
+            for o in m.get("outcomes", []) or []:
+                p = valid_odds(o.get("price"))
+                if p is not None:
+                    px[team_key(o.get("name"))] = p
+        if ak not in px or hk not in px:
+            continue
+        if _is_my_book(book):
+            mine = {"away": px[ak], "home": px[hk]}
+            continue
+        pa, ph = no_vig_pair(px[ak], px[hk])
+        if pa is None:
+            continue
+        per.append(pa)
+        if str(book.get("key", "")).lower() in SHARP_BOOK_KEYS:
+            sharp = (pa, book.get("title") or book.get("key"))
+    if not per:
+        return None
+    if sharp:
+        pa, src = sharp[0], sharp[1]
+    else:
+        pa, src = float(statistics.median(per)), f"{len(per)}-book consensus"
+    return {"away": float(pa), "home": float(1.0 - pa), "source": src,
+            "books": len(per), "mine": mine}
+
+
+def market_fair_total(event):
+    """Market-implied mean total with 734 excluded. Each book's main line is
+    converted to an implied mean, so books hanging different numbers combine
+    correctly. Also returns the consensus line and 734's own quote."""
+    if not event:
+        return None
+    means, points, sharp, mine = [], [], None, None
+    for book in event.get("bookmakers", []) or []:
+        by_point = {}
+        for m in book.get("markets", []) or []:
+            if m.get("key") != "totals":
+                continue
+            for o in m.get("outcomes", []) or []:
+                name = str(o.get("name", "")).strip().lower()
+                p = valid_odds(o.get("price"))
+                try:
+                    pt = float(o.get("point"))
+                except Exception:
+                    continue
+                if p is not None and name in ("over", "under"):
+                    by_point.setdefault(pt, {})[name] = p
+        pairs = [(pt, d["over"], d["under"]) for pt, d in by_point.items()
+                 if "over" in d and "under" in d]
+        if not pairs:
+            continue
+        def _pover(row):
+            po, _ = no_vig_pair(row[1], row[2])
+            return po if po is not None else 0.5
+        pt, ov, un = min(pairs, key=lambda r: abs(_pover(r) - 0.5))
+        if _is_my_book(book):
+            mine = {"point": pt, "over": ov, "under": un}
+            continue
+        po = _pover((pt, ov, un))
+        mu = market_implied_total_mean(pt, po)
+        means.append(mu)
+        points.append(pt)
+        if str(book.get("key", "")).lower() in SHARP_BOOK_KEYS:
+            sharp = (mu, book.get("title") or book.get("key"))
+    if not means:
+        return None
+    if sharp:
+        mean, src = sharp
+    else:
+        mean, src = float(statistics.median(means)), f"{len(means)}-book consensus"
+    return {"mean": float(mean), "line": _consensus_point(points), "source": src,
+            "books": len(means), "mine": mine}
+
+
+def min_price_for_ev(p_win, p_lose, min_ev):
+    """Worst American price that still clears min_ev. Pushes (p_win + p_lose
+    < 1) are handled: a push returns the stake."""
+    if p_win <= 0:
+        return None
+    d = 1.0 + (min_ev + p_lose) / p_win          # required decimal odds
+    if d >= 2.0:
+        return int(math.ceil(100.0 * (d - 1.0)))
+    return int(math.ceil(-100.0 / (d - 1.0)))
+
+
+def _fmt_am(o):
+    return f"{int(o):+d}" if o is not None else "—"
+
+
 def poisson_total_probs(lam,line):
     lam=max(.1,float(lam)); line=float(line); probs=[]; p=math.exp(-lam); probs.append(p)
     for k in range(1,40): p=p*lam/k; probs.append(p)
@@ -3427,7 +3861,11 @@ def total_fair_ml(win,lose):
 # so the market gets most of the weight until a clean point-in-time backtest
 # says otherwise. Both backtests now report suggested_model_weight (the edge
 # slope, clipped to 0-1) -- set this from that number.
-TOTALS_MODEL_WEIGHT = 0.25
+# Totals picks are ON by choice for relative ranking. The clean backtest found
+# no edge (edge corr -0.03). 0.35 matches its projection slope (0.34): only
+# about a third of the model's deviation from average shows up in results, so
+# the model's disagreement with the market is shrunk accordingly.
+TOTALS_MODEL_WEIGHT = 0.35
 TOTALS_RESIDUAL_SD = 3.92      # no longer used for pricing; kept for diagnostics
 TOTALS_MAX_OFFICIAL = 3
 
@@ -3899,14 +4337,17 @@ def moneyline_market(event):
 # Interim, same reasoning as TOTALS_MODEL_WEIGHT. The old 0.60-0.70 came from a
 # research run that predates the 0.02 edge-correlation result, and the moneyline
 # has never been revalidated. Raise only on backtest evidence.
-ML_MODEL_WEIGHT = 0.25
+ML_MODEL_WEIGHT = 0.70
+# Moneyline picks are ON by choice. The ML has never been tested against
+# closing lines (the totals model failed that test). Every BET / BEST BET is
+# auto-logged to the tracker, so results and CLV will say whether it works.
 
 
 def model_alpha(confidence, lineup_confirmed):
-    a = ML_MODEL_WEIGHT if lineup_confirmed else ML_MODEL_WEIGHT * 0.8
-    if confidence < 70: a *= 0.6
-    elif confidence < 80: a *= 0.8
-    return clamp(a, 0.0, 1.0)
+    a = ML_MODEL_WEIGHT if lineup_confirmed else ML_MODEL_WEIGHT - 0.10
+    if confidence < 70: a -= 0.10
+    elif confidence < 80: a -= 0.05
+    return clamp(a, min(0.45, ML_MODEL_WEIGHT), ML_MODEL_WEIGHT)
 
 
 def thresholds(odds):
@@ -4597,6 +5038,119 @@ def tracker_results_for_date(date_text):
             }
     return out
 
+TOP_PICKS_TRACKED = 3
+
+
+def _data_status_line(cx):
+    """One-line health check per game: did the new data actually load?"""
+    r = cx.get("model_row") or {}
+    def pen(side):
+        return "✓" if r.get(f"{side}_Pen_Fatigue_OK") else "✗ season avg"
+    def splits(side):
+        if not r.get(f"{side}_Lineup_Used"):
+            return "waiting on lineup"
+        need = int(r.get(f"{side}_Splits_Needed") or 0)
+        got = int(r.get(f"{side}_Splits_Found") or 0)
+        if not need:
+            return "—"
+        return f"{got}/{need}" + ("" if got == need else " ✗" if got == 0 else "")
+    tired = [t for t in (r.get("Away_Bullpen_Tired"), r.get("Home_Bullpen_Tired")) if t]
+    line = (f'Data: pen fatigue {cx["away"]} {pen("Away")} · {cx["home"]} {pen("Home")} '
+            f'• hitter splits {cx["away"]} {splits("Away")} · {cx["home"]} {splits("Home")}')
+    if tired:
+        line += f' • tired: {"; ".join(tired)}'
+    return line
+
+
+def relative_picks(candidates, games, model_df, totals_payload):
+    """Every priced game's best moneyline side and best total side, ranked by
+    how far the model sits from the fair (no-vig) market probability.
+
+    Relative, not absolute: the slate always has a #1, even on a day with no
+    real edge anywhere. Both markets use the same yardstick (probability
+    points), so ML and totals compete for the same slots.
+    """
+    out = []
+    game_map = {g.get("GamePk"): g for g in games or []}
+    for cx in candidates or []:
+        if not cx.get("pregame"):
+            continue
+        if cx.get("market_available"):
+            sides = [z for z in cx.get("all", [])
+                     if z.get("market_prob") is not None and z.get("odds") is not None]
+            if sides:
+                z = max(sides, key=lambda z: z["prob"] - z["market_prob"])
+                out.append({
+                    "cx": cx, "market": "MONEYLINE", "label": "ML",
+                    "side": z["team"], "pick": z["team"], "line": None,
+                    "main": f'{z["team"]} ML {z["odds"]:+d}',
+                    "odds": z["odds"], "book": z["book"],
+                    "prob": float(z["prob"]), "fair": float(z["market_prob"]),
+                    "edge": float(z["prob"] - z["market_prob"]), "ev": float(z["ev"]),
+                    "weight": cx.get("alpha"),
+                })
+        if totals_payload and model_df is not None and not model_df.empty:
+            mr = model_df.loc[model_df["GamePk"] == cx["GamePk"]]
+            g = game_map.get(cx["GamePk"])
+            if mr.empty or not g:
+                continue
+            tm = totals_market(match_event(totals_payload.get("events", []) or [], g))
+            if not tm:
+                continue
+            ctx = totals_projection(mr.iloc[0].to_dict())
+            tp = build_total_pick(float(ctx["Projected_Total"]), tm)
+            if not tp:
+                continue
+            over = tp["side"] == "OVER"
+            pw, pl = (tp["over_prob"], tp["under_prob"]) if over else (tp["under_prob"], tp["over_prob"])
+            out.append({
+                "cx": cx, "market": "TOTAL", "label": "TOTAL",
+                "side": tp["side"], "pick": f'{tp["side"]} {tp["market_total"]:g}',
+                "line": tp["market_total"],
+                "main": f'{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}',
+                "odds": tp["odds"], "book": tp["book"],
+                "prob": float(pw / (pw + pl)) if (pw + pl) > 0 else 0.5,
+                "fair": float(tm["over_market_prob"] if over else tm["under_market_prob"]),
+                "edge": float(tp["edge"]), "ev": float(tp["ev"]),
+                "weight": TOTALS_MODEL_WEIGHT,
+            })
+    out.sort(key=lambda p: -p["edge"])
+    for i, p in enumerate(out, start=1):
+        p["rank"] = i
+    return out
+
+
+def track_top_picks(picks, games, slate_date):
+    """Freeze each top-N pick at its price once its game's lineups are in."""
+    game_map = _game_lookup(games)
+    added = 0
+    for p in picks[:TOP_PICKS_TRACKED]:
+        cx = p["cx"]
+        if p["edge"] <= 0:
+            continue
+        qualified, _ = tracker_qualification(cx, p["market"])
+        if not qualified:
+            continue
+        g = game_map.get(str(cx.get("GamePk")), {})
+        w = p.get("weight")
+        row = {
+            "Record_Key": f'{cx.get("GamePk")}|{p["market"]}',
+            "Logged_At_ET": _now_et_iso(), "Slate_Date": str(slate_date),
+            "GamePk": cx.get("GamePk"), "Game": cx.get("game"),
+            "Start_Time_UTC": g.get("GameDate"), "Market": p["market"],
+            "Pick": p["pick"], "Side": p["side"], "Market_Line": p["line"],
+            "Odds": p["odds"], "Book": p["book"], "Grade": "TOP PICK",
+            "Model_Probability": p["prob"], "Edge": p["edge"], "EV": p["ev"],
+            "Fair_Line": fair_ml(p["prob"]),
+            "Model_Weight": w, "Market_Weight": (1 - float(w)) if w is not None else None,
+            "Lineups_Confirmed": True, "Model_Confidence": cx.get("confidence"),
+            "App_Version": APP_VERSION, "Model_Version": MODEL_VERSION,
+            "Result": "PENDING", "Units": 0.0,
+        }
+        added += int(_append_tracker_row(row))
+    return added
+
+
 def _american_profit(odds):
     try:
         o = float(odds)
@@ -4607,16 +5161,16 @@ def _american_profit(odds):
 CLV_WINDOW_HOURS = 3.0
 
 
-def update_closing_prices(candidates, games, totals_payload):
+def update_closing_prices(ml_events, total_events, games):
     """Record the closing price and CLV for every pending pregame bet.
 
     Overwrites the close fields on each refresh inside CLV_WINDOW_HOURS of
-    first pitch; the last write before the game starts is the close.
+    first pitch; the last write before the game starts is the close. Runs
+    whenever odds are loaded on the Board or the Prices page.
 
-    CLV = fair (no-vig) closing probability of your side at YOUR logged line,
-          minus the break-even probability of the price you logged.
-    Positive means you beat the close. For totals, a moved line is handled by
-    re-pricing the closing market at your original number.
+    CLV = fair (no-vig, 734 excluded) closing probability of your side at
+          YOUR logged line, minus the break-even probability of your price.
+    Positive means you beat the close.
     """
     last = st.session_state.get("_clv_last_check")
     now = pd.Timestamp.now(tz="UTC")
@@ -4630,7 +5184,6 @@ def update_closing_prices(candidates, games, totals_payload):
     pend = df["Result"].fillna("PENDING").astype(str).eq("PENDING")
     if not pend.any():
         return 0
-    cand_map = {str(c.get("GamePk")): c for c in candidates or []}
     game_map = _game_lookup(games)
     changed = 0
     for i in df.index[pend]:
@@ -4648,32 +5201,31 @@ def update_closing_prices(candidates, games, totals_payload):
         if bet_odds is None:
             continue
         market = str(df.at[i, "Market"]).upper()
-        close_line = None
+        close_line, close_odds = None, None
         if market == "MONEYLINE":
-            c = cand_map.get(gp)
-            if not c or not c.get("market_available"):
+            fm = market_fair_ml(match_event(ml_events or [], g))
+            if not fm:
                 continue
-            side = next((z for z in c.get("all", [])
-                         if team_key(z.get("team")) == team_key(df.at[i, "Pick"])), None)
-            if not side or side.get("market_prob") is None:
-                continue
-            close_odds, fair = side.get("odds"), float(side["market_prob"])
+            is_away = team_key(df.at[i, "Pick"]) == team_key(g.get("Away"))
+            fair = fm["away"] if is_away else fm["home"]
+            if fm.get("mine"):
+                close_odds = fm["mine"]["away" if is_away else "home"]
         elif market == "TOTAL":
-            if not totals_payload:
-                continue
-            tm = totals_market(match_event(totals_payload.get("events", []), g))
-            if not tm:
+            ft = market_fair_total(match_event(total_events or [], g))
+            if not ft:
                 continue
             try:
                 bet_line = float(df.at[i, "Market_Line"])
             except Exception:
                 continue
-            o, u, _ = _total_side_probs(tm["market_mean"], bet_line)
+            o, u, _ = _total_side_probs(ft["mean"], bet_line)
             p_over = o / (o + u) if (o + u) > 0 else 0.5
             is_over = str(df.at[i, "Side"]).upper() == "OVER"
             fair = p_over if is_over else 1.0 - p_over
-            close_odds = tm["over_best"] if is_over else tm["under_best"]
-            close_line = tm["total"]
+            close_line = ft.get("line")
+            mine = ft.get("mine")
+            if mine and abs(mine["point"] - bet_line) < 1e-9:
+                close_odds = mine["over" if is_over else "under"]
         else:
             continue
         clv = fair - implied_prob(bet_odds)
@@ -4855,7 +5407,11 @@ def tracker_split_table(df):
     if df is None or df.empty:
         return pd.DataFrame()
     rows = []
-    for market, g in df.groupby("Market", dropna=False):
+    _grade = df["Grade"].fillna("").astype(str) if "Grade" in df.columns else pd.Series("", index=df.index)
+    _prefix = np.where(_grade.eq("PRICE EDGE"), "734 PRICE • ",
+                       np.where(_grade.eq("OWN PICK"), "OWN PICK • ", ""))
+    df = df.assign(_group=pd.Series(_prefix, index=df.index) + df["Market"].fillna("").astype(str))
+    for market, g in df.groupby("_group", dropna=False):
         s = tracker_performance_summary(g)
         record = f'{s["wins"]}-{s["losses"]}' + (f'-{s["pushes"]}P' if s["pushes"] else "")
         rows.append({
@@ -5715,6 +6271,182 @@ def render_auto_slate_status(games, slate_date):
         unsafe_allow_html=True,
     )
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_price_board(api_key, regions):
+    """One call: moneylines and totals for the whole slate."""
+    if not api_key:
+        return {"events": [], "error": "ODDS_API_KEY is not configured.", "quota": {}}
+    try:
+        r = requests.get(
+            f"{ODDS_API_BASE}/sports/{ODDS_SPORT_KEY}/odds",
+            params={"apiKey": api_key, "regions": regions, "markets": "h2h,totals",
+                    "oddsFormat": "american", "dateFormat": "iso"}, timeout=25)
+    except requests.RequestException:
+        return {"events": [], "error": "Could not reach The Odds API.", "quota": {}}
+    quota = {"remaining": r.headers.get("x-requests-remaining"),
+             "used": r.headers.get("x-requests-used")}
+    if r.status_code >= 400:
+        return {"events": [], "error": f"The Odds API returned HTTP {r.status_code}.",
+                "quota": quota}
+    try:
+        ev = r.json()
+    except Exception:
+        ev = []
+    return {"events": ev if isinstance(ev, list) else [], "error": "", "quota": quota}
+
+
+def render_price_check_page(games, slate_date):
+    st.markdown('<div class="board-head"><span>734 PRICE CHECK</span>'
+                '<b>Bet the price, not the model</b></div>', unsafe_allow_html=True)
+    st.caption(
+        "Fair = the market's no-vig price with 734 removed. If 734 offers the "
+        "target price or better, the bet is positive EV against the market. "
+        "Log what you bet: closing-line value on those bets tells you within a "
+        "few weeks whether 734 really lags.")
+    min_ev = st.slider("Minimum edge (EV %)", 0.5, 5.0,
+                       PRICE_MIN_EV_DEFAULT * 100, 0.5, key="price_min_ev") / 100.0
+
+    api_key = st.secrets.get("ODDS_API_KEY", "")
+    regions = _price_regions()
+    cost = 2 * len([x for x in regions.split(",") if x.strip()])
+    if st.button(f"Load market ({cost} credits)", key="price_load",
+                 use_container_width=True):
+        st.session_state["price_payload"] = fetch_price_board(api_key, regions)
+        st.session_state["price_loaded_at"] = now_et().strftime("%-I:%M %p ET")
+    payload = st.session_state.get("price_payload")
+    if not payload:
+        st.info("Load the market to see fair prices and targets.")
+        return
+    if payload.get("error"):
+        st.error(payload["error"])
+        return
+    events = payload.get("events", [])
+    st.caption(f"Loaded {st.session_state.get('price_loaded_at', '')} • "
+               f"credits left {payload.get('quota', {}).get('remaining')} • "
+               f"regions {regions}")
+    try:
+        update_closing_prices(events, events, games)
+    except Exception:
+        pass
+
+    pre = sorted([g for g in games if is_pregame(g)],
+                 key=lambda g: str(g.get("GameDate") or ""))
+    rows = []
+    for g in pre:
+        ev = match_event(events, g)
+        if ev:
+            rows.append((g, market_fair_ml(ev), market_fair_total(ev)))
+    if not rows:
+        st.info("No upcoming games matched the market feed.")
+        return
+    if not any((ml and ml.get("mine")) or (t and t.get("mine")) for _, ml, t in rows):
+        st.caption("734 Games is not in the feed, so compare the targets below "
+                   "against the 734 app by eye.")
+
+    # ---- slate targets
+    for g, ml, tot in rows:
+        a, h = _abbr(g.get("Away")), _abbr(g.get("Home"))
+        lines = [f"**{g.get('TimeLabel', '')} • {a} @ {h}**"]
+        if ml:
+            parts = []
+            for side, abbr in (("away", a), ("home", h)):
+                p = ml[side]
+                need = min_price_for_ev(p, 1 - p, min_ev)
+                txt = f"{abbr} fair {fair_ml(p):+d} → bet **{_fmt_am(need)}** or better"
+                mine = (ml.get("mine") or {}).get(side)
+                if mine is not None:
+                    evv = expected_value(p, mine)
+                    txt += f" · 734 {mine:+d} {'✅' if evv >= min_ev else '✗'}"
+                parts.append(txt)
+            lines.append("ML: " + " | ".join(parts))
+        if tot and tot.get("line") is not None:
+            L = tot["line"]
+            o, u, _ = _total_side_probs(tot["mean"], L)
+            parts = []
+            for side, pw, pl in (("Over", o, u), ("Under", u, o)):
+                need = min_price_for_ev(pw, pl, min_ev)
+                parts.append(f"{side} {L:g} fair {fair_ml(pw / (pw + pl)):+d} → bet "
+                             f"**{_fmt_am(need)}** or better")
+            mine = tot.get("mine")
+            if mine:
+                o2, u2, _ = _total_side_probs(tot["mean"], mine["point"])
+                ev_o = totals_ev(o2, u2, mine["over"])
+                ev_u = totals_ev(u2, o2, mine["under"])
+                parts.append(f"734 {mine['point']:g}: O {mine['over']:+d} "
+                             f"{'✅' if ev_o >= min_ev else '✗'} / U {mine['under']:+d} "
+                             f"{'✅' if ev_u >= min_ev else '✗'}")
+            lines.append("Total: " + " | ".join(parts))
+        src = (ml or tot or {}).get("source", "")
+        lines.append(f"<span style='opacity:.6;font-size:.85em'>fair from {src}</span>")
+        st.markdown("  \n".join(lines), unsafe_allow_html=True)
+        st.markdown("---")
+
+    # ---- check & log one price
+    st.markdown("#### Check & log a 734 price")
+    opts = {f"{g.get('TimeLabel', '')} • {g.get('Away')} @ {g.get('Home')}": i
+            for i, (g, _, _) in enumerate(rows)}
+    sel = st.selectbox("Game", list(opts.keys()), key="price_game")
+    g, ml, tot = rows[opts[sel]]
+    choices = []
+    if ml:
+        choices += [f"{g.get('Away')} ML", f"{g.get('Home')} ML"]
+    if tot and tot.get("line") is not None:
+        choices += ["Over", "Under"]
+    if not choices:
+        st.info("No market for this game yet.")
+        return
+    bet = st.radio("Bet", choices, horizontal=True, key="price_side")
+    line = None
+    if bet in ("Over", "Under"):
+        line = st.number_input("734 total", value=float(tot["line"]), step=0.5,
+                               key=f"price_line_{g.get('GamePk')}")
+    odds_in = st.number_input("734 price (American)", value=-110, step=1,
+                              key="price_odds")
+    o_price = valid_odds(odds_in)
+    if o_price is None:
+        st.warning("Enter a valid American price, e.g. -115 or +120.")
+        return
+
+    if bet.endswith(" ML"):
+        team = g.get("Away") if bet == f"{g.get('Away')} ML" else g.get("Home")
+        p_win = ml["away"] if team == g.get("Away") else ml["home"]
+        p_lose = 1.0 - p_win
+        market, side, pick, mline = "MONEYLINE", team, team, None
+    else:
+        o, u, _ = _total_side_probs(tot["mean"], line)
+        p_win, p_lose = (o, u) if bet == "Over" else (u, o)
+        market, side, mline = "TOTAL", bet.upper(), float(line)
+        pick = f"{side} {line:g}"
+    ev = totals_ev(p_win, p_lose, o_price)
+    fair2 = p_win / (p_win + p_lose)
+    need = min_price_for_ev(p_win, p_lose, min_ev)
+    qualifies = ev >= min_ev
+    msg = (f"EV {ev*100:+.1f}% • fair {fair_ml(fair2):+d} • target "
+           f"{_fmt_am(need)} or better")
+    (st.success if qualifies else st.error)(("BET — " if qualifies else "PASS — ") + msg)
+
+    if st.button("Log this bet", key="price_log", use_container_width=True):
+        row = {
+            "Record_Key": f"{g.get('GamePk')}|{market}|{side}|{mline}|PRICE",
+            "Logged_At_ET": _now_et_iso(), "Slate_Date": str(slate_date),
+            "GamePk": g.get("GamePk"), "Game": f"{g.get('Away')} @ {g.get('Home')}",
+            "Start_Time_UTC": g.get("GameDate"), "Market": market,
+            "Pick": pick, "Side": side, "Market_Line": mline,
+            "Odds": o_price, "Book": "734 Games",
+            "Grade": "PRICE EDGE" if qualifies else "OWN PICK",
+            "Model_Probability": fair2, "Edge": fair2 - implied_prob(o_price),
+            "EV": ev, "Fair_Line": fair_ml(fair2),
+            "Model_Weight": 0.0, "Market_Weight": 1.0,
+            "App_Version": APP_VERSION, "Model_Version": MODEL_VERSION,
+            "Result": "PENDING", "Units": 0.0,
+        }
+        if _append_tracker_row(row):
+            st.success("Logged. CLV will fill in if you reload the market "
+                       "within 3 hours of first pitch.")
+        else:
+            st.info("Already logged.")
+
+
 def render_account_page():
     # Decorative 477 KB base64 logo removed -- it was 56% of the entire file
     # and rendered only on this settings page, directly above the text header
@@ -5909,20 +6641,23 @@ fresh_scoreboard = fetch_fresh_scoreboard(slate_date)
 # that triggered it. Requires candidates, so it only runs on the Board. Grading
 # of already-tracked bets is independent and always runs.
 if _needs_model:
-    _new_ml = track_current_official_recommendations(candidates, games, slate_date)
-    _new_totals = track_current_total_recommendations(
-        candidates, games, model_df, totals_payload, slate_date)
+    _slate_picks = relative_picks(
+        candidates, games, model_df,
+        totals_payload if st.session_state.get("totals_loaded") else None)
+    _new_ml = track_top_picks(_slate_picks, games, slate_date)
+    _new_totals = 0
     try:
         update_closing_prices(
-            candidates, games,
-            totals_payload if st.session_state.get("totals_loaded") else None)
+            odds_payload.get("events", []),
+            totals_payload.get("events", []) if st.session_state.get("totals_loaded") else [],
+            games)
     except Exception:
         pass   # CLV capture must never break the board
 else:
     _new_ml = _new_totals = 0
 _graded_now = grade_tracker(force=False)
 if _new_ml or _new_totals:
-    st.toast(f"Tracked {_new_ml + _new_totals} new official model recommendation(s).")
+    st.toast(f"Tracked {_new_ml + _new_totals} new top pick(s).")
 if _graded_now:
     st.toast(f"Auto-graded {_graded_now} completed recommendation(s).")
 
@@ -5965,10 +6700,15 @@ else:
             st.rerun()
 
     _ninth_nav_button("Board", "board")
+    _ninth_nav_button("Prices", "prices")
     _ninth_nav_button("Live", "live")
     _ninth_nav_button("Tracker", "tracker")
     _ninth_nav_button("Bets", "bets")
     _ninth_nav_button("More", "more")
+
+    if main_view == "Prices":
+        render_price_check_page(games, slate_date)
+        st.stop()
 
     if main_view == "Live":
         render_auto_live_page(games, slate_date)
@@ -6258,62 +6998,37 @@ else:
                     tp = build_total_pick(float(ctx["Projected_Total"]), tm) if tm else None
                     total_map[cx["GamePk"]] = (tp, ctx)
 
-            # Top Plays = strongest actionable markets only.
-            # Upcoming Games below stays purely chronological for easy scanning.
-            top_plays = []
-            grade_rank = {"BEST BET":3, "BET":2, "LEAN":1}
-
-            for cx in upcoming:
-                b0 = cx.get("best") or {}
-                if cx.get("market_available") and b0.get("selection") in grade_rank:
-                    top_plays.append({
-                        "game": cx,
-                        "market": "ML",
-                        "grade": b0.get("selection"),
-                        "main": f'{b0.get("team")} ML {b0.get("odds"):+d}',
-                        "book": b0.get("book"),
-                        "edge": float(b0.get("edge") or 0),
-                        "ev": float(b0.get("ev") or 0),
-                    })
-
-                tp0 = (total_map.get(cx["GamePk"]) or (None,None))[0]
-                if tp0 and tp0.get("grade") in grade_rank:
-                    top_plays.append({
-                        "game": cx,
-                        "market": "TOTAL",
-                        "grade": tp0.get("grade"),
-                        "main": f'{tp0.get("side")} {tp0.get("market_total"):.1f} {tp0.get("odds"):+d}',
-                        "book": tp0.get("book"),
-                        "edge": float(tp0.get("edge") or 0),
-                        "ev": float(tp0.get("ev") or 0),
-                    })
-
-            top_plays = sorted(
-                top_plays,
-                key=lambda p: (
-                    -grade_rank.get(p["grade"], 0),
-                    -p["edge"],
-                    -p["ev"],
-                    start_sort(p["game"]),
-                ),
-            )
+            # Top Plays = the slate's strongest model opinions, ranked relative
+            # to each other across ML and totals.
+            _picks = relative_picks(
+                upcoming, games, model_df,
+                totals_payload if st.session_state.get("totals_loaded") else None)
 
             st.markdown('<div class="kicker">Top Plays</div>', unsafe_allow_html=True)
-            if top_plays:
-                for n, p in enumerate(top_plays[:5], start=1):
-                    gx = p["game"]
+            st.caption(
+                f"Ranked by how far the model sits from the fair market price, "
+                f"moneylines and totals together. The top {TOP_PICKS_TRACKED} are "
+                f"tracked automatically once lineups post. These are the model's "
+                f"strongest opinions, not proven edges; check 734's price on the "
+                f"Prices page before betting.")
+            if _picks:
+                for p in _picks[:5]:
+                    gx = p["cx"]
+                    tag = "TOP PICK" if p["rank"] <= TOP_PICKS_TRACKED else "NEXT"
                     st.markdown(
                         f'<div class="top-play-card">'
-                        f'<div class="top-play-rank">#{n} • {p["grade"]} • {p["market"]} • {gx["time"]}</div>'
+                        f'<div class="top-play-rank">#{p["rank"]} • {tag} • {p["label"]} • {gx["time"]}</div>'
                         f'<div class="top-play-main">{p["main"]}</div>'
-                        f'<div class="top-play-sub">{gx["away"]} @ {gx["home"]} • {p["book"]} • Edge {p["edge"]*100:+.1f}% • EV {p["ev"]*100:+.1f}%</div>'
+                        f'<div class="top-play-sub">{gx["away"]} @ {gx["home"]} • {p["book"]} • '
+                        f'Model {p["prob"]*100:.1f}% vs fair {p["fair"]*100:.1f}% • '
+                        f'EV {p["ev"]*100:+.1f}%</div>'
                         f'</div>',
                         unsafe_allow_html=True,
                     )
             elif st.session_state.get("odds_loaded") or st.session_state.get("totals_loaded"):
-                st.caption("No BET / BEST BET / LEAN plays currently qualify.")
+                st.caption("No priced games to rank yet.")
             else:
-                st.caption("Update Full Slate Odds to rank the strongest current plays.")
+                st.caption("Load Full Slate Lines to rank today's picks.")
 
             st.markdown('<div class="kicker">Upcoming Games — Chronological</div>', unsafe_allow_html=True)
 
@@ -6369,6 +7084,7 @@ else:
                     f'<div class="combo-match">{cx["away"]} @ {cx["home"]}</div>'
                     f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
                     f'<div class="lineup-feed-diag">{lineup_diag}</div>'
+                    f'<div class="lineup-feed-diag">{_data_status_line(cx)}</div>'
                     f'<div class="tracker-gate-diag">{tracker_text}</div></div></div>'
                     f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
                     f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {grade_class(ml_grade)}">{ml_grade}</div></div>'
