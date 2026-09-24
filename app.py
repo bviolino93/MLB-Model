@@ -3136,7 +3136,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.8.4-TRACKER-CSS"
+APP_VERSION = "3.8.6-CURRENT-ONLY"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -4918,101 +4918,11 @@ def tracker_candidate_status(candidate, market_type):
     }
 
 
-def track_current_official_recommendations(candidates, games, slate_date):
-    """Freeze every official ML BET / BEST BET at its first qualifying price."""
-    game_map = _game_lookup(games)
-    added = 0
-    for x in candidates:
-        qualified, _reason = tracker_qualification(x, "MONEYLINE")
-        if not qualified or not x.get("market_available"):
-            continue
-        b = x.get("best") or {}
-        if b.get("selection") not in ("BET", "BEST BET"):
-            continue
-        g = game_map.get(str(x.get("GamePk")), {})
-        row = {
-            "Record_Key": f'{x.get("GamePk")}|MONEYLINE',
-            "Logged_At_ET": _now_et_iso(),
-            "Slate_Date": str(slate_date),
-            "GamePk": x.get("GamePk"),
-            "Game": x.get("game"),
-            "Start_Time_UTC": g.get("GameDate"),
-            "Market": "MONEYLINE",
-            "Pick": b.get("team"),
-            "Side": b.get("team"),
-            "Market_Line": None,
-            "Odds": b.get("odds"),
-            "Book": b.get("book"),
-            "Grade": b.get("selection"),
-            "Model_Probability": b.get("prob"),
-            "Edge": b.get("edge"),
-            "EV": b.get("ev"),
-            "Fair_Line": b.get("fair"),
-            "Model_Weight": x.get("alpha"),
-            "Market_Weight": 1 - float(x.get("alpha", 0)) if x.get("alpha") is not None else None,
-            "Lineups_Confirmed": bool(x.get("lineup_confirmed") or x.get("feed_lineup_confirmed") or int(x.get("lineup_teams_ready") or 0) >= 2),
-            "Model_Confidence": x.get("confidence"),
-            "App_Version": APP_VERSION,
-            "Model_Version": MODEL_VERSION,
-            "Result": "PENDING",
-            "Units": 0.0,
-        }
-        added += int(_append_tracker_row(row))
-    return added
+# The old BET / BEST BET logging functions were removed in 3.8.6. The only
+# things written to the tracker now are TOP PICK (track_top_picks), and the
+# PRICE EDGE / OWN PICK rows you log from the Prices page.
+CURRENT_GRADES = ("TOP PICK", "PRICE EDGE", "OWN PICK")
 
-def track_current_total_recommendations(candidates, games, model_df, totals_payload, slate_date):
-    """Freeze every official totals BET / BEST BET at its first qualifying price."""
-    if not st.session_state.get("totals_loaded") or model_df is None or model_df.empty:
-        return 0
-    added = 0
-    game_map = _game_lookup(games)
-    for x in candidates:
-        qualified, _reason = tracker_qualification(x, "TOTAL")
-        if not qualified:
-            continue
-        mr = model_df.loc[model_df["GamePk"] == x["GamePk"]]
-        if mr.empty:
-            continue
-        g = game_map.get(str(x.get("GamePk")), {})
-        ev = match_event(totals_payload.get("events", []), g) if g else None
-        tm = totals_market(ev)
-        if not tm:
-            continue
-        ctx = engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine, "totals_projection") else {
-            "Projected_Total": x["away_proj"] + x["home_proj"]
-        }
-        tp = build_total_pick(float(ctx["Projected_Total"]), tm)
-        if not tp or tp.get("grade") not in ("BET", "BEST BET"):
-            continue
-        row = {
-            "Record_Key": f'{x.get("GamePk")}|TOTAL',
-            "Logged_At_ET": _now_et_iso(),
-            "Slate_Date": str(slate_date),
-            "GamePk": x.get("GamePk"),
-            "Game": x.get("game"),
-            "Start_Time_UTC": g.get("GameDate"),
-            "Market": "TOTAL",
-            "Pick": f'{tp.get("side")} {tp.get("market_total")}',
-            "Side": tp.get("side"),
-            "Market_Line": tp.get("market_total"),
-            "Odds": tp.get("odds"),
-            "Book": tp.get("book"),
-            "Grade": tp.get("grade"),
-            "Model_Probability": tp.get("prob"),
-            "Edge": tp.get("edge"),
-            "EV": tp.get("ev"),
-            "Fair_Line": None,
-            "Model_Weight": TOTALS_MODEL_WEIGHT,
-            "Market_Weight": 1 - TOTALS_MODEL_WEIGHT,
-            "Lineups_Confirmed": bool(x.get("lineup_confirmed") or x.get("feed_lineup_confirmed") or int(x.get("lineup_teams_ready") or 0) >= 2),
-            "Model_Confidence": x.get("confidence"),
-            "App_Version": APP_VERSION,
-            "Model_Version": MODEL_VERSION,
-            "Result": "PENDING",
-            "Units": 0.0,
-        }
-        added += int(_append_tracker_row(row))
-    return added
 
 @st.cache_data(ttl=120, show_spinner=False)
 def tracker_results_for_date(date_text):
@@ -6555,6 +6465,31 @@ def render_performance_page():
             st.markdown('<div class="kicker">Everything tracked, by type</div>', unsafe_allow_html=True)
             st.dataframe(split, use_container_width=True, hide_index=True)
 
+        _old_mask = (~tracker_df["Grade"].fillna("").astype(str).isin(CURRENT_GRADES)
+                     if "Grade" in tracker_df.columns else pd.Series(False, index=tracker_df.index))
+        _n_old = int(_old_mask.sum())
+        if _n_old:
+            with st.expander(f"Clear old-model bets ({_n_old})", expanded=False):
+                st.caption(
+                    "Removes bets logged by earlier versions of the model "
+                    "(BET / BEST BET / LEAN grades, best-price books). Top picks, "
+                    "734 price bets and your own picks stay. Download the backup "
+                    "first if you want a record.")
+                st.download_button(
+                    "Download old-model bets (backup)",
+                    data=tracker_df[_old_mask].to_csv(index=False).encode("utf-8"),
+                    file_name="ninth_signal_old_model_bets.csv", mime="text/csv",
+                    use_container_width=True, key="old_bets_backup")
+                _confirm = st.checkbox(
+                    f"Yes, permanently remove {_n_old} old-model bet(s)",
+                    key="old_bets_confirm")
+                if st.button("Clear old-model bets", disabled=not _confirm,
+                             use_container_width=True, key="old_bets_clear"):
+                    save_tracker(tracker_df[~_old_mask].reset_index(drop=True))
+                    st.session_state.pop("old_bets_confirm", None)
+                    st.toast(f"Removed {_n_old} old-model bet(s).")
+                    st.rerun()
+
         recent_cols = ["Slate_Date","Game","Market","Pick","Odds","Grade","Result","Units"]
         recent = tracker_df.sort_values(["Slate_Date","Logged_At_ET"], ascending=False)
         st.dataframe(recent[[c for c in recent_cols if c in recent.columns]].head(50), use_container_width=True, hide_index=True)
@@ -6691,6 +6626,10 @@ div[class*="st-key-main_navigation"] label{cursor:pointer;}
 div[class*="st-key-main_navigation"] label *:not([data-testid="stMarkdownContainer"]):not([data-testid="stMarkdownContainer"] *):not(:has([data-testid="stMarkdownContainer"])){display:none!important;}
 div[class*="st-key-main_navigation"] label p{white-space:nowrap!important;font-size:.66rem!important;}
 div[class*="st-key-main_navigation"] label{padding:6px 0 5px!important;min-width:0!important;}
+div[class*="st-key-main_navigation"] [role="radiogroup"],
+div[class*="st-key-main_navigation"] [data-testid="stRadio"],
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *{width:100%!important;max-width:none!important;}
+div[class*="st-key-main_navigation"] [role="radiogroup"]{max-width:840px!important;}
 
 /* --- Tracker cards: the old sheet styled some of these classes as bar
    fills (e.g. the win-probability text row) and never styled the rest,
