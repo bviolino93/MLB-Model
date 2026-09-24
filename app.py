@@ -3136,7 +3136,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.8.1-UI-PASS"
+APP_VERSION = "3.8.3-UI-PASS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -6627,8 +6627,16 @@ st.markdown("""<style>
 [data-testid="stMetricLabel"] p{font-size:.76rem!important;}
 
 /* --- nav: pinned icon bar */
-div[class*="st-key-main_navigation"]{position:sticky;top:3.75rem;z-index:60;
-  background:var(--ground);border-bottom:1px solid var(--rule);}
+/* The old stylesheet pins this bar to the BOTTOM with position:fixed!important
+   and bottom:0. Adding top without overriding those stretched the bar from
+   the header to the bottom of the screen, covering every page with a 96%
+   opaque panel. Every one of those properties is reset here. */
+div[class*="st-key-main_navigation"]{
+  position:sticky!important;top:3.75rem!important;bottom:auto!important;
+  left:auto!important;right:auto!important;z-index:60!important;
+  height:auto!important;background:var(--ground)!important;
+  backdrop-filter:none!important;border-top:0!important;
+  border-bottom:1px solid var(--rule)!important;}
 div[class*="st-key-main_navigation"] label p{font-size:.68rem!important;}
 div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(1)::before,
 div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(1) label::before{
@@ -6659,7 +6667,11 @@ div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(6) label:
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3'/%3E%3Cpath d='M7 15h10'/%3E%3C/svg%3E")!important;}
 
 /* hide the radio circles; the icon + label is the button */
-div[class*="st-key-main_navigation"] label > div:first-child{display:none!important;}
+/* Keep only the child that holds the label text; everything else in the
+   option (the radio circle, the hidden input) goes. Works whatever element
+   Streamlit uses for the circle. */
+div[class*="st-key-main_navigation"] label > *:not([data-testid="stMarkdownContainer"]):not(:has([data-testid="stMarkdownContainer"])){display:none!important;}
+div[class*="st-key-main_navigation"] [data-baseweb="radio"]>div:first-child{display:none!important;}
 div[class*="st-key-main_navigation"] label{cursor:pointer;}
 
 /* --- Prices page grid */
