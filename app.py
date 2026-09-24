@@ -18,7 +18,8 @@ import re
 import statistics
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+import time
 from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
@@ -79,7 +80,7 @@ import streamlit as st
 # Moneyline is computed but has NOT been revalidated. Leave it alone until the
 # totals slope comes back near 1.0.
 
-MODEL_VERSION = "2.0.0-DISPERSION-REBUILD"
+MODEL_VERSION = "2.1.0-AUDIT-FIXES"
 MLB_API = "https://statsapi.mlb.com/api"
 
 # =============================================================================
@@ -177,19 +178,19 @@ PARKS = {
     "Fenway Park": {"factor": 1.04, "lat": 42.3467, "lon": -71.0972},
     "Yankee Stadium": {"factor": 1.03, "lat": 40.8296, "lon": -73.9262},
     "Citizens Bank Park": {"factor": 1.03, "lat": 39.9061, "lon": -75.1665},
-    "Globe Life Field": {"factor": 1.02, "lat": 32.7473, "lon": -97.0847},
-    "American Family Field": {"factor": 1.02, "lat": 43.0280, "lon": -87.9712},
-    "Daikin Park": {"factor": 1.01, "lat": 29.7573, "lon": -95.3555},
-    "Minute Maid Park": {"factor": 1.01, "lat": 29.7573, "lon": -95.3555},
+    "Globe Life Field": {"factor": 1.02, "lat": 32.7473, "lon": -97.0847, "roof": "retractable"},
+    "American Family Field": {"factor": 1.02, "lat": 43.0280, "lon": -87.9712, "roof": "retractable"},
+    "Daikin Park": {"factor": 1.01, "lat": 29.7573, "lon": -95.3555, "roof": "retractable"},
+    "Minute Maid Park": {"factor": 1.01, "lat": 29.7573, "lon": -95.3555, "roof": "retractable"},
     "Wrigley Field": {"factor": 1.01, "lat": 41.9484, "lon": -87.6553},
     "Nationals Park": {"factor": 1.01, "lat": 38.8730, "lon": -77.0074},
     "Oriole Park at Camden Yards": {"factor": 1.00, "lat": 39.2839, "lon": -76.6217},
-    "Rogers Centre": {"factor": 1.00, "lat": 43.6414, "lon": -79.3894},
+    "Rogers Centre": {"factor": 1.00, "lat": 43.6414, "lon": -79.3894, "roof": "retractable"},
     "Kauffman Stadium": {"factor": 1.00, "lat": 39.0517, "lon": -94.4803},
     "Busch Stadium": {"factor": 1.00, "lat": 38.6226, "lon": -90.1928},
     "Angel Stadium": {"factor": 1.00, "lat": 33.8003, "lon": -117.8827},
-    "loanDepot park": {"factor": 0.99, "lat": 25.7781, "lon": -80.2197},
-    "Chase Field": {"factor": 0.99, "lat": 33.4453, "lon": -112.0667},
+    "loanDepot park": {"factor": 0.99, "lat": 25.7781, "lon": -80.2197, "roof": "retractable"},
+    "Chase Field": {"factor": 0.99, "lat": 33.4453, "lon": -112.0667, "roof": "retractable"},
     "Progressive Field": {"factor": 0.99, "lat": 41.4962, "lon": -81.6852},
     "Target Field": {"factor": 0.99, "lat": 44.9817, "lon": -93.2776},
     "Comerica Park": {"factor": 0.98, "lat": 42.3390, "lon": -83.0485},
@@ -202,7 +203,7 @@ PARKS = {
     "Oracle Park": {"factor": 0.96, "lat": 37.7786, "lon": -122.3893},
     "Sutter Health Park": {"factor": 1.00, "lat": 38.5803, "lon": -121.5137},
     "George M. Steinbrenner Field": {"factor": 1.00, "lat": 27.9799, "lon": -82.5067},
-    "Tropicana Field": {"factor": 0.97, "lat": 27.7682, "lon": -82.6534},
+    "Tropicana Field": {"factor": 0.97, "lat": 27.7682, "lon": -82.6534, "roof": "dome"},
     "Rate Field": {"factor": 1.01, "lat": 41.8300, "lon": -87.6338},
     "Guaranteed Rate Field": {"factor": 1.01, "lat": 41.8300, "lon": -87.6338},
 }
@@ -217,6 +218,27 @@ _feed_cache = {}
 _hitter_cache = {}
 _hand_cache = {}
 _totals_weather_cache = {}
+_json_cache_time = {}
+_PIT_BP_DATES_OK = {}
+_cache_day = [None]
+
+
+def _daily_cache_reset():
+    """Clear every stats cache when the ET date changes.
+
+    These caches are module globals, so on a long-running Streamlit process they
+    previously lived until the app restarted: season stats, pitcher form and
+    bullpens went stale for days. Called at the top of run_model and the
+    schedule fetch.
+    """
+    d = datetime.now(ZoneInfo("America/New_York")).date()
+    if _cache_day[0] == d:
+        return
+    for c in (_json_cache, _json_cache_time, _pitcher_cache, _hitting_cache,
+              _platoon_cache, _bullpen_cache, _hitter_cache,
+              _totals_weather_cache, _PIT_BP_DATES_OK):
+        c.clear()
+    _cache_day[0] = d
 
 
 # ---------------------------------------------------------------- utilities --
@@ -339,18 +361,46 @@ def win_prob(runs_for, runs_against, home_is_second=True):
     return clamp(p_first, 0.001, 0.999)
 
 
-def get_json(url, params=None, cache_key=None):
+def get_json(url, params=None, cache_key=None, ttl=None):
+    """GET JSON with an optional cache.
+
+    Failures are NOT cached (previously a single timeout stored {} under the key
+    and that team/pitcher stayed blank for the rest of the session). ttl, in
+    seconds, expires entries for data that changes during the day.
+    """
+    now = time.time()
     if cache_key is not None and cache_key in _json_cache:
-        return _json_cache[cache_key]
+        if ttl is None or now - _json_cache_time.get(cache_key, now) < ttl:
+            return _json_cache[cache_key]
     try:
         r = requests.get(url, params=params or {}, timeout=20)
         r.raise_for_status()
         data = r.json()
     except Exception:
-        data = {}
+        return {}
     if cache_key is not None:
         _json_cache[cache_key] = data
+        _json_cache_time[cache_key] = now
     return data
+
+
+def _split_stat(data, sit_code):
+    """Stat block for one situation split from a stats=statSplits response.
+
+    Returns {} unless the response is explicitly labelled with the requested
+    split. It never falls back to the unsplit total -- which is what the old
+    stats=season&sitCodes=... calls were silently returning, because the MLB
+    API only applies sitCodes with stats=statSplits.
+    """
+    try:
+        splits = data["stats"][0]["splits"] or []
+    except Exception:
+        return {}
+    for sp in splits:
+        code = str((sp.get("split") or {}).get("code", "")).lower()
+        if code == str(sit_code).lower():
+            return sp.get("stat", {}) or {}
+    return {}
 
 
 def load_team_ids():
@@ -363,12 +413,16 @@ def load_team_ids():
 # ------------------------------------------------------------------ schedule --
 
 def fetch_games_for_date(selected_date=None):
+    _daily_cache_reset()
     d = selected_date or today_et()
+    # Today's and future slates change (probable-pitcher swaps, scratches,
+    # postponements), so they expire after 5 minutes. Past dates are fixed.
     data = get_json(
         f"{MLB_API}/v1/schedule",
         {"sportId": 1, "date": str(d),
          "hydrate": "probablePitcher,team,venue,linescore,game(content(summary))"},
         cache_key=("sched", str(d)),
+        ttl=300 if d >= today_et() else None,
     )
     games = []
     for date_block in data.get("dates", []):
@@ -595,7 +649,8 @@ def team_bullpen(team_name):
     which froze roughly 40% of every game as a constant. Real relief ERAs span
     about 2.90 to 5.20.
 
-    The MLB API relief split is requested via sitCodes=rp. If that call fails or
+    The MLB API relief split is requested via stats=statSplits&sitCodes=rp
+    (sitCodes is ignored with stats=season -- that returned the whole staff). If that call fails or
     returns nothing, this falls back to league average, which reproduces the old
     behaviour rather than crashing.
     """
@@ -611,14 +666,10 @@ def team_bullpen(team_name):
 
     data = get_json(
         f"{MLB_API}/v1/teams/{tid}/stats",
-        {"stats": "season", "group": "pitching", "season": season_now(), "sitCodes": "rp"},
+        {"stats": "statSplits", "group": "pitching", "season": season_now(), "sitCodes": "rp"},
         cache_key=("bp", season_now(), tid),
     )
-    stat = {}
-    try:
-        stat = data["stats"][0]["splits"][0]["stat"]
-    except Exception:
-        stat = {}
+    stat = _split_stat(data, "rp")
 
     ip = ip_to_decimal(stat.get("inningsPitched", 0))
     er = safe_float(stat.get("earnedRuns"), np.nan)
@@ -651,7 +702,7 @@ def _team_hitting_stats(team_name, stats_type="season", start_date=None, end_dat
         params["startDate"] = str(start_date)
         params["endDate"] = str(end_date)
     data = get_json(f"{MLB_API}/v1/teams/{tid}/stats", params,
-                    cache_key=("hit", season_now(), tid, stats_type, str(start_date)))
+                    cache_key=("hit", season_now(), tid, stats_type, str(start_date), str(end_date)))
     try:
         stat = data["stats"][0]["splits"][0]["stat"]
     except Exception:
@@ -721,14 +772,10 @@ def team_platoon(team_name, opposing_hand):
     sit = "vl" if opposing_hand == "L" else "vr"
     data = get_json(
         f"{MLB_API}/v1/teams/{tid}/stats",
-        {"stats": "season", "group": "hitting", "season": season_now(), "sitCodes": sit},
+        {"stats": "statSplits", "group": "hitting", "season": season_now(), "sitCodes": sit},
         cache_key=("platoon", season_now(), tid, sit),
     )
-    try:
-        stat = data["stats"][0]["splits"][0]["stat"]
-    except Exception:
-        stat = {}
-    rates = _hitting_rates(stat)
+    rates = _hitting_rates(_split_stat(data, sit))
 
     if not rates or rates["PA"] < 80:
         result = {"Factor": 1.0, "OPS": LEAGUE_OPS, "Available": False,
@@ -833,9 +880,11 @@ def totals_weather_info(venue, game_date):
     park = PARKS.get(venue)
     if not park or not game_date:
         return default
-    key = (venue, str(game_date))
-    if key in _totals_weather_cache:
-        return _totals_weather_cache[key]
+    if park.get("roof") in ("dome", "retractable"):
+        # Outdoor temperature says nothing about a climate-controlled park.
+        # Retractable roofs close in exactly the heat/cold that would move the
+        # factor, so they are treated as indoor.
+        return {**default, "Roof": park["roof"]}
     try:
         game_dt = pd.to_datetime(game_date, utc=True)
         data = get_json(
@@ -845,6 +894,7 @@ def totals_weather_info(venue, game_date):
              "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
              "timezone": "UTC", "forecast_days": 14},
             cache_key=("wx", venue, str(game_date)),
+            ttl=3600,
         )
         hourly = data.get("hourly", {})
         times = pd.to_datetime(hourly.get("time", []), utc=True)
@@ -863,7 +913,6 @@ def totals_weather_info(venue, game_date):
                   "Factor": clamp(factor, *WEATHER_CLAMP), "Available": True}
     except Exception:
         result = default
-    _totals_weather_cache[key] = result
     return result
 
 
@@ -934,12 +983,35 @@ def confidence_score(g, away_sp, home_sp, away_off, home_off, away_bp, home_bp):
 
 # ------------------------------------------------------------------ the model --
 
+def _league_staff_ra9(sp_ip, innings=9.0):
+    """RA9 of a league-average starter + league-average bullpen covering the
+    same innings split. This is the neutral point: an average staff must map
+    to a factor of exactly 1.0."""
+    ip = clamp(float(sp_ip), 0.0, innings)
+    return ((ip * LEAGUE_FIP + (innings - ip) * LEAGUE_BULLPEN_ERA) / innings) * RA9_MULTIPLIER
+
+
 def _pitching_factor(sp_ra9, bp_ra9, sp_ip):
-    """Blend starter and bullpen into one runs-allowed multiplier."""
+    """Blend starter and bullpen into one runs-allowed multiplier.
+
+    Previously divided by LEAGUE_RUNS_PER_TEAM * RA9_MULTIPLIER (4.644), which
+    applies the unearned-run multiplier to a number that already includes
+    unearned runs. A league-average staff came out at 0.963, silently cutting
+    every neutral total from 8.75 to 8.43. Now normalised against the same
+    baselines the inputs are built from, so neutral is 1.000.
+    """
     ip = clamp(sp_ip, 3.0, 7.5)
     combined_ra9 = (ip / 9.0) * sp_ra9 + ((9.0 - ip) / 9.0) * bp_ra9
-    league_ra9 = LEAGUE_RUNS_PER_TEAM * RA9_MULTIPLIER
+    league_ra9 = _league_staff_ra9(ip)
     return clamp(combined_ra9 / league_ra9, *PITCHING_CLAMP), combined_ra9
+
+
+def _et_date_str(game_date):
+    """Slate date (ET) of the game itself, not the day the model was run."""
+    try:
+        return str(pd.to_datetime(game_date, utc=True).tz_convert("America/New_York").date())
+    except Exception:
+        return str(today_et())
 
 
 def reset_dynamic_caches():
@@ -949,6 +1021,7 @@ def reset_dynamic_caches():
 def run_model(games_to_run):
     if not games_to_run:
         return pd.DataFrame()
+    _daily_cache_reset()
     if not TEAM_IDS:
         load_team_ids()
     reset_dynamic_caches()
@@ -983,7 +1056,7 @@ def run_model(games_to_run):
         conf, conf_grade, conf_reasons = confidence_score(g, asp, hsp, aoff, hoff, abp, hbp)
 
         rows.append({
-            "Date": str(today_et()), "GamePk": g.get("GamePk"),
+            "Date": _et_date_str(g.get("GameDate")), "GamePk": g.get("GamePk"),
             "Game": f"{g.get('Away')} @ {g.get('Home')}",
             "Away": g.get("Away"), "Home": g.get("Home"), "Venue": g.get("Venue"),
             "TimeLabel": g.get("TimeLabel", ""), "GameDate": g.get("GameDate"),
@@ -1023,7 +1096,8 @@ def run_model(games_to_run):
 def _final_scores_for_date(d):
     data = get_json(f"{MLB_API}/v1/schedule",
                     {"sportId": 1, "date": str(d), "hydrate": "linescore"},
-                    cache_key=("final", str(d)))
+                    cache_key=("final", str(d)),
+                    ttl=600 if d >= today_et() - timedelta(days=1) else None)
     out = {}
     for block in data.get("dates", []):
         for g in block.get("games", []):
@@ -1295,34 +1369,99 @@ def _pit_starter(player_id, as_of):
             "ExpIP": clamp(exp_ip, 3.8, 6.8), "Starts": starts, "Available": True}
 
 
+def _pit_bp_dates_ok(year):
+    """Does the relief split honour startDate/endDate?
+
+    If the API ignores the dates it returns full-season relief stats for every
+    backtest day -- look-ahead. Checked once per season by asking for two
+    different end dates and requiring the earlier one to show fewer innings.
+    If it cannot be confirmed, point-in-time bullpens fall back to league
+    average rather than leak future data.
+    """
+    if year in _PIT_BP_DATES_OK:
+        return _PIT_BP_DATES_OK[year]
+    if not TEAM_IDS:
+        load_team_ids()
+    tid = next(iter(TEAM_IDS.values()), None)
+    ok = False
+    if tid:
+        def _ip_through(end):
+            data = get_json(
+                f"{MLB_API}/v1/teams/{tid}/stats",
+                {"stats": "statSplits", "group": "pitching", "season": year,
+                 "sitCodes": "rp", "startDate": f"{year}-03-01", "endDate": str(end)},
+                cache_key=("pitbpchk", tid, str(end)),
+            )
+            stat = _split_stat(data, "rp")
+            return ip_to_decimal(stat.get("inningsPitched", 0)) if stat else None
+        late_end = min(today_et() - timedelta(days=1), date(year, 9, 30))
+        early = _ip_through(date(year, 4, 20))
+        late = _ip_through(late_end)
+        ok = bool(early is not None and late is not None and 0 < early < late)
+    _PIT_BP_DATES_OK[year] = ok
+    return ok
+
+
 def _pit_bullpen(team_name, as_of):
     """Relief RA9 before `as_of`. Falls back to league average if the split is
-    not available for a date range (the MLB API is inconsistent here)."""
+    unavailable or the API cannot be shown to honour the date range."""
     if not TEAM_IDS:
         load_team_ids()
     tid = TEAM_IDS.get(team_name)
     fallback = {"RA9": LEAGUE_BULLPEN_ERA * RA9_MULTIPLIER, "Available": False}
-    if not tid:
+    if not tid or not _pit_bp_dates_ok(as_of.year):
         return fallback
     data = get_json(
         f"{MLB_API}/v1/teams/{tid}/stats",
-        {"stats": "byDateRange", "group": "pitching", "season": as_of.year,
+        {"stats": "statSplits", "group": "pitching", "season": as_of.year,
          "sitCodes": "rp", "startDate": _season_start(as_of),
          "endDate": str(as_of - timedelta(days=1))},
         cache_key=("pitbp", tid, str(as_of)),
     )
-    try:
-        stat = data["stats"][0]["splits"][0]["stat"]
-        ip = ip_to_decimal(stat.get("inningsPitched", 0))
-        er = safe_float(stat.get("earnedRuns"), np.nan)
-    except Exception:
-        return fallback
+    stat = _split_stat(data, "rp")
+    ip = ip_to_decimal(stat.get("inningsPitched", 0)) if stat else 0.0
+    er = safe_float(stat.get("earnedRuns"), np.nan) if stat else np.nan
     if ip <= 0 or not math.isfinite(er):
         return fallback
     era = 9.0 * er / ip
     w = clamp(ip / BULLPEN_IP_ANCHOR, 0.0, 1.0)
     shrunk = w * era + (1 - w) * LEAGUE_BULLPEN_ERA
     return {"RA9": clamp(shrunk * RA9_MULTIPLIER, 2.80, 7.00), "Available": True}
+
+
+def check_data_sources(team_name=None):
+    """Confirm the split endpoints return real splits. Run from Diagnostics.
+
+    platoon_ok: vs-L and vs-R both came back labelled, and their PA add up to
+    the team's overall PA (if each equals the overall, the split is fake).
+    bullpen_ok: the relief split came back labelled.
+    pit_bullpen_dates_ok: the relief split respects startDate/endDate.
+    """
+    if not TEAM_IDS:
+        load_team_ids()
+    team = team_name or (sorted(TEAM_IDS)[0] if TEAM_IDS else None)
+    tid = TEAM_IDS.get(team)
+    if not tid:
+        return {"error": "could not load MLB team list"}
+    overall = _hitting_rates(_team_hitting_stats(team, "season")) or {"PA": 0}
+    pas = {}
+    for code in ("vl", "vr"):
+        data = get_json(f"{MLB_API}/v1/teams/{tid}/stats",
+                        {"stats": "statSplits", "group": "hitting",
+                         "season": season_now(), "sitCodes": code})
+        r = _hitting_rates(_split_stat(data, code))
+        pas[code] = r["PA"] if r else 0
+    split_sum = pas["vl"] + pas["vr"]
+    platoon_ok = bool(pas["vl"] and pas["vr"] and overall["PA"]
+                      and abs(split_sum - overall["PA"]) <= 0.02 * overall["PA"])
+    bp = team_bullpen(team)
+    return {
+        "team": team,
+        "overall_PA": overall["PA"], "vsL_PA": pas["vl"], "vsR_PA": pas["vr"],
+        "platoon_ok": platoon_ok,
+        "bullpen_ok": bool(bp.get("Available")), "bullpen_IP": bp.get("IP"),
+        "pit_bullpen_dates_ok": _pit_bp_dates_ok(season_now()),
+    }
 
 
 def _pit_project(g, as_of, use_recent=True):
@@ -1368,47 +1507,135 @@ def _norm_team(s):
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def _closing_totals_for_date(api_key, d):
-    """Consensus closing total per game from The Odds API historical endpoint.
+CLOSE_SNAPSHOT_MINUTES = 5
 
-    Historical odds are a separate paid add-on. If the call fails or is not
-    included in your plan this returns {} and the benchmark is skipped rather
-    than silently reporting nothing.
+
+def _iso_z(ts):
+    return pd.Timestamp(ts).tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _consensus_point(pts):
+    """Most-quoted total; ties go to the one nearest the median. Never a
+    synthetic average of two lines."""
+    pts = [float(p) for p in pts if p is not None and math.isfinite(float(p))]
+    if not pts:
+        return None
+    counts = {}
+    for p in pts:
+        counts[p] = counts.get(p, 0) + 1
+    top = max(counts.values())
+    center = statistics.median(pts)
+    return float(min((p for p, n in counts.items() if n == top),
+                     key=lambda p: (abs(p - center), p)))
+
+
+def _hist_events_for_date(api_key, d):
+    """Every event on slate date d (ET) with its commence time.
+
+    Snapshot at 13:00Z (9am ET), before any first pitch, so the whole slate is
+    still listed as upcoming.
     """
-    if not api_key:
-        return {}, "no ODDS_API_KEY configured"
-    snap = f"{d}T23:00:00Z"
     try:
         r = requests.get(
-            f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
-            params={"apiKey": api_key, "regions": "us", "markets": "totals",
-                    "oddsFormat": "american", "date": snap},
-            timeout=25,
-        )
+            f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/events",
+            params={"apiKey": api_key, "date": f"{d}T13:00:00Z", "dateFormat": "iso"},
+            timeout=25)
         if r.status_code in (401, 403):
-            return {}, "historical odds not included in this API plan"
-        if r.status_code == 422:
-            return {}, "historical endpoint rejected the date"
+            return [], "historical odds not included in this API plan"
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        return {}, f"historical odds request failed: {e}"
+        return [], f"historical event list failed: {e}"
+    evs = payload.get("data", payload) if isinstance(payload, dict) else payload
+    out = []
+    for ev in evs or []:
+        try:
+            ct = pd.to_datetime(ev.get("commence_time"), utc=True)
+        except Exception:
+            continue
+        if ct.tz_convert("America/New_York").date() != d:
+            continue
+        out.append({"id": ev.get("id"), "away": _norm_team(ev.get("away_team")),
+                    "home": _norm_team(ev.get("home_team")), "commence": ct})
+    if not out:
+        return [], "no historical events returned for this date"
+    return out, None
 
-    events = payload.get("data", payload) or []
-    out = {}
+
+def _match_line(records, g):
+    """Closing line for one MLB game. Matches on teams, then on start time, so
+    both halves of a doubleheader get their own line."""
+    a, h = _norm_team(g.get("Away")), _norm_team(g.get("Home"))
+    cands = [r for r in records or [] if r["away"] == a and r["home"] == h]
+    if not cands:
+        return None
+    try:
+        gt = pd.to_datetime(g.get("GameDate"), utc=True)
+    except Exception:
+        gt = None
+    if gt is None:
+        return cands[0]["line"] if len(cands) == 1 else None
+    best = min(cands, key=lambda r: abs((r["commence"] - gt).total_seconds()))
+    if abs((best["commence"] - gt).total_seconds()) > 4 * 3600:
+        return None
+    return best["line"]
+
+
+def _closing_totals_for_date(api_key, d):
+    """Consensus total for each game, snapshotted 5 minutes before THAT game.
+
+    The old version took one 23:00Z snapshot for the whole day: afternoon games
+    were already in progress (live lines, or no line at all), West Coast games
+    were three hours early, and doubleheaders collided on one team-pair key.
+
+    Cost: one historical odds call per distinct start time -- typically 6-9 a
+    day instead of 1.
+
+    Returns (records, note); each record has away, home, commence, line.
+    """
+    if not api_key:
+        return [], "no ODDS_API_KEY configured"
+    events, note = _hist_events_for_date(api_key, d)
+    if not events:
+        return [], note
+    groups = {}
     for ev in events:
-        pts = []
-        for bk in ev.get("bookmakers", []):
-            for mk in bk.get("markets", []):
-                if mk.get("key") != "totals":
-                    continue
-                for oc in mk.get("outcomes", []):
-                    p = safe_float(oc.get("point"), np.nan)
-                    if math.isfinite(p):
-                        pts.append(p)
-        if pts:
-            key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
-            out[key] = float(statistics.median(pts))
+        snap = _iso_z(ev["commence"] - pd.Timedelta(minutes=CLOSE_SNAPSHOT_MINUTES))
+        groups.setdefault(snap, []).append(ev)
+
+    out, note = [], None
+    for snap, evs in sorted(groups.items()):
+        try:
+            r = requests.get(
+                f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
+                params={"apiKey": api_key, "regions": "us", "markets": "totals",
+                        "oddsFormat": "american", "date": snap},
+                timeout=25)
+            if r.status_code in (401, 403):
+                return out, "historical odds not included in this API plan"
+            if r.status_code == 422:
+                note = note or f"historical endpoint rejected {snap}"
+                continue
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            note = note or f"historical odds request failed: {e}"
+            continue
+        data = payload.get("data", payload) if isinstance(payload, dict) else payload
+        by_id = {ev.get("id"): ev for ev in data or []}
+        for e in evs:
+            ev = by_id.get(e["id"])
+            if not ev:
+                continue
+            pts = [safe_float(oc.get("point"), np.nan)
+                   for bk in ev.get("bookmakers", []) or []
+                   for mk in bk.get("markets", []) or [] if mk.get("key") == "totals"
+                   for oc in mk.get("outcomes", []) or []]
+            line = _consensus_point([p for p in pts if math.isfinite(p)])
+            if line is not None:
+                out.append({**e, "line": line})
+    if not out:
+        return [], note or "no closing totals found for this date"
     return out, None
 
 
@@ -1436,7 +1663,7 @@ def pit_backtest(days_back=14, use_recent=True, use_lines=True,
         if not games or not finals:
             continue
 
-        day_lines = {}
+        day_lines = []
         if use_lines:
             day_lines, note = _closing_totals_for_date(api_key, d)
             if note and not line_note:
@@ -1457,8 +1684,7 @@ def pit_backtest(days_back=14, use_recent=True, use_lines=True,
             proj.append(res["projected"])
             actual.append(finals[gp])
             bullpen_ok += 1 if res["bullpen_ok"] else 0
-            key = (_norm_team(g.get("Away")), _norm_team(g.get("Home")))
-            lines.append(day_lines.get(key))
+            lines.append(_match_line(day_lines, g))
 
     if len(proj) < 30:
         return {"error": f"only {len(proj)} usable games -- widen the window",
@@ -1498,6 +1724,9 @@ def pit_backtest(days_back=14, use_recent=True, use_lines=True,
         out["edge_slope"] = float(np.polyfit(edge, dev, 1)[0])
         out["edge_corr"] = float(np.corrcoef(edge, dev)[0, 1])
         out["beats_line"] = bool(out["mae_gap"] < 0)
+        # The share of your disagreement with the line that actually shows up
+        # in results. This is the defensible model weight for the board.
+        out["suggested_model_weight"] = float(clamp(out["edge_slope"], 0.0, 1.0))
     return out
 
 
@@ -1573,7 +1802,7 @@ def _f5_pitching_factor(sp_ra9, bp_ra9, sp_ip):
     # Normalise against the league PITCHER baseline, not against the F5 run
     # anchor. Deriving it from the anchor made the two cancel, so changing
     # LEAGUE_F5_RUNS_PER_TEAM had no effect on the projected level at all.
-    league = LEAGUE_FIP * RA9_MULTIPLIER
+    league = _league_staff_ra9(sp_innings, 5.0)
     return clamp(combined / league, *PITCHING_CLAMP), combined
 
 
@@ -1629,7 +1858,8 @@ def _f5_final_scores_for_date(d):
     """Actual runs through 5 innings, from the linescore innings array."""
     data = get_json(f"{MLB_API}/v1/schedule",
                     {"sportId": 1, "date": str(d), "hydrate": "linescore"},
-                    cache_key=("f5final", str(d)))
+                    cache_key=("f5final", str(d)),
+                    ttl=600 if d >= today_et() - timedelta(days=1) else None)
     out = {}
     for block in data.get("dates", []):
         for g in block.get("games", []):
@@ -1643,11 +1873,12 @@ def _f5_final_scores_for_date(d):
             for inn in innings[:5]:
                 a = safe_float((inn.get("away", {}) or {}).get("runs"), np.nan)
                 h = safe_float((inn.get("home", {}) or {}).get("runs"), np.nan)
-                # bottom 5 can be legitimately unplayed if home leads
-                if not math.isfinite(a):
+                # bottom 5 is always played in a completed game; a missing
+                # value here means a rain-shortened or suspended game
+                if not (math.isfinite(a) and math.isfinite(h)):
                     ok = False
                     break
-                tot += a + (h if math.isfinite(h) else 0.0)
+                tot += a + h
             if ok:
                 out[g.get("gamePk")] = tot
     return out
@@ -1657,50 +1888,31 @@ F5_MARKET_KEYS = ("totals_1st_5_innings", "totals_h1", "totals_1st_half")
 
 
 def _f5_closing_totals_for_date(api_key, d):
-    """Consensus F5 closing total per game.
+    """Consensus F5 total per game, snapshotted 5 minutes before first pitch.
 
-    The Odds API does not serve period markets on the bulk /odds endpoint --
-    only core markets (h2h, spreads, totals) come back there, which is why the
-    first attempt returned nothing for every F5 key. Additional markets require
-    a per-event request. So: fetch the historical event list for the date, then
-    request F5 totals for each event individually.
+    Period markets need a per-event request (the bulk endpoint only serves core
+    markets). The snapshot is now each game's own start time rather than a
+    fixed 23:00Z, which caught afternoon games mid-play.
 
-    That costs one call per game rather than one per day, so it is materially
-    more expensive in credits. Worth it only because this is the measurement
-    that decides whether F5 is worth pursuing at all.
+    Returns (records, note); each record has away, home, commence, line.
     """
     if not api_key:
-        return {}, "no ODDS_API_KEY configured"
-    snap = f"{d}T23:00:00Z"
-
-    try:
-        r = requests.get(
-            f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/events",
-            params={"apiKey": api_key, "date": snap}, timeout=25)
-        if r.status_code in (401, 403):
-            return {}, "historical odds not included in this API plan"
-        r.raise_for_status()
-        payload = r.json()
-    except Exception as e:
-        return {}, f"historical event list failed: {e}"
-
-    events = payload.get("data", payload) or []
+        return [], "no ODDS_API_KEY configured"
+    events, note = _hist_events_for_date(api_key, d)
     if not events:
-        return {}, "no historical events returned for this date"
+        return [], note
 
-    out = {}
-    note = None
-    for ev in events:
-        eid = ev.get("id")
-        if not eid:
+    out, note = [], None
+    for e in events:
+        if not e.get("id"):
             continue
+        snap = _iso_z(e["commence"] - pd.Timedelta(minutes=CLOSE_SNAPSHOT_MINUTES))
         pts = []
-        used_key = None
         for mkey in F5_MARKET_KEYS:
             try:
                 er = requests.get(
                     f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}"
-                    f"/events/{eid}/odds",
+                    f"/events/{e['id']}/odds",
                     params={"apiKey": api_key, "regions": "us", "markets": mkey,
                             "oddsFormat": "american", "date": snap}, timeout=25)
                 if er.status_code in (401, 403):
@@ -1709,8 +1921,8 @@ def _f5_closing_totals_for_date(api_key, d):
                     continue
                 er.raise_for_status()
                 ed = er.json()
-            except Exception as e:
-                note = note or f"F5 event odds failed: {e}"
+            except Exception as ex:
+                note = note or f"F5 event odds failed: {ex}"
                 continue
             body = ed.get("data", ed) or {}
             for bk in body.get("bookmakers", []) or []:
@@ -1722,14 +1934,13 @@ def _f5_closing_totals_for_date(api_key, d):
                         if math.isfinite(pv):
                             pts.append(pv)
             if pts:
-                used_key = mkey
                 break
-        if pts:
-            key = (_norm_team(ev.get("away_team")), _norm_team(ev.get("home_team")))
-            out[key] = float(statistics.median(pts))
+        line = _consensus_point(pts)
+        if line is not None:
+            out.append({**e, "line": line})
 
     if not out:
-        return {}, (note or "no book posted F5 totals for these events -- "
+        return [], (note or "no book posted F5 totals for these events -- "
                     "F5 historical coverage may not exist on this plan")
     return out, None
 
@@ -1775,8 +1986,7 @@ def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
                 continue
             proj.append(res["F5_Projected_Total"])
             actual.append(finals[gp])
-            key = (_norm_team(g.get("Away")), _norm_team(g.get("Home")))
-            lines.append(day_lines.get(key))
+            lines.append(_match_line(day_lines, g))
 
     if len(proj) < 30:
         return {"error": f"only {len(proj)} usable F5 games -- widen the window",
@@ -1807,6 +2017,7 @@ def f5_backtest(days_back=14, use_recent=True, api_key=None, progress=None):
         edge, dev = pl - ln, al - ln
         out["edge_slope"] = float(np.polyfit(edge, dev, 1)[0])
         out["edge_corr"] = float(np.corrcoef(edge, dev)[0, 1])
+        out["suggested_model_weight"] = float(clamp(out["edge_slope"], 0.0, 1.0))
         # what that edge slope is worth at -110, given the residual spread
         from math import erf, sqrt
         b = out["edge_slope"]
@@ -1890,7 +2101,8 @@ def slate_rows(candidates, totals_payload):
             tm = None
         if tm and row["proj_total"] is not None:
             row["line"] = float(tm.get("total"))
-            row["tot_gap"] = row["proj_total"] - row["line"]
+            # Compare means to means; the line is a median.
+            row["tot_gap"] = row["proj_total"] - float(tm.get("market_mean", row["line"]))
             try:
                 tp = build_total_pick(row["proj_total"], tm)
                 row["tot_side"] = tp["side"]
@@ -2185,6 +2397,30 @@ def diagnostics_bundle():
 def render_diagnostics():
     st.markdown('<div class="kicker">Diagnostics</div>', unsafe_allow_html=True)
 
+    with st.expander("Data source check (run before any backtest)", expanded=False):
+        st.caption(
+            "Confirms the MLB API returns real splits. If platoon or bullpen "
+            "fail, the model quietly falls back to neutral inputs for them. If "
+            "the point-in-time bullpen check fails, backtests use a league-average "
+            "bullpen instead of leaking future data.")
+        if st.button("Run check", key="data_source_check"):
+            with st.spinner("Checking split endpoints…"):
+                st.session_state["_dsc"] = check_data_sources()
+        _dsc = st.session_state.get("_dsc")
+        if _dsc:
+            if _dsc.get("error"):
+                st.error(_dsc["error"])
+            else:
+                for _k, _label in (("platoon_ok", "Platoon splits (vs L / vs R)"),
+                                   ("bullpen_ok", "Bullpen split"),
+                                   ("pit_bullpen_dates_ok", "Point-in-time bullpen dates")):
+                    (st.success if _dsc[_k] else st.error)(
+                        f"{_label}: {'OK' if _dsc[_k] else 'FAILED'}")
+                st.caption(
+                    f"{_dsc['team']}: overall {_dsc['overall_PA']:.0f} PA = "
+                    f"vs L {_dsc['vsL_PA']:.0f} + vs R {_dsc['vsR_PA']:.0f}; "
+                    f"bullpen IP {_dsc.get('bullpen_IP') or 0:.1f}")
+
 
 
     with st.expander("Permanent storage (GitHub Gist)", expanded=False):
@@ -2428,7 +2664,8 @@ def render_diagnostics():
                 j3.metric("Implied win rate",
                           f"{_fr['implied_win_rate']*100:.1f}%",
                           help="Break-even at -110 is 52.4%")
-                st.caption(f"Matched on {_fr['n_with_line']} games.")
+                st.caption(f"Matched on {_fr['n_with_line']} games. Suggested model "
+                           f"weight: {_fr.get('suggested_model_weight', 0):.2f}")
 
                 if _fr["implied_ev"] > 0.01:
                     st.success(
@@ -2531,7 +2768,9 @@ def render_diagnostics():
                           help="1.0 means your disagreement with the line is fully "
                                "predictive. 0.0 means it is noise.")
                 d2.metric("Edge corr", f"{_pr['edge_corr']:.2f}")
-                st.caption(f"Matched on {_pr['n_with_line']} games.")
+                st.caption(f"Matched on {_pr['n_with_line']} games. Suggested totals "
+                           f"model weight: {_pr.get('suggested_model_weight', 0):.2f} "
+                           f"(currently {TOTALS_MODEL_WEIGHT:.2f})")
 
                 if _pr["mae_gap"] < -0.05:
                     st.success(
@@ -2576,7 +2815,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.2.8-TRACKER-MIDNIGHT-CARRY"
+APP_VERSION = "3.3.0-AUDIT-FIXES"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -2593,1169 +2832,258 @@ def _auto_fragment(seconds):
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
 /* ==========================================================================
-   NINTH SIGNAL — foundation
-   One source of truth for colour, type and the chrome around the data.
-   Component classes below (cards, meters, tracker) keep their own layout and
-   inherit from these tokens.
+   NINTH SIGNAL
+   Complete stylesheet. Replaces the inherited sheet rather than overriding it,
+   because layered overrides against 2,000 lines you did not write is how the
+   last five passes went sideways.
+
+   The subject is a baseball model read by someone who reads research terminals
+   all day. It is not a consumer sportsbook, and it should not borrow that
+   visual language — no glowing badges, no gradient washes, no card per game.
 
    Three rules:
      1. Chrome is quiet, data is loud.
-     2. Colour encodes model state. Never decoration.
+     2. Colour encodes model state only. Never decoration.
      3. Every figure is monospaced with tabular numerals, so odds, lines and
         probabilities align down a column and can be scanned, not read.
    ========================================================================== */
+
 :root{
-  --ns-ground:#10161d;  --ns-panel:#161e27;  --ns-panel-2:#1e2833;
-  --ns-rule:#24303d;    --ns-rule-soft:#1c2733;
-  --ns-ink:#e8edf2;     --ns-dim:#8a9bad;    --ns-dimmer:#5f7186;
-  --ns-pos:#2f9e6b;     --ns-neg:#c4574d;    --ns-flag:#c9a227;   --ns-live:#4a9fd8;
-  --ns-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,monospace;
-  --ns-sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --ground:#0f151b; --panel:#161d25; --panel2:#1c242e; --raise:#222c37;
+  --rule:#232e3a;   --rule-soft:#1b242e;
+  --ink:#e9eef3;
+  --dim:#8a9aab;    --dimmer:#5e6f80;
+  --pos:#3a9d72;    --neg:#c4574d;  --flag:#c2a139;  --live:#4c9ed6;
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:5px;
 }
 
-:root{--bg:#06111f;--panel:#0b1728;--panel2:#0f2035;--text:#f3f7fb;--muted:#8fa3ba;--blue:#7dd3fc;--green:#86efac;--amber:#fde68a;--red:#fda4af}
-.stApp{background:radial-gradient(circle at 15% -5%,rgba(59,130,246,.17),transparent 28%),linear-gradient(180deg,#071321 0%,#06111f 55%,#050d18 100%);color:var(--text)}
-.block-container{max-width:980px!important;padding-top:1rem!important;padding-bottom:4rem!important}
-header[data-testid="stHeader"]{background:rgba(6,17,31,.78);backdrop-filter:blur(14px);border-bottom:1px solid rgba(148,163,184,.08)}
-.hero{padding:17px 4px 9px}.eyebrow{font-size:.69rem;font-weight:950;letter-spacing:.18em;color:#7dd3fc}.title{font-size:2.35rem;font-weight:950;letter-spacing:-.055em;line-height:1;color:#fff}.sub{font-size:.86rem;color:#8fa3ba;margin-top:8px;max-width:720px}.pill{display:inline-flex;margin-top:10px;padding:5px 9px;border-radius:999px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.22);color:#9ef0b6;font-size:.65rem;font-weight:900;letter-spacing:.05em}
-.status{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:10px 12px;margin:8px 0 15px;border-radius:13px;background:rgba(11,23,40,.76);border:1px solid rgba(148,163,184,.10);font-size:.72rem;color:#8fa3ba}.live{color:#86efac;font-weight:900}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#22c55e;margin-right:7px;box-shadow:0 0 0 4px rgba(34,197,94,.10)}
-.kicker{font-size:.67rem;font-weight:950;letter-spacing:.14em;color:#75ccee;text-transform:uppercase;margin:16px 0 8px}
-.best-card{padding:16px;margin:8px 0 14px;border-radius:18px;background:linear-gradient(145deg,rgba(15,38,60,.98),rgba(8,22,38,.99));border:1px solid rgba(34,197,94,.28);box-shadow:0 16px 40px rgba(0,0,0,.20)}.best-top{display:flex;justify-content:space-between;gap:10px}.best-tag{font-size:.62rem;font-weight:950;letter-spacing:.13em;color:#86efac}.best-pick{font-size:1.45rem;font-weight:950;color:#fff;margin-top:3px}.best-game{font-size:.72rem;color:#8fa3ba;margin-top:4px}.badge{padding:5px 8px;border-radius:999px;font-size:.60rem;font-weight:950;white-space:nowrap}.badge-best{color:#a7f3d0;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.25)}.badge-bet{color:#bae6fd;background:rgba(56,189,248,.10);border:1px solid rgba(56,189,248,.22)}.badge-lean{color:#fde68a;background:rgba(234,179,8,.10);border:1px solid rgba(234,179,8,.22)}.badge-pass{color:#aebdcc;background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.15)}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:12px}.metric{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.05)}.metric span{display:block;font-size:.53rem;font-weight:900;letter-spacing:.07em;color:#677f98;text-transform:uppercase}.metric b{display:block;font-size:.78rem;color:#eaf2f9;margin-top:2px}
-.game-card{margin:9px 0;padding:13px 14px;border-radius:16px;background:linear-gradient(180deg,rgba(14,29,49,.97),rgba(9,21,37,.98));border:1px solid rgba(148,163,184,.10)}.game-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.game-time{font-size:.60rem;color:#6f87a0;font-weight:850;letter-spacing:.05em}.match{font-size:.91rem;font-weight:950;color:#eef5fb;margin-top:3px}.sp{font-size:.64rem;color:#8298af;margin-top:3px}.pick{margin-top:10px;padding:10px 11px;border-radius:11px;background:rgba(5,16,30,.62);display:flex;justify-content:space-between;gap:10px;align-items:center}.pick-main{font-size:.92rem;font-weight:950;color:#f7fafc}.pick-sub{font-size:.62rem;color:#7890aa;margin-top:3px}.lineup-ok{color:#86efac}.lineup-wait{color:#fde68a}
-.note{padding:11px 12px;border-radius:12px;background:rgba(59,130,246,.06);border:1px solid rgba(96,165,250,.12);color:#91a7bd;font-size:.72rem;line-height:1.45}
-.single-summary{padding:13px 14px;border-radius:14px;background:rgba(15,32,53,.88);border:1px solid rgba(125,211,252,.14);margin:10px 0}.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.detail{padding:10px;border-radius:11px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05)}.detail span{display:block;font-size:.54rem;text-transform:uppercase;letter-spacing:.07em;color:#6f87a0;font-weight:900}.detail b{display:block;margin-top:3px;font-size:.82rem;color:#eef5fb}.stButton>button{width:100%;min-height:2.8rem;border-radius:11px;font-weight:850!important;background:#123252!important;color:#f8fbff!important;border:1px solid #2d5b82!important;box-shadow:none!important}.stButton>button:hover{background:#174267!important;border-color:#4c86b5!important;color:#fff!important}.stButton>button:focus{color:#fff!important}.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{background:#0f766e!important;color:#fff!important;border-color:#2dd4bf!important}.stButton>button:disabled{background:#17263a!important;color:#8fa3ba!important;border-color:#2a3a4e!important;opacity:1!important}div[data-testid="stRadio"] label,div[data-testid="stRadio"] label p,div[data-testid="stRadio"] span{color:#eef5fb!important;opacity:1!important}div[data-testid="stRadio"] [data-testid="stMarkdownContainer"] p{color:#eef5fb!important}div[data-testid="stSelectbox"] label,div[data-testid="stDateInput"] label{color:#dbeafe!important}div[data-testid="stExpander"]{border-radius:14px!important;border:1px solid rgba(148,163,184,.09)!important;background:rgba(7,18,32,.50)!important}
-@media(max-width:720px){.block-container{padding-left:.72rem!important;padding-right:.72rem!important}.title{font-size:1.95rem}.metrics{grid-template-columns:repeat(2,1fr)}.detail-grid{grid-template-columns:repeat(2,1fr)}.best-pick{font-size:1.25rem}}
+/* --- shell -------------------------------------------------------------- */
+html,body,.stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{
+  background:var(--ground)!important;color:var(--ink)!important;
+  font-family:var(--sans)!important;
+}
+[data-testid="stHeader"]{height:0!important;}
+[data-testid="stAppViewContainer"] .main .block-container{
+  padding:.4rem .9rem 5.5rem!important;max-width:840px!important;
+}
+[data-testid="stVerticalBlock"]{gap:.5rem!important;}
+#MainMenu,footer,[data-testid="stDecoration"],[data-testid="stStatusWidget"]{display:none!important;}
+p,li,span,div{font-family:var(--sans);}
+a{color:var(--live);}
 
-/* v1.4.1 readability fix */
-.stButton > button,
-.stDownloadButton > button {
-    background: #12395f !important;
-    color: #ffffff !important;
-    border: 1px solid #2d6f9e !important;
-    font-weight: 800 !important;
-}
-.stButton > button:disabled,
-.stDownloadButton > button:disabled {
-    background: #203247 !important;
-    color: #b9c8d6 !important;
-    border: 1px solid #41556a !important;
-    opacity: 1 !important;
-}
-.stButton > button p,
-.stDownloadButton > button p {
-    color: #ffffff !important;
-}
-.stButton > button:disabled p,
-.stDownloadButton > button:disabled p {
-    color: #b9c8d6 !important;
-}
-[data-testid="stFileUploader"] label,
-[data-testid="stFileUploaderDropzone"] span,
-[data-testid="stFileUploaderDropzone"] small,
-[data-testid="stFileUploader"] p,
-[data-testid="stFileUploader"] div {
-    color: #dce8f2 !important;
-}
-[data-testid="stFileUploaderDropzone"] {
-    background: #e9eef4 !important;
-    border: 1px solid #9eb2c4 !important;
-}
-[data-testid="stFileUploaderDropzone"] span,
-[data-testid="stFileUploaderDropzone"] small,
-[data-testid="stFileUploaderDropzone"] p,
-[data-testid="stFileUploaderDropzone"] div {
-    color: #516273 !important;
-}
-[data-testid="stFileUploaderDropzone"] button {
-    background: #ffffff !important;
-    color: #203247 !important;
-    border: 1px solid #c6d1dc !important;
-}
-[data-testid="stFileUploaderDropzone"] button p {
-    color: #203247 !important;
-}
-.stMarkdown p,
-.stCaption,
-[data-testid="stCaptionContainer"] p {
-    color: #aebdcc !important;
-}
-label,
-[data-testid="stWidgetLabel"] p {
-    color: #dce8f2 !important;
-}
-[data-testid="stExpander"] details summary p {
-    color: #eaf2f9 !important;
-    font-weight: 800 !important;
+.mono,[data-testid="stMetricValue"],[data-testid="stDataFrame"] *,
+.sl-stat b,.sl-date,.sl-age{
+  font-family:var(--mono)!important;font-variant-numeric:tabular-nums!important;
 }
 
-
-/* v1.4.2 global readability */
-html, body, [class*="css"] {
-    -webkit-font-smoothing: antialiased !important;
-    text-rendering: optimizeLegibility !important;
+/* --- header: one line ---------------------------------------------------- */
+.ninth-brand-header{
+  display:flex;align-items:center;gap:9px;
+  padding:2px 0 8px;margin:0 0 2px;
+  border-bottom:1px solid var(--rule);
 }
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"],
-.main {
-    background: #061321 !important;
-    color: #edf5fb !important;
+.ninth-brand-mark img{width:21px;height:21px;border-radius:4px;display:block;}
+.ninth-hero,.hero{display:flex;align-items:center;gap:9px;flex:1;padding:0;margin:0;}
+.ninth-hero .sub,.hero .sub,.free-data-note,.eyebrow,
+.tracker-eyebrow,.pulse-kicker,.page-kicker{display:none;}
+.ninth-hero .title,.hero .title{
+  font-size:.9rem;font-weight:600;letter-spacing:-.01em;color:var(--ink);margin:0;line-height:1;
 }
-.block-container {
-    max-width: 980px !important;
-    padding-top: 1.1rem !important;
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
-    padding-bottom: 3rem !important;
-}
-
-/* Global text */
-h1, h2, h3, h4, h5, h6,
-.stMarkdown h1, .stMarkdown h2, .stMarkdown h3,
-.stMarkdown strong, .stMarkdown b {
-    color: #f8fbff !important;
-}
-.stMarkdown p,
-.stMarkdown li,
-.stCaption,
-[data-testid="stCaptionContainer"] p,
-[data-testid="stText"] {
-    color: #b8c7d6 !important;
-    line-height: 1.55 !important;
-}
-small {
-    color: #9fb0c1 !important;
+.ninth-hero .title .signal{color:var(--dim);font-weight:400;}
+.pill{
+  padding:2px 6px;border-radius:3px;background:none;
+  border:1px solid var(--pos);color:var(--pos);
+  font-size:.55rem;font-weight:500;letter-spacing:.03em;
 }
 
-/* Section labels */
-.kicker {
-    color: #7dd3fc !important;
-    font-size: .72rem !important;
-    letter-spacing: .14em !important;
-    font-weight: 950 !important;
+/* --- section heads ------------------------------------------------------- */
+.board-head,.kicker,.page-head,.pulse-head,.tracker-hero{
+  margin:13px 0 6px;padding:0 0 5px;border-bottom:1px solid var(--rule);
 }
-.live {
-    color: #86efac !important;
-}
-.status {
-    color: #b9c8d6 !important;
-    background: #0a1a2b !important;
-    border-color: #29425a !important;
+.board-head span,.page-sub,.pulse-sub,.tracker-sub,.page-count,.tracker-count{display:none;}
+.board-head b,.kicker,.page-title,.pulse-title,.tracker-title{
+  display:block;font-size:.8rem;font-weight:600;color:var(--dim);
+  letter-spacing:0;text-transform:none;margin:0;
 }
 
-/* Radio / checkbox / toggle labels */
-[data-testid="stRadio"] label,
-[data-testid="stRadio"] p,
-[data-testid="stCheckbox"] label,
-[data-testid="stCheckbox"] p,
-[data-testid="stToggle"] label,
-[data-testid="stToggle"] p {
-    color: #eef5fb !important;
-    opacity: 1 !important;
-    font-weight: 750 !important;
-}
-[data-testid="stRadio"] [role="radiogroup"] {
-    gap: .7rem !important;
-}
+/* --- slate bar ----------------------------------------------------------- */
+.slate-bar{display:flex;align-items:baseline;gap:13px;padding:7px 0 8px;
+  border-bottom:1px solid var(--rule);}
+.slate-bar .sl-date{font-size:.76rem;font-weight:600;color:var(--ink);}
+.sl-stat{display:inline-flex;align-items:baseline;gap:4px;}
+.sl-stat b{font-size:.8rem;font-weight:600;}
+.sl-stat b.u{color:var(--ink);} .sl-stat b.l{color:var(--live);}
+.sl-stat b.f{color:var(--dim);} .sl-stat b.z{color:var(--dimmer);font-weight:400;}
+.sl-stat i{font-style:normal;font-size:.66rem;color:var(--dimmer);}
+.slate-bar .sl-age{margin-left:auto;font-size:.64rem;color:var(--dimmer);}
+.status.ninth-status,.slate-pulse,.auto-fresh{display:none;}
 
-/* Inputs */
-[data-baseweb="select"] > div,
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input,
-[data-testid="stDateInput"] input {
-    background: var(--panel) !important;
-    color: var(--ink) !important;
-    border: 1px solid var(--rule) !important;
-    border-radius: 4px !important;
+/* --- widgets ------------------------------------------------------------- */
+[data-testid="stWidgetLabel"]{display:none!important;}
+[data-baseweb="select"]>div,[data-baseweb="input"],
+[data-testid="stDateInput"] input,[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input{
+  background:var(--panel)!important;color:var(--ink)!important;
+  border:1px solid var(--rule)!important;border-radius:var(--r)!important;
+  min-height:0!important;
 }
-[data-baseweb="select"] span,
-[data-baseweb="select"] input,
-[data-baseweb="select"] div {
-    color: var(--ink) !important;
+[data-testid="stDateInput"] input{
+  font-family:var(--mono)!important;font-variant-numeric:tabular-nums;
+  font-size:.8rem!important;padding:8px 11px!important;
 }
-[data-baseweb="popover"] li { background: var(--panel) !important; color: var(--ink) !important; }
-[data-baseweb="popover"] li:hover { background: var(--panel-2) !important; }
-[data-testid="stWidgetLabel"] p,
-label {
-    color: #dbe7f1 !important;
-    font-weight: 750 !important;
-}
+[data-baseweb="select"] span,[data-baseweb="select"] input,
+[data-baseweb="select"]>div>div{color:var(--ink)!important;font-size:.8rem!important;}
+[data-baseweb="select"] svg{fill:var(--dim)!important;}
+[data-baseweb="popover"] li{background:var(--panel)!important;color:var(--ink)!important;font-size:.78rem!important;}
+[data-baseweb="popover"] li:hover{background:var(--panel2)!important;}
 
-/* Buttons */
-.stButton > button,
-.stDownloadButton > button {
-    background: #174a73 !important;
-    color: #ffffff !important;
-    border: 1px solid #4a88b8 !important;
-    font-weight: 850 !important;
-    min-height: 3rem !important;
-    border-radius: 13px !important;
-    opacity: 1 !important;
+.stButton>button{
+  width:100%;min-height:0;padding:10px 14px;border-radius:var(--r);
+  font-family:var(--sans);font-size:.83rem;font-weight:500;
+  background:var(--panel);color:var(--ink);border:1px solid var(--rule);box-shadow:none;
 }
-.stButton > button:hover,
-.stDownloadButton > button:hover {
-    background: #1d5b8c !important;
-    border-color: #6fb7e6 !important;
-    color: #ffffff !important;
+.stButton>button:hover{background:var(--panel2);border-color:var(--raise);}
+.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{
+  background:var(--pos);color:#061109;border:0;font-weight:600;
 }
-.stButton > button p,
-.stDownloadButton > button p {
-    color: #ffffff !important;
-    opacity: 1 !important;
-}
-.stButton > button:disabled,
-.stDownloadButton > button:disabled {
-    background: #24384c !important;
-    color: #c8d4df !important;
-    border-color: #4c6277 !important;
-    opacity: 1 !important;
-}
-.stButton > button:disabled p,
-.stDownloadButton > button:disabled p {
-    color: #c8d4df !important;
-    opacity: 1 !important;
-}
+.stButton>button:disabled{background:var(--panel);color:var(--dimmer);border-color:var(--rule);opacity:1;}
 
-/* File uploader */
-[data-testid="stFileUploader"] {
-    color: #dce8f2 !important;
+/* segmented control */
+div[class*="st-key-production_view_mode"] [role="radiogroup"]{
+  display:inline-flex;gap:0;padding:0;width:auto;
+  background:var(--panel);border:1px solid var(--rule);border-radius:var(--r);overflow:hidden;
 }
-[data-testid="stFileUploader"] label,
-[data-testid="stFileUploader"] p {
-    color: #dce8f2 !important;
+div[class*="st-key-production_view_mode"] label{
+  margin:0;padding:7px 17px;border:0;border-radius:0;background:none;min-height:0;
 }
-[data-testid="stFileUploaderDropzone"] {
-    background: #edf2f6 !important;
-    border: 1px solid #aab9c7 !important;
-}
-[data-testid="stFileUploaderDropzone"] * {
-    color: #42566a !important;
-}
-[data-testid="stFileUploaderDropzone"] button {
-    background: #ffffff !important;
-    color: #17324a !important;
-    border: 1px solid #b6c3cf !important;
-}
-[data-testid="stFileUploaderDropzone"] button p {
-    color: #17324a !important;
-}
+div[class*="st-key-production_view_mode"] label:has(input:checked){background:var(--raise);}
+div[class*="st-key-production_view_mode"] label p{font-size:.77rem;font-weight:500;color:var(--dim);}
+div[class*="st-key-production_view_mode"] label:has(input:checked) p{color:var(--ink);font-weight:600;}
+div[class*="st-key-production_view_mode"] [data-baseweb="radio"]>div:first-child{display:none;}
+[data-testid="stRadio"] label p{color:var(--ink);}
 
-/* Expanders */
-[data-testid="stExpander"] {
-    border: 1px solid #284159 !important;
-    background: #081827 !important;
-    border-radius: 14px !important;
+/* --- surfaces ------------------------------------------------------------ */
+[data-testid="stExpander"]{
+  border:1px solid var(--rule)!important;border-radius:var(--r)!important;
+  background:var(--panel)!important;
 }
-[data-testid="stExpander"] details summary {
-    color: #eef5fb !important;
-}
-[data-testid="stExpander"] details summary p {
-    color: #eef5fb !important;
-    font-weight: 800 !important;
-}
-[data-testid="stExpander"] svg {
-    fill: #dbe7f1 !important;
-}
+[data-testid="stExpander"] summary{font-size:.78rem!important;font-weight:500!important;color:var(--dim)!important;}
+[data-testid="stExpander"] summary:hover{color:var(--ink)!important;}
+[data-testid="stDataFrame"]{border:1px solid var(--rule)!important;border-radius:var(--r)!important;}
+[data-testid="stDataFrame"] *{font-size:.72rem!important;}
+[data-testid="stMetricValue"]{font-size:1.3rem!important;font-weight:500!important;color:var(--ink)!important;}
+[data-testid="stMetricLabel"] p{font-size:.66rem!important;color:var(--dim)!important;font-weight:400!important;}
+.stCaption,[data-testid="stCaptionContainer"] p{color:var(--dimmer)!important;font-size:.71rem!important;line-height:1.5;}
+[data-testid="stAlert"]{border-radius:var(--r)!important;border:1px solid var(--rule)!important;
+  background:var(--panel)!important;font-size:.76rem!important;}
+hr,.visual-divider{border-color:var(--rule)!important;}
 
-/* Alerts */
-[data-testid="stAlert"] {
-    border-radius: 14px !important;
+/* --- verdict tone: one system, used everywhere --------------------------- */
+.badge,.best-tag,.market-grade,.combo-grade,.pregame-track-grade,.top-play-rank b{
+  display:inline-block;font-family:var(--mono);font-size:.6rem;font-weight:600;
+  padding:3px 7px;border-radius:3px;letter-spacing:.02em;background:none;border:1px solid var(--rule);color:var(--dimmer);
 }
-[data-testid="stAlert"] p,
-[data-testid="stAlert"] div {
-    color: inherit !important;
-}
-div[data-testid="stAlert"][data-baseweb="notification"] {
-    opacity: 1 !important;
-}
+.badge.best,.grade-best,.market-grade.best,.best-tag{border-color:var(--pos);color:var(--pos);}
+.badge.bet,.grade-bet,.market-grade.bet{border-color:var(--live);color:var(--live);}
+.badge.lean,.badge-lean,.grade-lean,.market-grade.lean{border-color:var(--flag);color:var(--flag);}
+.badge.pass,.grade-pass,.market-grade.pass{border-color:var(--rule);color:var(--dimmer);}
 
-/* Cards */
-.best-card, .game-card {
-    background: linear-gradient(180deg, #102238 0%, #0a1929 100%) !important;
-    border-color: #2b4359 !important;
+/* --- cards: hairline containers ------------------------------------------ */
+.combo-card,.best-card,.top-play-card,.pregame-track-card,.visual-bet-card,
+.plain-live-card,.live-page-card,.account-card,.single-summary,.wp-wrap{
+  background:var(--panel);border:1px solid var(--rule);border-radius:var(--r);
+  padding:11px 12px;margin:7px 0;box-shadow:none;
 }
-.best-pick, .match, .pick-main {
-    color: #ffffff !important;
+.combo-head,.best-top,.visual-score-head,.pregame-track-top{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:10px;
 }
-.best-game, .sp, .pick-sub, .game-time {
-    color: #a9bac9 !important;
+.combo-time,.top-play-rank,.pregame-track-time,.best-game,.top-play-sub,
+.combo-sp,.score-state,.inning-meta,.lineup-feed-diag,.tracker-gate-diag,.pregame-track-meta{
+  font-size:.65rem;color:var(--dimmer);line-height:1.55;
 }
-.metric {
-    background: #14283d !important;
-    border-color: #31495f !important;
+.combo-match,.pregame-track-game,.best-pick,.top-play-main,.score-main{
+  font-family:var(--mono);font-size:.88rem;font-weight:600;color:var(--ink);
+  letter-spacing:-.01em;margin:2px 0;
 }
-.metric span {
-    color: #9db0c2 !important;
-}
-.metric b {
-    color: #f8fbff !important;
-}
-.pick {
-    background: #071524 !important;
-}
-
-/* Badges */
-.badge-best {
-    color: #b6f7d0 !important;
-    background: #123c2a !important;
-    border-color: #2d7a53 !important;
-}
-.badge-bet {
-    color: #d6f0ff !important;
-    background: #10344b !important;
-    border-color: #2877a4 !important;
-}
-.badge-lean {
-    color: #ffe99a !important;
-    background: #3a3011 !important;
-    border-color: #806b17 !important;
-}
-.badge-pass {
-    color: #cbd8e4 !important;
-    background: #24313e !important;
-    border-color: #495b6d !important;
-}
-.lineup-ok { color: #8df0b7 !important; }
-.lineup-wait { color: #ffe27a !important; }
-
-/* Dataframes */
-[data-testid="stDataFrame"] {
-    border: 1px solid #2a435c !important;
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}
-[data-testid="stDataFrame"] * {
-    font-size: .82rem !important;
-}
-
-/* Tabs if introduced later */
-[data-baseweb="tab-list"] button {
-    color: #c9d6e2 !important;
-}
-[data-baseweb="tab-list"] button[aria-selected="true"] {
-    color: #ffffff !important;
-    font-weight: 850 !important;
-}
-
-/* Mobile tuning */
-@media (max-width: 700px) {
-    .block-container {
-        padding-left: .75rem !important;
-        padding-right: .75rem !important;
-    }
-    .best-pick {
-        font-size: 1.25rem !important;
-        line-height: 1.2 !important;
-    }
-    .match {
-        font-size: 1rem !important;
-        line-height: 1.25 !important;
-    }
-    .metrics {
-        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-        gap: 8px !important;
-    }
-    .metric {
-        min-height: 66px !important;
-    }
-    .status {
-        display: block !important;
-        line-height: 1.45 !important;
-    }
-    .stButton > button,
-    .stDownloadButton > button {
-        font-size: .95rem !important;
-    }
-}
-
-
-/* v1.5.1 combined upcoming cards */
-.combo-card{
-    margin:12px 0;padding:15px;border-radius:18px;
-    background:linear-gradient(180deg,#102238 0%,#0a1929 100%);
-    border:1px solid #2b4359;
-}
-.combo-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}
-.combo-time{font-size:.65rem;color:#8ea5ba;font-weight:850;letter-spacing:.04em}
-.combo-match{font-size:1.05rem;font-weight:950;color:#fff;margin-top:3px;line-height:1.25}
-.combo-sp{font-size:.68rem;color:#91a6b9;margin-top:4px}
 .market-row{
-    display:grid;grid-template-columns:72px 1fr auto;gap:10px;align-items:center;
-    padding:11px 12px;margin-top:8px;border-radius:12px;background:#071524;border:1px solid #22394f
+  display:flex;align-items:center;gap:10px;
+  padding:8px 0;border-top:1px solid var(--rule-soft);
 }
-.market-name{font-size:.62rem;font-weight:950;letter-spacing:.10em;color:#7dd3fc}
-.market-main{font-size:.95rem;font-weight:900;color:#fff}
-.market-sub{font-size:.65rem;color:#9db0c2;margin-top:2px}
-.market-grade{font-size:.62rem;font-weight:950;padding:5px 8px;border-radius:999px;white-space:nowrap}
-.grade-best{color:#b6f7d0;background:#123c2a;border:1px solid #2d7a53}
-.grade-bet{color:#d6f0ff;background:#10344b;border:1px solid #2877a4}
-.grade-lean{color:#ffe99a;background:#3a3011;border:1px solid #806b17}
-.grade-pass{color:#cbd8e4;background:#24313e;border:1px solid #495b6d}
-.grade-wait{color:#cbd8e4;background:#182838;border:1px solid #3d5368}
-@media(max-width:700px){
-  .market-row{grid-template-columns:58px 1fr auto;gap:7px;padding:10px}
-  .market-main{font-size:.88rem}
-  .market-sub{font-size:.61rem}
+.market-row>div:nth-child(2){flex:1;}
+.market-name{
+  font-family:var(--mono);font-size:.6rem;color:var(--dimmer);
+  width:22px;flex:0 0 22px;
 }
+.market-main{font-family:var(--mono);font-size:.8rem;color:var(--ink);font-variant-numeric:tabular-nums;}
+.market-sub{font-size:.64rem;color:var(--dimmer);margin-top:1px;}
+.market-chip{font-family:var(--mono);font-size:.62rem;color:var(--dim);}
+.pregame-track-line{font-family:var(--mono);font-size:.74rem;color:var(--dim);}
+.metric,.metrics,.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:8px 0;}
+.detail{background:var(--panel2);border:1px solid var(--rule);border-radius:4px;padding:7px 8px;}
+.detail span{display:block;font-size:.58rem;color:var(--dimmer);text-transform:none;letter-spacing:0;font-weight:400;}
+.detail b{display:block;margin-top:2px;font-family:var(--mono);font-size:.78rem;color:var(--ink);}
 
+/* --- live ---------------------------------------------------------------- */
+.score-badge{
+  font-family:var(--mono);font-size:.58rem;font-weight:600;padding:3px 7px;
+  border:1px solid var(--live);color:var(--live);border-radius:3px;
+}
+.mini-dot,.live-dot-wrap span{
+  display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:var(--live);margin-right:5px;
+}
+.score-teams,.team-row{font-family:var(--mono);font-size:.82rem;color:var(--ink);line-height:1.75;}
+.live-meta{text-align:right;}
+.wp-title{font-size:.6rem;color:var(--dimmer);text-transform:none;letter-spacing:0;margin-bottom:5px;}
+.wp-labels{display:flex;justify-content:space-between;font-size:.66rem;color:var(--dim);margin-bottom:4px;}
+.wp-labels b{font-family:var(--mono);color:var(--ink);margin-left:5px;}
+.wp-track,.ml-meter-wrap,.clear-track,.run-track{
+  height:4px;background:var(--panel2);border-radius:2px;overflow:hidden;position:relative;
+}
+.wp-away,.ml-live-wp{height:100%;background:var(--live);}
+.wp-mid,.ml-meter-mid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--rule);}
+.line-marker{background:var(--flag);}
+.run-stat,.line-stat,.run-summary,.line-axis-label,.run-axis,.clear-axis,.ml-meter-labels{
+  font-family:var(--mono);font-size:.64rem;color:var(--dimmer);
+}
+.diamond-mini{opacity:.85;}
 
-/* v1.6 simple workflow */
-[data-testid="stRadio"] { margin-bottom: .4rem !important; }
-[data-testid="stRadio"] label { font-size: 1rem !important; }
-.simple-note { color:#9db0c2;font-size:.72rem;line-height:1.45; }
-@media(max-width:700px){
-  .hero .sub{font-size:.92rem !important;line-height:1.45 !important;}
-  .hero{padding-bottom:.35rem !important;}
-  .kicker{margin-top:14px !important;margin-bottom:7px !important;}
-}
-
-
-/* v1.6.1 expander readability */
-[data-testid="stExpander"] {
-    background: #081827 !important;
-    border: 1px solid #284159 !important;
-    border-radius: 14px !important;
-    overflow: hidden !important;
-}
-[data-testid="stExpander"] details,
-[data-testid="stExpander"] details > div {
-    background: #081827 !important;
-    color: #eef5fb !important;
-}
-[data-testid="stExpander"] details summary,
-[data-testid="stExpander"] details summary:hover,
-[data-testid="stExpander"] details[open] summary {
-    background: #0d1d2e !important;
-    color: #eef5fb !important;
-    border-radius: 12px !important;
-}
-[data-testid="stExpander"] details summary p,
-[data-testid="stExpander"] details summary span,
-[data-testid="stExpander"] details summary div {
-    color: #eef5fb !important;
-    opacity: 1 !important;
-    font-weight: 850 !important;
-}
-[data-testid="stExpander"] details summary svg {
-    fill: #eef5fb !important;
-    color: #eef5fb !important;
-}
-[data-testid="stExpander"] details[open] summary {
-    border-bottom: 1px solid #284159 !important;
-    border-bottom-left-radius: 0 !important;
-    border-bottom-right-radius: 0 !important;
-}
-
-
-
-/* v1.8 visual bet tracker */
-.tracker-title-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0 14px}
-.tracker-title{font-size:1.55rem;font-weight:950;color:#fff;line-height:1.1}
-.tracker-count{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:0 8px;border-radius:9px;background:#21354d;color:#fff;font-size:.82rem;margin-left:7px;vertical-align:middle}
-.tracker-sub{font-size:.78rem;color:#9eafc0;margin-top:5px}
-.visual-bet-card{margin:13px 0;padding:16px;border-radius:18px;background:linear-gradient(180deg,#11253b 0%,#0b1b2d 100%);border:1px solid #2f4c67;box-shadow:0 8px 24px rgba(0,0,0,.18)}
-.visual-score-head{display:grid;grid-template-columns:1fr auto 58px;gap:15px;align-items:center}
-.score-teams{min-width:0}
-.team-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;color:#f8fbff;font-size:1rem;font-weight:900;line-height:1.45}
-.team-row b{font-size:1.08rem;color:#fff}
-.live-meta{border-left:1px solid #29445c;padding-left:13px;min-width:96px}
-.live-dot-wrap{font-size:.64rem;font-weight:950;color:#86efac;letter-spacing:.03em}
-.mini-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#39d98a;margin-right:6px;box-shadow:0 0 0 4px rgba(57,217,138,.08)}
-.inning-meta{font-size:.66rem;color:#c3d0dc;margin-top:8px;white-space:nowrap}
-.diamond-mini{width:44px;height:44px;position:relative;opacity:.55}
-.diamond-mini i{position:absolute;width:14px;height:14px;border:2px solid #3f5872;transform:rotate(45deg);border-radius:2px}
-.diamond-mini i:nth-child(1){left:15px;top:0}
-.diamond-mini i:nth-child(2){left:0;top:15px}
-.diamond-mini i:nth-child(3){right:0;top:15px}
-.diamond-mini i:nth-child(4){left:15px;bottom:0}
-.visual-divider{height:1px;background:#2b4359;margin:14px 0}
-.bet-section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
-.bet-pick{font-size:1.02rem;font-weight:950;color:#fff;line-height:1.2}
-.bet-type{font-size:.68rem;color:#9eb0c1;margin-top:3px}
-.track-pill{font-size:.61rem;font-weight:950;padding:6px 10px;border-radius:999px;border:1px solid;white-space:nowrap}
-.track-good{color:#79edaa !important;border-color:#247a50 !important;background:#0d3526 !important}
-.track-neutral{color:#f8df84 !important;border-color:#79621b !important;background:#30290f !important}
-.track-risk{color:#ff7f7f !important;border-color:#8c3434 !important;background:#351717 !important}
-.progress-label{display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:.68rem;color:#a8b8c7}
-.progress-label b{font-size:.85rem;color:#fff}
-.run-track{height:7px;border-radius:999px;background:#2b3f55;position:relative;margin-top:7px;overflow:visible}
-.run-fill{height:7px;border-radius:999px;background:#51d98a}
-.run-fill.track-neutral{background:#d4b94d !important}
-.run-fill.track-risk{background:#ff6666 !important}
-.line-marker{position:absolute;top:-6px;width:2px;height:19px;background:#e9f0f6;border-radius:1px;transform:translateX(-1px);box-shadow:0 0 0 2px rgba(255,255,255,.07)}
-.run-axis{position:relative;height:22px;margin-top:6px;color:#8195a8;font-size:.60rem}
-.run-axis span:first-child{position:absolute;left:0}
-.run-axis span:nth-child(2){position:absolute;transform:translateX(-50%);color:#e6edf4}
-.run-axis span:last-child{position:absolute;right:0}
-.ml-meter-wrap{height:44px;position:relative;margin:14px 2px 0}
-.ml-meter-line{position:absolute;left:0;right:0;top:20px;height:4px;border-radius:999px;background:linear-gradient(90deg,#a94343 0%,#475c70 50%,#2d9f69 100%)}
-.ml-meter-mid{position:absolute;left:50%;top:14px;width:1px;height:16px;background:#dce8f2;opacity:.55}
-.ml-meter-dot{position:absolute;top:13px;width:17px;height:17px;border-radius:50%;transform:translateX(-50%);background:#51d98a;border:3px solid #dff9ea}
-.ml-meter-dot.track-neutral{background:#d4b94d !important;border-color:#fff4bf !important}
-.ml-meter-dot.track-risk{background:#ff6666 !important;border-color:#ffd4d4 !important}
-.ml-meter-labels{display:flex;justify-content:space-between;gap:8px;color:#879aad;font-size:.58rem;margin-top:-3px}
-.ml-meter-labels b{color:#b9c8d6;font-weight:750}
-.plain-live-card{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:12px;margin:8px 0;border-radius:14px;background:#102238;border:1px solid #31506a}
-@media(max-width:700px){
-  .visual-bet-card{padding:14px}
-  .visual-score-head{grid-template-columns:1fr auto 42px;gap:10px}
-  .team-row{font-size:.92rem}
-  .live-meta{min-width:86px;padding-left:10px}
-  .diamond-mini{transform:scale(.85);transform-origin:center}
-  .bet-pick{font-size:.96rem}
-}
-
-/* v1.7.2 top plays */
-.top-play-card{
-    margin:8px 0;padding:12px 14px;border-radius:14px;
-    background:#0c1d2e;border:1px solid #2b465e;
-}
-.top-play-rank{font-size:.60rem;font-weight:950;color:#7dd3fc;letter-spacing:.08em}
-.top-play-main{font-size:.94rem;font-weight:950;color:#fff;margin-top:2px;line-height:1.22}
-.top-play-sub{font-size:.64rem;color:#9fb1c2;margin-top:3px}
-@media(max-width:700px){
-  .top-play-card{padding:11px 12px}
-  .top-play-main{font-size:.89rem}
-}
-
-
-/* v1.8.1 bottom navigation */
-div[class*="st-key-main_navigation"] {
-    position: fixed !important;
-    left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    z-index: 999999 !important;
-    margin: 0 !important;
-    padding: 8px 12px calc(8px + env(safe-area-inset-bottom)) !important;
-    background: rgba(7, 21, 36, .985) !important;
-    border-top: 1px solid #263e56 !important;
-    box-shadow: 0 -10px 28px rgba(0,0,0,.32) !important;
-}
-div[class*="st-key-main_navigation"] [role="radiogroup"] {
-    display: grid !important;
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    gap: 8px !important;
-    max-width: 760px !important;
-    margin: 0 auto !important;
-}
-div[class*="st-key-main_navigation"] label {
-    min-height: 52px !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    padding: 7px 3px !important;
-    border: 1px solid transparent !important;
-    border-radius: 13px !important;
-    background: transparent !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) {
-    background: #102b46 !important;
-    border-color: #3477ab !important;
-}
-div[class*="st-key-main_navigation"] label p {
-    color: #94a7ba !important;
-    font-size: .72rem !important;
-    font-weight: 850 !important;
-    white-space: nowrap !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) p {
-    color: #76c5ff !important;
-}
-div[class*="st-key-main_navigation"] input {
-    display: none !important;
-}
-.block-container {
-    padding-bottom: 110px !important;
-}
-
-/* actual occupied bases */
-.diamond-mini i.occupied {
-    background: #fbbf24 !important;
-    border-color: #fbbf24 !important;
-    box-shadow: 0 0 10px rgba(251,191,36,.28) !important;
-}
-.diamond-mini .base-second { left:15px !important; top:0 !important; }
-.diamond-mini .base-third { left:0 !important; top:15px !important; }
-.diamond-mini .base-first { right:0 !important; top:15px !important; }
-.diamond-mini .base-home { left:15px !important; bottom:0 !important; }
-
-/* quieter status chip, cleaner run axis */
-.track-pill {
-    font-size: .55rem !important;
-    padding: 5px 8px !important;
-}
-.run-axis span:last-child {
-    right: auto !important;
-}
-
-
-/* v1.8.2 professional bottom navigation */
-div[class*="st-key-main_navigation"] label {
-    min-height: 48px !important;
-    border-radius: 10px !important;
-}
-div[class*="st-key-main_navigation"] label p {
-    font-size: .74rem !important;
-    letter-spacing: .02em !important;
-    text-transform: uppercase !important;
-    font-weight: 900 !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) {
-    background: #0f2942 !important;
-    border-color: #3d6f98 !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) p {
-    color: #8fd0ff !important;
-}
-
-
-/* v1.8.3 clearer totals tracker */
-.run-summary{
-    display:grid !important;
-    grid-template-columns:1fr 1fr !important;
-    gap:10px !important;
-    margin-top:18px !important;
-    margin-bottom:14px !important;
-}
-.run-stat{
-    padding:10px 12px !important;
-    border-radius:12px !important;
-    background:#0b1b2d !important;
-    border:1px solid #29445c !important;
-}
-.run-stat span{
-    display:block !important;
-    font-size:.56rem !important;
-    letter-spacing:.09em !important;
-    font-weight:900 !important;
-    color:#93a7ba !important;
-}
-.run-stat b{
-    display:block !important;
-    margin-top:3px !important;
-    font-size:1.55rem !important;
-    line-height:1 !important;
-    font-weight:950 !important;
-    color:#ffffff !important;
-}
-.line-stat b{color:#dce8f2 !important}
-.clear-track{
-    height:9px !important;
-    margin-top:2px !important;
-}
-.clear-track .run-fill{height:9px !important}
-.clear-track .line-marker{
-    top:-7px !important;
-    height:23px !important;
-    width:3px !important;
-    background:#ffffff !important;
-}
-.clear-axis{
-    height:24px !important;
-    margin-top:8px !important;
-}
-.clear-axis .line-axis-label{
-    transform:translateX(-50%) !important;
-    color:#ffffff !important;
-    font-weight:900 !important;
-    font-size:.58rem !important;
-}
-.bet-pick{
-    font-size:1.08rem !important;
-    letter-spacing:.01em !important;
-}
-.track-pill{
-    font-size:.54rem !important;
-    padding:5px 8px !important;
-}
-.tracker-sub{
-    font-size:.72rem !important;
-}
-.visual-bet-card{
-    padding:15px !important;
-}
-
-/* Bottom navigation: compact, no extra title-like visual weight */
+/* --- nav ----------------------------------------------------------------- */
 div[class*="st-key-main_navigation"]{
-    padding-top:6px !important;
+  position:fixed!important;left:0;right:0;bottom:0;z-index:90;
+  background:rgba(15,21,27,.96)!important;backdrop-filter:blur(16px)!important;
+  border-top:1px solid var(--rule)!important;box-shadow:none!important;
 }
 div[class*="st-key-main_navigation"] [role="radiogroup"]{
-    gap:6px !important;
+  display:grid!important;grid-template-columns:repeat(5,1fr)!important;
+  gap:0!important;max-width:840px!important;margin:0 auto!important;
 }
 div[class*="st-key-main_navigation"] label{
-    min-height:44px !important;
+  border:0!important;border-radius:0!important;background:none!important;
+  min-height:50px!important;padding:6px 2px 5px!important;
+  display:flex!important;flex-direction:column!important;
+  align-items:center!important;justify-content:center!important;gap:3px!important;
 }
+div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(76,158,214,.07)!important;}
 div[class*="st-key-main_navigation"] label p{
-    font-size:.66rem !important;
-    letter-spacing:.04em !important;
+  font-size:.58rem!important;font-weight:500!important;color:var(--dimmer)!important;
+  margin:0!important;text-transform:none!important;letter-spacing:0!important;
 }
-@media(max-width:700px){
-    .run-stat b{font-size:1.42rem !important}
-    .bet-pick{font-size:1rem !important}
-}
+div[class*="st-key-main_navigation"] label:has(input:checked) p{color:var(--live)!important;font-weight:600!important;}
+div[class*="st-key-main_navigation"] input{display:none!important;}
+div[class*="st-key-main_navigation"] label::before{background-color:var(--dimmer)!important;}
+div[class*="st-key-main_navigation"] label:has(input:checked)::before{background-color:var(--live)!important;}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+:focus-visible{outline:2px solid var(--live)!important;outline-offset:2px!important;}
 
 
-/* v1.9.0 premium visual system */
-:root{
-  --bg:#06111d;
-  --panel:#0b1b2b;
-  --panel2:#10253a;
-  --line:#27445f;
-  --text:#f7fbff;
-  --muted:#93a9bd;
-  --cyan:#67c7ff;
-  --teal:#37d8c2;
-  --green:#43e28f;
-  --amber:#f4c95d;
-  --red:#ff6b73;
-}
-[data-testid="stAppViewContainer"]{
-    background:
-      radial-gradient(circle at 20% -10%, rgba(33,112,170,.16), transparent 32%),
-      radial-gradient(circle at 100% 15%, rgba(55,216,194,.08), transparent 28%),
-      linear-gradient(180deg,#06111d 0%,#071522 100%) !important;
-}
-.block-container{
-    max-width:920px !important;
-}
-
-/* Hero */
-.hero{
-    padding:10px 0 6px !important;
-}
-.hero h1{
-    font-size:2.05rem !important;
-    letter-spacing:-.035em !important;
-    text-shadow:0 6px 24px rgba(0,0,0,.28);
-}
-.hero .sub{
-    max-width:620px;
-    font-size:.9rem !important;
-    color:#98adbf !important;
-}
-.live-pill{
-    box-shadow:0 0 0 1px rgba(67,226,143,.15),0 8px 30px rgba(67,226,143,.08) !important;
-}
-
-/* Main status strip */
-.status{
-    background:linear-gradient(180deg,rgba(15,34,54,.92),rgba(9,24,39,.95)) !important;
-    border:1px solid #284762 !important;
-    box-shadow:0 10px 28px rgba(0,0,0,.16) !important;
-    backdrop-filter:blur(12px);
-}
-
-/* Buttons */
-.stButton > button,
-.stDownloadButton > button{
-    background:linear-gradient(180deg,#1b547f 0%,#153f63 100%) !important;
-    border:1px solid #4b8ebb !important;
-    box-shadow:0 8px 22px rgba(0,0,0,.18) !important;
-    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease !important;
-}
-.stButton > button:hover,
-.stDownloadButton > button:hover{
-    transform:translateY(-1px) !important;
-    border-color:#75b9e5 !important;
-    box-shadow:0 10px 26px rgba(29,91,140,.24) !important;
-}
-.stButton > button[kind="primary"]{
-    background:linear-gradient(135deg,#158b7f 0%,#126b75 100%) !important;
-    border-color:#32d4c3 !important;
-    box-shadow:0 8px 26px rgba(38,201,182,.18) !important;
-}
-
-/* Full-slate cards */
-.combo-card{
-    position:relative;
-    overflow:hidden;
-    background:
-      linear-gradient(180deg,rgba(18,43,67,.98) 0%,rgba(10,27,44,.98) 100%) !important;
-    border:1px solid #31516d !important;
-    box-shadow:0 14px 32px rgba(0,0,0,.18) !important;
-}
-.combo-card::before{
-    content:"";
-    position:absolute;left:0;top:0;bottom:0;width:3px;
-    background:linear-gradient(180deg,#5ac7ff,#32d9c4);
-    opacity:.85;
-}
-.market-row{
-    background:rgba(5,18,31,.78) !important;
-    border:1px solid #24445e !important;
-}
-.market-name{
-    color:#73cdfc !important;
-}
-.market-grade{
-    box-shadow:0 4px 16px rgba(0,0,0,.16);
-}
-
-/* Top plays */
-.top-play-card{
-    position:relative;
-    overflow:hidden;
-    background:linear-gradient(135deg,#11263b,#0b1a2a) !important;
-    border:1px solid #31516c !important;
-    box-shadow:0 10px 28px rgba(0,0,0,.16) !important;
-}
-.top-play-card::after{
-    content:"";
-    position:absolute;right:-24px;top:-24px;width:78px;height:78px;border-radius:50%;
-    background:radial-gradient(circle,rgba(71,199,255,.14),transparent 68%);
-}
-
-/* Tracker hero */
-.tracker-hero{
-    display:flex;justify-content:space-between;align-items:center;gap:14px;
-    margin:4px 0 18px;padding:15px 16px;border-radius:18px;
-    background:linear-gradient(135deg,#102941 0%,#0a1d30 70%);
-    border:1px solid #31516c;
-    box-shadow:0 16px 34px rgba(0,0,0,.18);
-}
-.tracker-eyebrow{
-    font-size:.56rem;font-weight:950;letter-spacing:.14em;color:#69d8ca;
-}
-.tracker-title{
-    margin-top:3px;font-size:1.65rem !important;letter-spacing:-.03em;
-}
-.tracker-live-orb{
-    display:flex;align-items:center;gap:7px;color:#78efaa;font-size:.62rem;font-weight:950;
-    border:1px solid #2f7252;background:#0c2d22;padding:7px 10px;border-radius:999px;
-}
-.tracker-live-orb span{
-    width:7px;height:7px;border-radius:50%;background:#43e28f;
-    box-shadow:0 0 0 5px rgba(67,226,143,.09),0 0 14px rgba(67,226,143,.4);
-}
-
-/* Tracked bet cards */
-.visual-bet-card{
-    position:relative;
-    overflow:hidden;
-    background:
-      radial-gradient(circle at 92% 8%,rgba(91,196,255,.08),transparent 24%),
-      linear-gradient(180deg,#112941 0%,#0b1c2e 100%) !important;
-    border:1px solid #355773 !important;
-    box-shadow:0 16px 36px rgba(0,0,0,.20) !important;
-    border-radius:20px !important;
-}
-.visual-bet-card::before{
-    content:"";
-    position:absolute;left:0;right:0;top:0;height:1px;
-    background:linear-gradient(90deg,transparent,#5bc9ff,transparent);
-    opacity:.7;
-}
-.team-row{
-    font-size:1.01rem !important;
-}
-.live-dot-wrap{
-    color:#72efa6 !important;
-}
-.market-chip{
-    display:inline-flex;align-items:center;
-    margin-bottom:5px;padding:3px 7px;border-radius:999px;
-    font-size:.51rem;font-weight:950;letter-spacing:.09em;
-    color:#8cd7ff;background:#0d2a42;border:1px solid #28587a;
-}
-.bet-pick{
-    font-size:1.12rem !important;
-}
-.run-summary{
-    gap:12px !important;
-}
-.run-stat{
-    background:linear-gradient(180deg,#0c1e30,#091827) !important;
-    border:1px solid #294a64 !important;
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.02);
-}
-.run-stat b{
-    font-size:1.72rem !important;
-}
-.clear-track{
-    background:#223b52 !important;
-    box-shadow:inset 0 1px 3px rgba(0,0,0,.28);
-}
-.run-fill{
-    box-shadow:0 0 14px rgba(67,226,143,.22);
-}
-.run-fill.track-risk{
-    box-shadow:0 0 14px rgba(255,107,115,.18);
-}
-.line-marker{
-    box-shadow:0 0 0 2px rgba(255,255,255,.09),0 0 14px rgba(255,255,255,.22) !important;
-}
-
-/* Status pills */
-.track-pill{
-    font-size:.56rem !important;
-    letter-spacing:.03em;
-    box-shadow:0 4px 16px rgba(0,0,0,.16);
-}
-.track-good{
-    background:linear-gradient(180deg,#0e3c2a,#0b2c20) !important;
-}
-.track-risk{
-    background:linear-gradient(180deg,#41191c,#2f1114) !important;
-}
-.track-neutral{
-    background:linear-gradient(180deg,#3b3112,#29220c) !important;
-}
-
-/* Functional diamond */
-.diamond-mini{
-    filter:drop-shadow(0 6px 12px rgba(0,0,0,.18));
-}
-.diamond-mini i{
-    border-color:#47647e !important;
-}
-.diamond-mini i.occupied{
-    background:#f4c95d !important;
-    border-color:#f4c95d !important;
-    box-shadow:0 0 12px rgba(244,201,93,.35) !important;
-}
-
-/* Expanders */
-[data-testid="stExpander"]{
-    box-shadow:0 10px 28px rgba(0,0,0,.12) !important;
-}
-
-/* Bottom nav */
-div[class*="st-key-main_navigation"]{
-    background:rgba(5,17,29,.96) !important;
-    backdrop-filter:blur(18px) !important;
-    border-top:1px solid #29445d !important;
-}
-div[class*="st-key-main_navigation"] label{
-    transition:all .15s ease !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked){
-    background:linear-gradient(180deg,#153650,#102b44) !important;
-    border-color:#4c82aa !important;
-    box-shadow:0 6px 18px rgba(0,0,0,.18) !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) p{
-    color:#8fd5ff !important;
-}
-
-/* Dataframes + metrics */
-.metric{
-    background:linear-gradient(180deg,#132a40,#0f2235) !important;
-    border-color:#31516c !important;
-    box-shadow:0 8px 22px rgba(0,0,0,.12);
-}
-
-@media(max-width:700px){
-    .tracker-hero{padding:13px 14px}
-    .tracker-title{font-size:1.45rem !important}
-    .tracker-live-orb{padding:6px 8px}
-    .visual-bet-card{border-radius:18px !important}
-    .run-stat b{font-size:1.55rem !important}
-}
-
-
-/* v1.9.1 win probability + slate pulse */
-.slate-pulse{
-    margin:0 0 18px;padding:14px 15px;border-radius:18px;
-    background:
-      radial-gradient(circle at 90% 0%,rgba(103,199,255,.10),transparent 30%),
-      linear-gradient(135deg,#10263b,#0a1b2c);
-    border:1px solid #31516c;
-    box-shadow:0 14px 30px rgba(0,0,0,.17);
-}
-.pulse-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.pulse-kicker{font-size:.52rem;letter-spacing:.12em;font-weight:950;color:#69d8ca}
-.pulse-title{font-size:1.05rem;font-weight:950;color:#fff;margin-top:3px}
-.pulse-status{font-size:.55rem;font-weight:950;padding:6px 8px;border-radius:999px;border:1px solid}
-.pulse-good{color:#75edaa;background:#0c3324;border-color:#29734f}
-.pulse-neutral{color:#f2d980;background:#30280e;border-color:#73601b}
-.pulse-risk{color:#ff8589;background:#351619;border-color:#813337}
-.pulse-grid{
-    display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin-top:12px
-}
-.pulse-grid div{
-    padding:8px 7px;border-radius:10px;background:rgba(6,18,31,.62);border:1px solid #25435b
-}
-.pulse-grid span{display:block;font-size:.48rem;letter-spacing:.07em;font-weight:900;color:#8fa4b7}
-.pulse-grid b{display:block;margin-top:3px;font-size:.82rem;color:#fff}
-
-.wp-wrap{
-    margin-top:13px;padding:10px 11px;border-radius:12px;
-    background:rgba(6,18,31,.55);border:1px solid #29465f
-}
-.wp-title{font-size:.50rem;letter-spacing:.10em;font-weight:950;color:#87a1b8;margin-bottom:7px}
-.wp-labels{display:flex;justify-content:space-between;gap:12px;font-size:.58rem;color:#a8b8c7}
-.wp-labels span{display:flex;gap:5px;align-items:baseline;min-width:0}
-.wp-labels span:last-child{justify-content:flex-end;text-align:right}
-.wp-labels b{font-size:.75rem;color:#fff}
-.wp-track{
-    position:relative;height:7px;margin-top:7px;border-radius:999px;overflow:hidden;
-    background:#1d3b55
-}
-.wp-away{
-    height:100%;background:linear-gradient(90deg,#55c9ff,#39d8c2);
-    border-radius:999px 0 0 999px
-}
-.wp-mid{
-    position:absolute;left:50%;top:-2px;width:1px;height:11px;background:rgba(255,255,255,.75)
-}
-.ml-live-wp{
-    display:flex;justify-content:space-between;align-items:end;gap:10px;margin-top:15px
-}
-.ml-live-wp span{font-size:.54rem;letter-spacing:.08em;font-weight:950;color:#8fa5b8}
-.ml-live-wp b{font-size:1.65rem;line-height:1;color:#fff}
-.live-wp-meter{margin-top:8px !important}
-.plain-live-card-wrap{
-    margin:8px 0;padding:0;border-radius:14px;background:#0d2033;border:1px solid #31506a;overflow:hidden
-}
-.plain-live-card-wrap .plain-live-card{
-    margin:0;border:0;border-radius:0;background:transparent
-}
-.plain-live-card-wrap .wp-wrap{
-    margin:0 10px 10px
-}
-@media(max-width:700px){
-    .pulse-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
-    .pulse-grid div:last-child{grid-column:span 2}
-    .ml-live-wp b{font-size:1.48rem}
-}
-
-
-/* v1.9.2 tracker readability + compact bottom nav */
-
-/* Brighter positive run progress */
-.run-fill.track-good,
-.run-fill.track-neutral.track-good {
-    background: linear-gradient(90deg,#35e08f 0%,#72f2b5 100%) !important;
-    box-shadow: 0 0 16px rgba(76,235,159,.38) !important;
-}
-.run-fill.track-neutral {
-    background: linear-gradient(90deg,#e5c84f 0%,#f2dc74 100%) !important;
-}
-.run-fill.track-risk {
-    background: linear-gradient(90deg,#ff626c 0%,#ff8a90 100%) !important;
-}
-
-/* Make slate pulse more prominent */
-.slate-pulse{
-    margin: 0 0 20px !important;
-    padding: 16px !important;
-    border: 1px solid #3b6687 !important;
-    background:
-      radial-gradient(circle at 85% 0%,rgba(74,209,255,.18),transparent 34%),
-      linear-gradient(135deg,#12314b 0%,#0b2135 100%) !important;
-    box-shadow: 0 16px 34px rgba(0,0,0,.24) !important;
-}
-.pulse-title{
-    font-size:1.16rem !important;
-}
-.pulse-grid b{
-    font-size:.92rem !important;
-}
-
-/* Bottom navigation: thin app-style bar */
-div[class*="st-key-main_navigation"] {
-    padding: 4px 10px calc(4px + env(safe-area-inset-bottom)) !important;
-    min-height: 58px !important;
-}
-div[class*="st-key-main_navigation"] [role="radiogroup"] {
-    gap: 5px !important;
-}
-div[class*="st-key-main_navigation"] label {
-    min-height: 40px !important;
-    padding: 4px 3px !important;
-    border-radius: 9px !important;
-}
-div[class*="st-key-main_navigation"] label p {
-    font-size: .62rem !important;
-    letter-spacing: .045em !important;
-}
-div[class*="st-key-main_navigation"] [data-testid="stWidgetLabel"],
-div[class*="st-key-main_navigation"] > label,
-div[class*="st-key-main_navigation"] legend {
-    display: none !important;
-}
-.block-container {
-    padding-bottom: 82px !important;
-}
-
-/* Keep cards above nav */
-.visual-bet-card,
-.slate-pulse,
-.tracker-hero {
-    position: relative;
-    z-index: 1;
-}
-
-
-.pulse-sub{
-    margin-top:3px;
-    font-size:.58rem;
-    color:#9eb2c5;
-}
-
-
-/* v2.0.0 mockup-style five-tab bottom navigation */
-div[class*="st-key-main_navigation"] {
-    position: fixed !important;
-    left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    z-index: 999999 !important;
-    margin: 0 !important;
-    padding: 7px 14px calc(7px + env(safe-area-inset-bottom)) !important;
-    min-height: 76px !important;
-    background:
-      linear-gradient(180deg,rgba(8,24,40,.97),rgba(5,17,29,.995)) !important;
-    border-top: 1px solid #29445d !important;
-    box-shadow: 0 -12px 30px rgba(0,0,0,.30) !important;
-    backdrop-filter: blur(20px) !important;
-}
-div[class*="st-key-main_navigation"] [role="radiogroup"] {
-    display: grid !important;
-    grid-template-columns: repeat(5, minmax(0,1fr)) !important;
-    gap: 2px !important;
-    max-width: 760px !important;
-    margin: 0 auto !important;
-}
-div[class*="st-key-main_navigation"] label {
-    min-width: 0 !important;
-    min-height: 62px !important;
-    padding: 5px 2px 3px !important;
-    border: 0 !important;
-    border-radius: 12px !important;
-    background: transparent !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    gap: 4px !important;
-    transition: all .15s ease !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) {
-    background: rgba(34,112,177,.10) !important;
-    box-shadow: none !important;
-}
-div[class*="st-key-main_navigation"] input {
-    display: none !important;
-}
-div[class*="st-key-main_navigation"] label p {
-    margin: 0 !important;
-    color: #7f93a8 !important;
-    font-size: .58rem !important;
-    font-weight: 750 !important;
-    letter-spacing: .01em !important;
-    text-transform: none !important;
-    white-space: nowrap !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) p {
-    color: #3da5ff !important;
-    font-weight: 900 !important;
-}
-
-/* shared icon shell */
+/* --- nav icons carried over from the previous sheet (SVG masks) --- */
 div[class*="st-key-main_navigation"] label::before {
     content:"" !important;
     display:block !important;
@@ -3769,763 +3097,26 @@ div[class*="st-key-main_navigation"] label::before {
     mask-repeat:no-repeat !important;
     mask-position:center !important;
 }
-div[class*="st-key-main_navigation"] label:has(input:checked)::before {
-    background-color:#3da5ff !important;
-    filter:drop-shadow(0 0 8px rgba(61,165,255,.28)) !important;
-}
-
-/* Home */
 div[class*="st-key-main_navigation"] label:nth-child(1)::before {
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E") !important;
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E") !important;
 }
-/* Live */
 div[class*="st-key-main_navigation"] label:nth-child(2)::before {
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E") !important;
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E") !important;
 }
-/* Tracker */
 div[class*="st-key-main_navigation"] label:nth-child(3)::before {
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E") !important;
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E") !important;
 }
-/* Bets */
 div[class*="st-key-main_navigation"] label:nth-child(4)::before {
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E") !important;
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E") !important;
 }
-/* Account */
 div[class*="st-key-main_navigation"] label:nth-child(5)::before {
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E") !important;
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E") !important;
 }
-
-.block-container {
-    padding-bottom: 104px !important;
-}
-
-/* dedicated page headers */
-.page-head{margin:4px 0 16px}
-.page-kicker{font-size:.54rem;font-weight:950;letter-spacing:.13em;color:#69d8ca}
-.page-title{font-size:1.7rem;font-weight:950;color:#fff;letter-spacing:-.03em;margin-top:3px}
-.page-count{display:inline-flex;min-width:27px;height:27px;align-items:center;justify-content:center;padding:0 7px;border-radius:8px;background:#20364f;font-size:.78rem;vertical-align:middle}
-.page-sub{font-size:.72rem;color:#9db0c2;margin-top:5px}
-.live-page-card{margin:10px 0;padding:14px;border-radius:17px;background:linear-gradient(180deg,#11273d,#0b1c2e);border:1px solid #34556f}
-.account-card{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0 16px}
-.account-card div{padding:12px;border-radius:12px;background:#0d2032;border:1px solid #29475f}
-.account-card span{display:block;font-size:.52rem;font-weight:900;letter-spacing:.09em;color:#8ea4b8}
-.account-card b{display:block;margin-top:4px;font-size:.72rem;color:#fff;word-break:break-word}
-@media(max-width:700px){
-    div[class*="st-key-main_navigation"] {padding-left:8px !important;padding-right:8px !important}
-    div[class*="st-key-main_navigation"] label::before {width:23px !important;height:23px !important}
-    div[class*="st-key-main_navigation"] label p {font-size:.54rem !important}
-}
-
-
-/* v2.0.1 — full-width native-style bottom navigation */
-div[class*="st-key-main_navigation"] {
-    left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    width: 100vw !important;
-    max-width: none !important;
-    min-height: 78px !important;
-    padding: 8px 12px calc(8px + env(safe-area-inset-bottom)) !important;
-    border-radius: 0 !important;
-    background: rgba(5,17,29,.995) !important;
-    border-top: 1px solid #29445d !important;
-    box-shadow: 0 -10px 28px rgba(0,0,0,.30) !important;
-}
-
-/* Fill the entire bottom width instead of centering inside a constrained wrapper */
-div[class*="st-key-main_navigation"] [role="radiogroup"] {
-    width: 100% !important;
-    max-width: none !important;
-    grid-template-columns: repeat(5, 1fr) !important;
-    gap: 0 !important;
-    margin: 0 !important;
-}
-
-/* Remove every Streamlit radio-control visual */
-div[class*="st-key-main_navigation"] input,
-div[class*="st-key-main_navigation"] label > div:first-child,
-div[class*="st-key-main_navigation"] [data-baseweb="radio"],
-div[class*="st-key-main_navigation"] [role="radio"] > div:first-child,
-div[class*="st-key-main_navigation"] svg[data-testid="stMarkdownIcon"] {
-    display: none !important;
-}
-
-/* Pure tab targets: no circular control, no selected pill/card */
-div[class*="st-key-main_navigation"] label {
-    min-height: 58px !important;
-    padding: 5px 2px 3px !important;
-    margin: 0 !important;
-    border: 0 !important;
-    border-radius: 0 !important;
-    background: transparent !important;
-    box-shadow: none !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) {
-    background: transparent !important;
-    border: 0 !important;
-    box-shadow: none !important;
-}
-
-/* Active state comes only from icon + label color, like the mockup */
-div[class*="st-key-main_navigation"] label::before {
-    width: 26px !important;
-    height: 26px !important;
-    margin-bottom: 3px !important;
-    background-color: #6f8397 !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked)::before {
-    background-color: #3da5ff !important;
-    filter: drop-shadow(0 0 8px rgba(61,165,255,.30)) !important;
-}
-div[class*="st-key-main_navigation"] label p {
-    color: #74889c !important;
-    font-size: .58rem !important;
-    font-weight: 720 !important;
-    letter-spacing: 0 !important;
-    text-transform: none !important;
-}
-div[class*="st-key-main_navigation"] label:has(input:checked) p {
-    color: #3da5ff !important;
-    font-weight: 850 !important;
-}
-
-/* Reserve exact space for the fixed bar */
-.block-container {
-    padding-bottom: 108px !important;
-}
-
-@media(max-width:700px){
-    div[class*="st-key-main_navigation"]{
-        padding-left: 4px !important;
-        padding-right: 4px !important;
-    }
-    div[class*="st-key-main_navigation"] label::before{
-        width:24px !important;
-        height:24px !important;
-    }
-    div[class*="st-key-main_navigation"] label p{
-        font-size:.55rem !important;
-    }
-}
-
-
-/* ===== Ninth Signal v3 mobile UX ===== */
-.ninth-hero{padding-top:8px!important;padding-bottom:6px!important}
-.ninth-hero .title{font-size:2.15rem!important}
-.ninth-hero .sub{font-size:.78rem!important;margin-top:6px!important}
-.ninth-hero .pill{margin-top:9px!important}
-.ninth-status{
-    margin:8px 0 12px!important;
-    padding:9px 11px!important;
-}
-.ninth-status>div{width:100%}
-
-/* Date and refresh are compact, not the focus */
-div[data-testid="stDateInput"]{margin-top:4px!important}
-div[class*="st-key-refresh_scores_top"] button{
-    min-height:42px!important;
-    border-radius:12px!important;
-    background:#102c45!important;
-    border:1px solid #315d80!important;
-    color:#b9d8ee!important;
-    font-size:.72rem!important;
-}
-
-/* Cleaner board hierarchy */
-.board-head{margin:12px 0 8px}
-.board-head span{display:block;color:#74d3f7;font-size:.59rem;font-weight:950;letter-spacing:.13em}
-.board-head b{display:block;color:#fff;font-size:1.14rem;margin-top:2px}
-
-/* True segmented control for Single Game / Full Slate */
-div[class*="st-key-production_view_mode"] [role="radiogroup"]{
-    display:inline-flex!important;
-    gap:0!important;
-    padding:0!important;
-    border-radius:4px!important;
-    background:var(--panel)!important;
-    border:1px solid var(--rule)!important;
-    overflow:hidden!important;
-    width:auto!important;
-}
-div[class*="st-key-production_view_mode"] label{
-    min-height:42px!important;
-    display:flex!important;
-    align-items:center!important;
-    justify-content:center!important;
-    border-radius:10px!important;
-    background:transparent!important;
-    border:0!important;
-    padding:0 8px!important;
-}
-div[class*="st-key-production_view_mode"] label:has(input:checked){
-    background:#133451!important;
-    box-shadow:inset 0 0 0 1px #3d7ca9!important;
-}
-div[class*="st-key-production_view_mode"] input,
-div[class*="st-key-production_view_mode"] label > div:first-child,
-div[class*="st-key-production_view_mode"] [data-baseweb="radio"]{
-    display:none!important;
-}
-div[class*="st-key-production_view_mode"] label p{
-    margin:0!important;
-    font-size:.72rem!important;
-    font-weight:850!important;
-    color:#8399ac!important;
-}
-div[class*="st-key-production_view_mode"] label:has(input:checked) p{
-    color:#fff!important;
-}
-
-/* Fixed full-width bottom tab bar using actual buttons */
-div[class*="st-key-ninth_nav_"]{
-    position:fixed!important;
-    bottom:0!important;
-    z-index:999999!important;
-    width:20vw!important;
-    margin:0!important;
-    padding:0!important;
-    background:#051522!important;
-    border-top:1px solid #29465e!important;
-}
-div[class*="st-key-ninth_nav_board_"]{left:0!important}
-div[class*="st-key-ninth_nav_live_"]{left:20vw!important}
-div[class*="st-key-ninth_nav_tracker_"]{left:40vw!important}
-div[class*="st-key-ninth_nav_bets_"]{left:60vw!important}
-div[class*="st-key-ninth_nav_more_"]{left:80vw!important}
-
-div[class*="st-key-ninth_nav_"] button{
-    height:78px!important;
-    min-height:78px!important;
-    width:100%!important;
-    border:0!important;
-    border-radius:0!important;
-    background:#051522!important;
-    box-shadow:none!important;
-    color:#71869a!important;
-    padding:7px 1px calc(7px + env(safe-area-inset-bottom))!important;
-    display:flex!important;
-    flex-direction:column!important;
-    justify-content:center!important;
-    align-items:center!important;
-    gap:5px!important;
-}
-div[class*="st-key-ninth_nav_"] button p{
-    margin:0!important;
-    font-size:.54rem!important;
-    font-weight:800!important;
-    line-height:1!important;
-    color:inherit!important;
-}
-div[class*="st-key-ninth_nav_"] button::before{
-    content:""!important;
-    display:block!important;
-    width:25px!important;
-    height:25px!important;
-    background-color:#70869a!important;
-    -webkit-mask-size:contain!important;
-    -webkit-mask-repeat:no-repeat!important;
-    -webkit-mask-position:center!important;
-    mask-size:contain!important;
-    mask-repeat:no-repeat!important;
-    mask-position:center!important;
-}
-div[class*="st-key-ninth_nav_"][class*="_active"] button{
-    color:#46a8ff!important;
-}
-div[class*="st-key-ninth_nav_"][class*="_active"] button::before{
-    background-color:#46a8ff!important;
-    filter:drop-shadow(0 0 7px rgba(70,168,255,.28));
-}
-/* Board */
-div[class*="st-key-ninth_nav_board_"] button::before{
-    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3Cpath d='M8 8h8M8 12h8M8 16h5'/%3E%3C/svg%3E");
-    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3Cpath d='M8 8h8M8 12h8M8 16h5'/%3E%3C/svg%3E");
-}
-/* Live */
-div[class*="st-key-ninth_nav_live_"] button::before{
-    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E");
-    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E");
-}
-/* Tracker */
-div[class*="st-key-ninth_nav_tracker_"] button::before{
-    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E");
-    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3Cpath d='m4 7 5-3 4 3 7-5'/%3E%3C/svg%3E");
-}
-/* Bets */
-div[class*="st-key-ninth_nav_bets_"] button::before{
-    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h12v18H6z'/%3E%3Cpath d='M9 8h6M9 12h6M9 16h4'/%3E%3C/svg%3E");
-    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 3h12v18H6z'/%3E%3Cpath d='M9 8h6M9 12h6M9 16h4'/%3E%3C/svg%3E");
-}
-/* More */
-div[class*="st-key-ninth_nav_more_"] button::before{
-    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E");
-    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E");
-}
-
-.block-container{padding-bottom:104px!important}
-@media(max-width:700px){
-    .hero{padding-left:0!important;padding-right:0!important}
-    .title{font-size:2.05rem!important}
-    .sub{max-width:92%!important}
-}
-
-
-/* ===== Ninth Signal v3.1 branded header ===== */
-div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]){
-    max-width:128px;
-    margin:0 auto;
-}
-div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]) img{
-    border-radius:22px;
-    filter:drop-shadow(0 10px 22px rgba(0,0,0,.22));
-}
-.branded-hero-copy{
-    padding-top:5px!important;
-    padding-bottom:5px!important;
-}
-.branded-hero-copy .title{
-    font-size:2.18rem!important;
-}
-.branded-hero-copy .eyebrow{
-    font-size:.62rem!important;
-}
-.branded-hero-copy .sub{
-    margin-top:6px!important;
-}
-@media(max-width:700px){
-    div[data-testid="stHorizontalBlock"]:has(img[src*="ninth_signal_mark"]){
-        gap:.5rem!important;
-    }
-    div[data-testid="stImage"]:has(img[src*="ninth_signal_mark"]){
-        max-width:92px;
-    }
-    .branded-hero-copy .title{
-        font-size:1.88rem!important;
-    }
-    .branded-hero-copy .sub{
-        font-size:.70rem!important;
-        line-height:1.35!important;
-    }
-}
-
-
-/* v3.2.1 embedded brand banner */
-.ninth-brand-header{
-    position:relative;
-    display:grid;
-    grid-template-columns:128px minmax(0,1fr);
-    gap:18px;
-    align-items:center;
-    margin:4px 0 14px;
-    padding:18px 18px 18px 16px;
-    border-radius:26px;
-    overflow:hidden;
-    background:
-        radial-gradient(circle at 16% 28%, rgba(0,185,255,.30), transparent 28%),
-        radial-gradient(circle at 84% 78%, rgba(0,185,255,.12), transparent 24%),
-        linear-gradient(90deg, rgba(2,12,31,.98) 0%, rgba(3,23,56,.98) 48%, rgba(2,12,28,.98) 100%);
-    border:1px solid rgba(71,139,255,.22);
-    box-shadow:0 18px 42px rgba(0,0,0,.32), inset 0 0 0 1px rgba(255,255,255,.02);
-}
-.ninth-brand-header::before{
-    content:"";
-    position:absolute;
-    inset:0;
-    pointer-events:none;
-    background:
-        linear-gradient(135deg, transparent 0%, rgba(56,189,248,.08) 34%, transparent 35%),
-        repeating-linear-gradient(90deg, transparent 0 46px, rgba(71,139,255,.05) 46px 47px);
-    opacity:.55;
-}
-.ninth-brand-header::after{
-    content:"";
-    position:absolute;
-    right:-74px;
-    top:-72px;
-    width:240px;
-    height:240px;
-    border-radius:50%;
-    pointer-events:none;
-    background:radial-gradient(circle, rgba(34,211,238,.22) 0%, rgba(34,211,238,.08) 48%, transparent 70%);
-    filter:blur(8px);
-}
-.ninth-brand-mark{
-    position:relative;
-    z-index:1;
-    width:128px;
-    height:128px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-}
-.ninth-brand-mark img{
-    width:100%;
-    height:100%;
-    object-fit:contain;
-    filter:drop-shadow(0 16px 28px rgba(0,0,0,.34));
-}
-.branded-hero-copy{
-    position:relative;
-    z-index:1;
-    padding:0 !important;
-}
-.ninth-brand-header .eyebrow{
-    font-size:.68rem !important;
-    font-weight:950 !important;
-    letter-spacing:.22em !important;
-    color:#82ddff !important;
-    margin-bottom:4px !important;
-}
-.ninth-brand-header .title{
-    font-size:clamp(2.15rem, 5vw, 3.9rem) !important;
-    line-height:.95 !important;
-    letter-spacing:-.06em !important;
-    font-weight:1000 !important;
-    color:#f4f8ff !important;
-    text-shadow:0 10px 26px rgba(0,0,0,.30);
-}
-.ninth-brand-header .title .signal{
-    background:linear-gradient(180deg, #f7fbff 0%, #bfdcff 42%, #1da8ff 100%);
-    -webkit-background-clip:text;
-    background-clip:text;
-    color:transparent;
-}
-.ninth-brand-header .sub{
-    font-size:.92rem !important;
-    color:#c8d7e8 !important;
-    margin-top:8px !important;
-    max-width:460px !important;
-    line-height:1.42 !important;
-}
-.ninth-brand-header .pill{
-    display:inline-flex;
-    margin-top:14px !important;
-    padding:8px 16px !important;
-    border-radius:999px;
-    background:rgba(34,197,94,.08) !important;
-    border:1px solid rgba(34,197,94,.30) !important;
-    color:#aef5c2 !important;
-    font-size:.74rem !important;
-    font-weight:950 !important;
-    letter-spacing:.09em !important;
-    box-shadow:0 8px 18px rgba(0,0,0,.18);
-}
-.ninth-full-logo{
-    width:min(100%,720px);
-    margin:2px auto 14px;
-}
-.ninth-full-logo img{
-    display:block;
-    width:100%;
-    height:auto;
-    border-radius:18px;
-}
-@media(max-width:700px){
-    .ninth-brand-header{
-        grid-template-columns:96px minmax(0,1fr);
-        gap:12px;
-        padding:14px 14px 14px 12px;
-        border-radius:22px;
-    }
-    .ninth-brand-mark{
-        width:96px;
-        height:96px;
-    }
-    .ninth-brand-header .title{
-        font-size:2rem !important;
-    }
-    .ninth-brand-header .sub{
-        font-size:.82rem !important;
-        max-width:100% !important;
-    }
-    .ninth-brand-header .pill{
-        margin-top:12px !important;
-        padding:7px 13px !important;
-        font-size:.68rem !important;
-    }
-}
-
-
-/* ===== Ninth Signal v3.2 automatic free data ===== */
-.free-data-note{
-    display:flex;
-    align-items:center;
-    gap:7px;
-    margin:7px 0 9px;
-    color:#7f96aa;
-    font-size:.63rem;
-    line-height:1.35;
-}
-.free-data-note span,
-.auto-fresh span{
-    flex:0 0 auto;
-    width:7px;
-    height:7px;
-    border-radius:50%;
-    background:#27d17f;
-    box-shadow:0 0 0 4px rgba(39,209,127,.10);
-}
-.auto-fresh{
-    display:flex;
-    align-items:center;
-    justify-content:flex-end;
-    gap:7px;
-    margin:8px 2px 4px;
-    color:#708aa0;
-    font-size:.51rem;
-    font-weight:900;
-    letter-spacing:.07em;
-}
-.auto-age{
-    color:#5f788e;
-    font-size:.58rem;
-}
-
-
-/* ===== v3.2.2 clearer lineup state ===== */
-.lineup-feed-diag{
-    margin-top:5px;
-    color:#6f8ca6;
-    font-size:.56rem;
-    font-weight:750;
-    letter-spacing:.015em;
-}
-.combo-time{
-    white-space:normal !important;
-}
-
-
-/* ===== v3.2.3 tracker/lineup sync ===== */
-.tracker-gate-diag{
-    margin-top:3px;
-    color:#6f8ca6;
-    font-size:.54rem;
-    font-weight:800;
-}
-
-
-/* ===== v3.2.4 official pregame tracker ===== */
-.pregame-track-card{
-    margin:10px 0 14px;
-    padding:16px;
-    border-radius:20px;
-    background:
-        radial-gradient(circle at 94% 8%, rgba(56,189,248,.10), transparent 30%),
-        linear-gradient(135deg, rgba(18,48,75,.98), rgba(5,25,42,.98));
-    border:1px solid rgba(78,139,181,.50);
-    box-shadow:0 12px 28px rgba(0,0,0,.18);
-}
-.pregame-track-top{
-    display:flex;
-    align-items:flex-start;
-    justify-content:space-between;
-    gap:12px;
-    padding-bottom:12px;
-    border-bottom:1px solid rgba(91,137,170,.28);
-}
-.pregame-track-time{
-    color:#8ca6bc;
-    font-size:.57rem;
-    font-weight:900;
-    letter-spacing:.08em;
-}
-.pregame-track-game{
-    margin-top:5px;
-    color:#fff;
-    font-size:1.06rem;
-    font-weight:950;
-    line-height:1.22;
-}
-.pregame-track-grade{
-    flex:0 0 auto;
-    padding:7px 10px;
-    border-radius:999px;
-    background:rgba(14,165,233,.13);
-    border:1px solid rgba(56,189,248,.52);
-    color:#8bddff;
-    font-size:.57rem;
-    font-weight:950;
-    letter-spacing:.06em;
-}
-.pregame-track-line{
-    display:flex;
-    align-items:center;
-    gap:12px;
-    margin-top:13px;
-}
-.pregame-track-line span{
-    color:#71d2f5;
-    font-size:.58rem;
-    font-weight:950;
-    letter-spacing:.10em;
-}
-.pregame-track-line b{
-    color:#fff;
-    font-size:1rem;
-}
-.pregame-track-meta{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:7px;
-    margin-top:12px;
-}
-.pregame-track-meta span{
-    display:flex;
-    flex-direction:column;
-    gap:2px;
-    padding:8px 9px;
-    border-radius:12px;
-    background:rgba(2,15,28,.42);
-    color:#718ca3;
-    font-size:.49rem;
-    font-weight:850;
-    letter-spacing:.06em;
-}
-.pregame-track-meta b{
-    color:#d9e8f4;
-    font-size:.66rem;
-    letter-spacing:0;
-}
-
-
-/* ===== v3.2.8 midnight tracker carry ===== */
-.midnight-carry-note{
-    margin:8px 0 12px;
-    padding:9px 11px;
-    border-radius:12px;
-    background:rgba(56,189,248,.07);
-    border:1px solid rgba(56,189,248,.18);
-    color:#9bc7df;
-    font-size:.61rem;
-    font-weight:800;
-}
-
-
-/* --- foundation overrides: must be last so component rules
-       written earlier in this sheet cannot win on tie. --- */
-
-
-html,body,.stApp,[data-testid="stAppViewContainer"]{
-  background:var(--ns-ground)!important;color:var(--ns-ink)!important;
-  font-family:var(--ns-sans)!important;
-}
-[data-testid="stAppViewContainer"] .main .block-container{
-  padding-top:.4rem!important;padding-bottom:5rem!important;max-width:820px!important;
-}
-[data-testid="stVerticalBlock"]{gap:.5rem!important;}
-
-/* Figures. */
-.mono,.odds,.edge,.ev,.num,.sl-stat b,.sl-date,.sl-age,
-[data-testid="stMetricValue"],[data-testid="stDataFrame"] *{
-  font-family:var(--ns-mono)!important;font-variant-numeric:tabular-nums!important;
-  font-feature-settings:"tnum" 1!important;
-}
-
-/* Header — one line, not a hero. */
-.ninth-brand-header{
-  display:flex!important;align-items:center!important;gap:9px!important;
-  background:none!important;background-image:none!important;
-  min-height:0!important;padding:4px 0 7px!important;margin:0 0 6px!important;
-  border:0!important;border-bottom:1px solid var(--ns-rule)!important;
-  border-radius:0!important;box-shadow:none!important;
-}
-.ninth-brand-header::before{display:none!important;}
-.ninth-brand-mark img{width:22px!important;height:22px!important;border-radius:4px!important;}
-.ninth-hero,.hero{display:flex!important;align-items:center!important;gap:10px!important;
-  flex:1!important;padding:0!important;margin:0!important;}
-.ninth-hero .sub,.hero .sub,.free-data-note{display:none!important;}
-.ninth-hero .title,.hero .title{font-size:.92rem!important;font-weight:600!important;
-  letter-spacing:-.01em!important;color:var(--ns-ink)!important;margin:0!important;}
-.ninth-hero .title .signal{color:var(--ns-dim)!important;font-weight:400!important;}
-.pill{margin:0!important;padding:2px 7px!important;border-radius:3px!important;
-  background:none!important;border:1px solid var(--ns-pos)!important;color:var(--ns-pos)!important;
-  font-size:.58rem!important;font-weight:500!important;letter-spacing:.02em!important;}
-
-/* Tracked-out caps eyebrows above every heading are template chrome. */
-.eyebrow,.branded-hero-copy .eyebrow,.tracker-eyebrow,.pulse-kicker,.page-kicker{
-  display:none!important;
-}
-.board-head,.kicker,.page-head,.pulse-head{
-  margin:12px 0 6px!important;padding-bottom:5px!important;
-  border-bottom:1px solid var(--ns-rule)!important;
-}
-.board-head span{display:none!important;}
-.board-head b,.kicker,.page-title,.pulse-title,.tracker-title{
-  font-size:.82rem!important;font-weight:600!important;color:var(--ns-dim)!important;
-  letter-spacing:0!important;text-transform:none!important;margin:0!important;
-}
-
-/* Slate bar. */
-.slate-bar{display:flex;align-items:baseline;gap:14px;padding:7px 2px 8px;
-  margin:0 0 4px;border-bottom:1px solid var(--ns-rule);}
-.slate-bar .sl-date{font-size:.78rem;font-weight:600;color:var(--ns-ink);}
-.sl-stat{display:inline-flex;align-items:baseline;gap:4px;}
-.sl-stat b{font-size:.82rem;font-weight:600;}
-.sl-stat b.u{color:var(--ns-ink);} .sl-stat b.l{color:var(--ns-live);}
-.sl-stat b.f{color:var(--ns-dim);} .sl-stat b.z{color:var(--ns-dimmer);font-weight:400;}
-.sl-stat i{font-style:normal;font-size:.68rem;color:var(--ns-dimmer);}
-.slate-bar .sl-age{margin-left:auto;font-size:.66rem;color:var(--ns-dimmer);}
-.status.ninth-status{display:none!important;}
-
-/* Controls. */
-[data-testid="stWidgetLabel"]{display:none!important;}
-.stButton>button{width:100%;min-height:0!important;padding:10px 14px!important;
-  border-radius:4px!important;font-weight:500!important;font-size:.84rem!important;
-  background:var(--ns-panel)!important;color:var(--ns-ink)!important;
-  border:1px solid var(--ns-rule)!important;box-shadow:none!important;}
-.stButton>button:hover{background:var(--ns-panel-2)!important;border-color:#31404f!important;}
-.stButton>button[kind="primary"],.stButton>button[data-testid="stBaseButton-primary"]{
-  background:var(--ns-pos)!important;color:#07120c!important;border:0!important;font-weight:600!important;}
-.stButton>button[kind="primary"]:hover{background:#37b07a!important;}
-.stButton>button:disabled{background:var(--ns-panel)!important;color:var(--ns-dimmer)!important;
-  border-color:var(--ns-rule)!important;}
-
-div[class*="st-key-production_view_mode"] label{
-  margin:0!important;padding:7px 18px!important;border:0!important;border-radius:0!important;
-  background:none!important;min-height:0!important;box-shadow:none!important;}
-div[class*="st-key-production_view_mode"] label:has(input:checked){background:var(--ns-panel-2)!important;}
-div[class*="st-key-production_view_mode"] label p{font-size:.78rem!important;font-weight:500!important;color:var(--ns-dim)!important;}
-div[class*="st-key-production_view_mode"] label:has(input:checked) p{color:var(--ns-ink)!important;font-weight:600!important;}
-div[class*="st-key-production_view_mode"] [data-baseweb="radio"]>div:first-child{display:none!important;}
-
-/* Nav. */
-div[class*="st-key-main_navigation"] label,
-div[class*="st-key-main_navigation"] [role="radiogroup"]>div{
-  border:0!important;box-shadow:none!important;}
-div[class*="st-key-main_navigation"] label{min-height:54px!important;}
-div[class*="st-key-main_navigation"] label p{font-size:.6rem!important;font-weight:500!important;}
-div[class*="st-key-main_navigation"] label:has(input:checked) p{color:var(--ns-live)!important;font-weight:600!important;}
-div[class*="st-key-main_navigation"] label:has(input:checked){background:rgba(74,159,216,.08)!important;}
-
-/* Surfaces. */
-[data-testid="stExpander"]{border:1px solid var(--ns-rule)!important;border-radius:6px!important;
-  background:var(--ns-panel)!important;}
-[data-testid="stExpander"] summary{font-size:.78rem!important;font-weight:500!important;color:var(--ns-dim)!important;}
-[data-testid="stDataFrame"]{border:1px solid var(--ns-rule)!important;border-radius:6px!important;}
-[data-testid="stDataFrame"] *{font-size:.74rem!important;}
-[data-testid="stMetricValue"]{font-size:1.35rem!important;font-weight:500!important;color:var(--ns-ink)!important;}
-[data-testid="stMetricLabel"]{font-size:.68rem!important;color:var(--ns-dim)!important;font-weight:400!important;}
-.stCaption,[data-testid="stCaptionContainer"]{color:var(--ns-dimmer)!important;font-size:.72rem!important;}
-
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
-:focus-visible{outline:2px solid var(--ns-live)!important;outline-offset:2px!important;}
-
-/* Component rules that outrank the foundation on specificity, corrected at
-   source rather than fought with another override layer. */
-.ninth-hero .title{font-size:.92rem!important;font-weight:600!important;}
-.ninth-hero .sub{display:none!important;}
-.ninth-hero .pill{margin:0!important;}
-.ninth-hero{padding:0!important;}
-[data-testid="stRadio"] label{font-size:.78rem!important;}
-[data-testid="stRadio"]>label{display:none!important;}
-[data-testid="stWidgetLabel"] p,label{font-weight:500!important;}
-div[data-testid="stDateInput"]{margin-top:0!important;}
-
 /* --- slate table ------------------------------------------------------- */
 .tbl-head{display:flex;gap:14px;padding:4px 2px 6px;font-size:.66rem;
   color:var(--ns-dimmer);border-bottom:1px solid var(--ns-rule);}
@@ -4570,6 +3161,7 @@ div[data-testid="stDateInput"]{margin-top:0!important;}
   font-size:.68rem;color:var(--ns-ink);line-height:1.75;}
 .inp .ic i{font-style:normal;color:var(--ns-dimmer);}
 .inp-foot{font-family:var(--ns-mono);font-size:.64rem;color:var(--ns-dimmer);padding-top:7px;}
+
 
 </style>
 """, unsafe_allow_html=True)
@@ -4724,55 +3316,93 @@ def fetch_single_game_totals(api_key, game):
     return {"events":[ev] if isinstance(ev,dict) and ev else [],"error":"" if ev else "No live total was returned for this game.","quota":quota}
 
 
+# --- your book --------------------------------------------------------------
+# Every price used for grades, EV and the tracker comes from the book you can
+# actually bet. The old code used the best price across all US books, which
+# overstated EV and tracked ROI at numbers you could never get.
+# Set MY_BOOK in Streamlit secrets if the feed names 734 Games differently.
+CONSENSUS_BOOK_LABEL = "Consensus (734 Games not in feed)"
+
+
+def _norm_book(s):
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def _my_book_ids():
+    ids = {"734games", "734"}
+    try:
+        extra = st.secrets.get("MY_BOOK", "")
+    except Exception:
+        extra = ""
+    if extra:
+        ids.add(_norm_book(extra))
+    return ids
+
+
+def _is_my_book(book):
+    ids = _my_book_ids()
+    return _norm_book(book.get("title")) in ids or _norm_book(book.get("key")) in ids
+
+
 def totals_market(event):
-    if not event: return None
-    rows=[]
-    for book in event.get("bookmakers",[]):
-        title=book.get("title") or book.get("key") or "book"
-        for m in book.get("markets",[]):
-            if m.get("key")!="totals": continue
-            by_point={}
-            for o in m.get("outcomes",[]):
-                name=str(o.get("name","")).strip().lower()
-                try: point=float(o.get("point"))
-                except Exception: continue
-                price=valid_odds(o.get("price"))
-                if price is None or name not in ("over","under"): continue
-                by_point.setdefault(point,{})[name]=(price,title)
-            for point,pair in by_point.items():
-                if "over" in pair and "under" in pair: rows.append({"point":point,"over":pair["over"][0],"under":pair["under"][0],"book":title})
-    if not rows: return None
-    counts={}
-    for r in rows:
-        counts[r["point"]]=counts.get(r["point"],0)+1
-    if not counts:
+    """Consensus market view plus the price you can bet.
+
+    over/under_market_prob are the market's fair (no-vig) probabilities AT THE
+    LINE YOU WOULD BET. If 734 hangs a different number than consensus, the
+    consensus is converted to a market-implied mean and re-priced at 734's line.
+    Keys over_best/under_best are kept for compatibility; they now hold YOUR
+    book's price (or consensus if your book is not in the feed).
+    """
+    if not event:
         return None
-    maxn=max(counts.values())
-    candidate_points=sorted([p for p,n in counts.items() if n==maxn])
-    # Never average two tied market totals into a synthetic line (e.g. 8.0 and 8.5 -> 8.25).
-    # Pick an actual quoted point closest to the median of all quoted book totals.
-    all_points=sorted(r["point"] for r in rows)
-    center=float(statistics.median(all_points))
-    point=min(candidate_points,key=lambda p:(abs(float(p)-center),float(p)))
-    same=[r for r in rows if abs(float(r["point"])-float(point))<1e-9]
-    if not same:
+    rows = []
+    for book in event.get("bookmakers", []):
+        title = book.get("title") or book.get("key") or "book"
+        mine = _is_my_book(book)
+        for m in book.get("markets", []):
+            if m.get("key") != "totals":
+                continue
+            by_point = {}
+            for o in m.get("outcomes", []):
+                name = str(o.get("name", "")).strip().lower()
+                try:
+                    point = float(o.get("point"))
+                except Exception:
+                    continue
+                price = valid_odds(o.get("price"))
+                if price is None or name not in ("over", "under"):
+                    continue
+                by_point.setdefault(point, {})[name] = price
+            for point, pair in by_point.items():
+                if "over" in pair and "under" in pair:
+                    rows.append({"point": point, "over": pair["over"], "under": pair["under"],
+                                 "book": title, "mine": mine})
+    if not rows:
         return None
-    over_prices=[r["over"] for r in same if valid_odds(r.get("over")) is not None]
-    under_prices=[r["under"] for r in same if valid_odds(r.get("under")) is not None]
-    if not over_prices or not under_prices:
-        return None
-    oc=int(round(statistics.median(over_prices)))
-    uc=int(round(statistics.median(under_prices)))
-    ob=max(same,key=lambda r:r["over"])
-    ub=max(same,key=lambda r:r["under"])
-    po,pu=no_vig_pair(oc,uc)
-    # Defensive fallback: a malformed book/consensus pair should never crash the full slate.
-    if po is None or pu is None:
-        po,pu=no_vig_pair(ob["over"],ub["under"])
+
+    cons_point = _consensus_point([r["point"] for r in rows])
+    same = [r for r in rows if abs(r["point"] - cons_point) < 1e-9]
+    oc = int(round(statistics.median([r["over"] for r in same])))
+    uc = int(round(statistics.median([r["under"] for r in same])))
+    po, pu = no_vig_pair(oc, uc)
     if po is None or pu is None:
         return None
-    return {"total":point,"over_best":ob["over"],"under_best":ub["under"],"over_book":ob["book"],"under_book":ub["book"],
-            "over_market_prob":float(po),"under_market_prob":float(pu),"books":len(same)}
+    market_mean = market_implied_total_mean(cons_point, po)
+
+    mine = [r for r in rows if r["mine"]]
+    if mine:
+        r = min(mine, key=lambda z: abs(z["point"] - cons_point))
+        bet_point, over_px, under_px, label = r["point"], r["over"], r["under"], r["book"]
+        o, u, _ = _total_side_probs(market_mean, bet_point)
+        p_over = o / (o + u) if (o + u) > 0 else 0.5
+    else:
+        bet_point, over_px, under_px, label = cons_point, oc, uc, CONSENSUS_BOOK_LABEL
+        p_over = po
+    return {"total": bet_point, "over_best": over_px, "under_best": under_px,
+            "over_book": label, "under_book": label,
+            "over_market_prob": float(p_over), "under_market_prob": float(1.0 - p_over),
+            "books": len(same), "consensus_total": cons_point,
+            "market_mean": float(market_mean), "my_book": bool(mine)}
 
 
 def poisson_total_probs(lam,line):
@@ -4793,29 +3423,63 @@ def totals_ev(win,lose,odds):
 def total_fair_ml(win,lose):
     d=float(win)+float(lose); return fair_ml(float(win)/d) if d>0 else None
 
-TOTALS_MODEL_WEIGHT = 0.80
-TOTALS_RESIDUAL_SD = 3.92
+# Interim. The full-game model measured edge_corr ~0.02 against closing lines,
+# so the market gets most of the weight until a clean point-in-time backtest
+# says otherwise. Both backtests now report suggested_model_weight (the edge
+# slope, clipped to 0-1) -- set this from that number.
+TOTALS_MODEL_WEIGHT = 0.25
+TOTALS_RESIDUAL_SD = 3.92      # no longer used for pricing; kept for diagnostics
 TOTALS_MAX_OFFICIAL = 3
 
-def _normal_cdf(x, mean, sd):
-    sd=max(0.25,float(sd))
-    z=(float(x)-float(mean))/(sd*math.sqrt(2.0))
-    return 0.5*(1.0+math.erf(z))
+
+def _total_pmf(total_mean, away_share=0.5):
+    m = max(0.3, float(total_mean))
+    return np.convolve(_nb_pmf(m * away_share), _nb_pmf(m * (1.0 - away_share)))
+
+
+def _total_side_probs(total_mean, line):
+    """(P over, P under, P push) for a game total, from the same negative-binomial
+    run model win_prob uses."""
+    pmf = _total_pmf(total_mean)
+    line = float(line)
+    if abs(line - round(line)) < 1e-9:
+        n = int(round(line))
+        under = float(pmf[:max(n, 0)].sum())
+        push = float(pmf[n]) if 0 <= n < len(pmf) else 0.0
+    else:
+        n = int(math.floor(line))
+        under = float(pmf[:n + 1].sum())
+        push = 0.0
+    over = max(0.0, 1.0 - under - push)
+    return over, under, push
+
+
+def market_implied_total_mean(line, over_prob_novig):
+    """Mean total that reproduces the market's no-vig over probability.
+
+    The posted line sits near the MEDIAN of a right-skewed distribution, roughly half a run
+    below the mean. Blending a model mean with the raw line (what
+    the old code did) mixed two different quantities.
+    """
+    target = clamp(float(over_prob_novig), 0.02, 0.98)
+    lo, hi = 2.0, 20.0
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        o, u, _ = _total_side_probs(mid, line)
+        p = o / (o + u) if (o + u) > 0 else 0.5
+        if p < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
 
 def production_total_probs(model_total, market_total):
-    mean=float(model_total)
-    line=float(market_total)
-    if abs(line-round(line)) < 1e-9:
-        n=int(round(line))
-        under=_normal_cdf(n-0.5, mean, TOTALS_RESIDUAL_SD)
-        over=1.0-_normal_cdf(n+0.5, mean, TOTALS_RESIDUAL_SD)
-        push=max(0.0,1.0-over-under)
-    else:
-        under=_normal_cdf(line, mean, TOTALS_RESIDUAL_SD)
-        over=1.0-under
-        push=0.0
-    s=over+under+push
-    return (over/s,under/s,push/s) if s>0 else (.5,.5,0.)
+    """Replaces a symmetric normal around the mean. Totals are right-skewed: at
+    mean 8.5 against 8.5 the true under is ~55%, not 50%, so the normal handed
+    every over about 5 points of fake edge."""
+    return _total_side_probs(model_total, market_total)
+
 
 def totals_grade(edge):
     edge=float(edge)
@@ -4827,33 +3491,38 @@ def totals_grade(edge):
         return "LEAN"
     return "PASS"
 
+
 def build_total_pick(model_total, tm):
     if not tm:
         return None
     try:
-        market_total=float(tm["total"])
-        mpo=float(tm.get("over_market_prob"))
-        mpu=float(tm.get("under_market_prob"))
+        market_total = float(tm["total"])
+        mpo = float(tm.get("over_market_prob"))
+        mpu = float(tm.get("under_market_prob"))
     except (TypeError, ValueError, KeyError):
         return None
-    if not all(math.isfinite(v) for v in (market_total,mpo,mpu)):
+    if not all(math.isfinite(v) for v in (market_total, mpo, mpu)):
         return None
-    calibrated_total = TOTALS_MODEL_WEIGHT*float(model_total) + (1.0-TOTALS_MODEL_WEIGHT)*market_total
-    op,up,push = production_total_probs(calibrated_total, market_total)
-    d=op+up
-    op_np=op/d if d>0 else .5
-    up_np=up/d if d>0 else .5
-    oe=op_np-mpo
-    ue=up_np-mpu
+    market_mean = tm.get("market_mean")
+    if market_mean is None:
+        market_mean = market_implied_total_mean(market_total, mpo)
+    calibrated_total = (TOTALS_MODEL_WEIGHT * float(model_total)
+                        + (1.0 - TOTALS_MODEL_WEIGHT) * float(market_mean))
+    op, up, push = production_total_probs(calibrated_total, market_total)
+    d = op + up
+    op_np = op / d if d > 0 else .5
+    up_np = up / d if d > 0 else .5
+    oe = op_np - mpo
+    ue = up_np - mpu
     if oe >= ue:
         side="OVER"; prob=op; lose=up; edge=oe; odds=tm["over_best"]; book=tm["over_book"]
     else:
         side="UNDER"; prob=up; lose=op; edge=ue; odds=tm["under_best"]; book=tm["under_book"]
-    ev=totals_ev(prob,lose,odds)
+    ev = totals_ev(prob, lose, odds)
     return {
         "side":side,"prob":prob,"edge":edge,"ev":ev,"odds":odds,"book":book,
         "grade":totals_grade(edge),"push":push,"calibrated_total":calibrated_total,
-        "market_total":float(tm["total"]),"books":tm["books"],
+        "market_total":market_total,"market_mean":float(market_mean),"books":tm["books"],
         "over_prob":op,"under_prob":up,"over_edge":oe,"under_edge":ue,
         "over_odds":tm["over_best"],"under_odds":tm["under_best"],
         "over_book":tm["over_book"],"under_book":tm["under_book"],
@@ -5201,8 +3870,10 @@ def moneyline_market(event):
     prices={away_k:[],home_k:[]}
     books={away_k:[],home_k:[]}
     updates=[]
+    mine={away_k:None,home_k:None}
     for book in event.get("bookmakers",[]):
         title=book.get("title") or book.get("key") or "book"
+        is_mine=_is_my_book(book)
         for m in book.get("markets",[]):
             if m.get("key")!="h2h": continue
             if m.get("last_update"): updates.append(m.get("last_update"))
@@ -5210,9 +3881,14 @@ def moneyline_market(event):
                 k=team_key(o.get("name")); p=valid_odds(o.get("price"))
                 if k in prices and p is not None:
                     prices[k].append(p); books[k].append((p,title))
+                    if is_mine: mine[k]=(p,title)
     if not prices[away_k] or not prices[home_k]: return None
     away_cons=int(round(statistics.median(prices[away_k]))); home_cons=int(round(statistics.median(prices[home_k])))
-    away_best=max(books[away_k], key=lambda x:x[0]); home_best=max(books[home_k], key=lambda x:x[0])
+    # Price at your book, not the best number in the market (see totals_market).
+    if mine[away_k] and mine[home_k]:
+        away_best, home_best = mine[away_k], mine[home_k]
+    else:
+        away_best, home_best = (away_cons, CONSENSUS_BOOK_LABEL), (home_cons, CONSENSUS_BOOK_LABEL)
     return {
         "away_consensus":away_cons,"home_consensus":home_cons,
         "away_best":away_best[0],"home_best":home_best[0],"away_book":away_best[1],"home_book":home_best[1],
@@ -5220,12 +3896,17 @@ def moneyline_market(event):
     }
 
 
+# Interim, same reasoning as TOTALS_MODEL_WEIGHT. The old 0.60-0.70 came from a
+# research run that predates the 0.02 edge-correlation result, and the moneyline
+# has never been revalidated. Raise only on backtest evidence.
+ML_MODEL_WEIGHT = 0.25
+
+
 def model_alpha(confidence, lineup_confirmed):
-    # Research champion selected ~70% model weight. Production starts slightly more conservative until lineups are confirmed.
-    a = 0.70 if lineup_confirmed else 0.60
-    if confidence < 70: a -= 0.10
-    elif confidence < 80: a -= 0.05
-    return max(0.45,min(0.70,a))
+    a = ML_MODEL_WEIGHT if lineup_confirmed else ML_MODEL_WEIGHT * 0.8
+    if confidence < 70: a *= 0.6
+    elif confidence < 80: a *= 0.8
+    return clamp(a, 0.0, 1.0)
 
 
 def thresholds(odds):
@@ -5381,16 +4062,6 @@ def smart_card_label(side, confidence, lineup_confirmed):
             return "LEAN"
         return "PASS"
 
-    # Frozen price-bucket audit supports edge as the primary gate.
-    # 10%+ = strongest zone, 7.5–10% = bettable, 5–7.5% = lean, <5% = pass.
-    if legacy in ("BEST BET","BET") and edge >= .10:
-        return "BEST BET"
-    if legacy in ("BEST BET","BET") and edge >= .075:
-        return "BET"
-    if edge >= .05:
-        return "LEAN"
-    return "PASS"
-
 
 def smart_score(side, confidence):
     if side.get("edge") is None or side.get("ev") is None:
@@ -5431,7 +4102,9 @@ def build_candidates(model_df, games, events):
                 ]
                 for team,raw,market_p,price,book in sides:
                     cal=market_p+alpha*(raw-market_p); cal=max(.001,min(.999,cal))
-                    verdict,edge,ev,imp=grade(cal,price,conf,confirmed)
+                    # Run conviction is measured against the no-vig consensus,
+                    # not the vig-inclusive price.
+                    verdict,edge,ev,imp,_redge=ml_grade_v2(cal,price,conf,confirmed,market_prob=market_p)
                     side_rows.append({"team":team,"raw":raw,"market_prob":market_p,"prob":cal,"odds":price,"book":book,"verdict":verdict,"edge":edge,"ev":ev,"fair":fair_ml(cal)})
 
         if not market_available:
@@ -5569,7 +4242,7 @@ TRACKER_COLUMNS = [
     "Model_Probability","Edge","EV","Fair_Line","Model_Weight","Market_Weight",
     "Lineups_Confirmed","Model_Confidence","App_Version","Model_Version",
     "Result","Units","Final_Away_Score","Final_Home_Score","Final_Total",
-    "Graded_At_ET",
+    "Graded_At_ET","Close_Odds","Close_Line","Close_Fair_Prob","CLV",
 ]
 
 
@@ -5606,6 +4279,7 @@ def _tracker_clean(df):
         "GamePk","Market_Line","Odds","Model_Probability","Edge","EV",
         "Fair_Line","Model_Weight","Market_Weight","Model_Confidence",
         "Units","Final_Away_Score","Final_Home_Score","Final_Total",
+        "Close_Odds","Close_Line","Close_Fair_Prob","CLV",
     ]
     for c in numeric_cols:
         if c in out.columns:
@@ -5930,6 +4604,91 @@ def _american_profit(odds):
     except Exception:
         return 0.0
 
+CLV_WINDOW_HOURS = 3.0
+
+
+def update_closing_prices(candidates, games, totals_payload):
+    """Record the closing price and CLV for every pending pregame bet.
+
+    Overwrites the close fields on each refresh inside CLV_WINDOW_HOURS of
+    first pitch; the last write before the game starts is the close.
+
+    CLV = fair (no-vig) closing probability of your side at YOUR logged line,
+          minus the break-even probability of the price you logged.
+    Positive means you beat the close. For totals, a moved line is handled by
+    re-pricing the closing market at your original number.
+    """
+    last = st.session_state.get("_clv_last_check")
+    now = pd.Timestamp.now(tz="UTC")
+    if last is not None and (now - pd.Timestamp(last)).total_seconds() < 60:
+        return 0
+    st.session_state["_clv_last_check"] = now.isoformat()
+
+    df = load_tracker()
+    if df.empty:
+        return 0
+    pend = df["Result"].fillna("PENDING").astype(str).eq("PENDING")
+    if not pend.any():
+        return 0
+    cand_map = {str(c.get("GamePk")): c for c in candidates or []}
+    game_map = _game_lookup(games)
+    changed = 0
+    for i in df.index[pend]:
+        try:
+            gp = str(int(float(df.at[i, "GamePk"])))
+        except Exception:
+            continue
+        g = game_map.get(gp)
+        if not g or not is_pregame(g):
+            continue
+        hrs = _game_hours_to_start(g)
+        if hrs is None or hrs > CLV_WINDOW_HOURS:
+            continue
+        bet_odds = valid_odds(df.at[i, "Odds"])
+        if bet_odds is None:
+            continue
+        market = str(df.at[i, "Market"]).upper()
+        close_line = None
+        if market == "MONEYLINE":
+            c = cand_map.get(gp)
+            if not c or not c.get("market_available"):
+                continue
+            side = next((z for z in c.get("all", [])
+                         if team_key(z.get("team")) == team_key(df.at[i, "Pick"])), None)
+            if not side or side.get("market_prob") is None:
+                continue
+            close_odds, fair = side.get("odds"), float(side["market_prob"])
+        elif market == "TOTAL":
+            if not totals_payload:
+                continue
+            tm = totals_market(match_event(totals_payload.get("events", []), g))
+            if not tm:
+                continue
+            try:
+                bet_line = float(df.at[i, "Market_Line"])
+            except Exception:
+                continue
+            o, u, _ = _total_side_probs(tm["market_mean"], bet_line)
+            p_over = o / (o + u) if (o + u) > 0 else 0.5
+            is_over = str(df.at[i, "Side"]).upper() == "OVER"
+            fair = p_over if is_over else 1.0 - p_over
+            close_odds = tm["over_best"] if is_over else tm["under_best"]
+            close_line = tm["total"]
+        else:
+            continue
+        clv = fair - implied_prob(bet_odds)
+        new = {"Close_Odds": close_odds, "Close_Line": close_line,
+               "Close_Fair_Prob": round(fair, 4), "CLV": round(clv, 4)}
+        if any(pd.isna(df.at[i, k]) or df.at[i, k] != v
+               for k, v in new.items() if v is not None):
+            for k, v in new.items():
+                df.at[i, k] = v
+            changed += 1
+    if changed:
+        save_tracker(df)
+    return changed
+
+
 def grade_tracker(force=False):
     """Automatically grade pending recommendations once MLB marks the game final."""
     df = load_tracker()
@@ -6076,7 +4835,8 @@ def import_diagnostics_tracker(uploaded):
 
 def tracker_performance_summary(df):
     if df is None or df.empty:
-        return {"wins":0,"losses":0,"pushes":0,"voids":0,"pending":0,"units":0.0,"roi":0.0,"graded":0}
+        return {"wins":0,"losses":0,"pushes":0,"voids":0,"pending":0,"units":0.0,"roi":0.0,"graded":0,
+                "clv":None,"clv_n":0,"clv_beat":None}
     res = df["Result"].fillna("PENDING").astype(str)
     wins = int((res=="WIN").sum())
     losses = int((res=="LOSS").sum())
@@ -6086,7 +4846,10 @@ def tracker_performance_summary(df):
     completed = wins + losses + pushes
     units = pd.to_numeric(df["Units"], errors="coerce").fillna(0).sum()
     roi = units / completed if completed else 0.0
-    return {"wins":wins,"losses":losses,"pushes":pushes,"voids":voids,"pending":pending,"units":units,"roi":roi,"graded":completed}
+    clv_series = pd.to_numeric(df["CLV"], errors="coerce").dropna() if "CLV" in df.columns else pd.Series(dtype=float)
+    return {"wins":wins,"losses":losses,"pushes":pushes,"voids":voids,"pending":pending,"units":units,"roi":roi,"graded":completed,
+            "clv":float(clv_series.mean()) if len(clv_series) else None,"clv_n":int(len(clv_series)),
+            "clv_beat":float((clv_series>0).mean()) if len(clv_series) else None}
 
 def tracker_split_table(df):
     if df is None or df.empty:
@@ -6101,6 +4864,8 @@ def tracker_split_table(df):
             "Record": record,
             "Units": round(s["units"], 2),
             "ROI %": round(s["roi"] * 100, 1),
+            "Avg CLV %": round(s["clv"] * 100, 2) if s.get("clv") is not None else None,
+            "Beat close %": round(s["clv_beat"] * 100, 1) if s.get("clv_beat") is not None else None,
             "Pending": s["pending"],
         })
     return pd.DataFrame(rows)
@@ -7147,6 +5912,12 @@ if _needs_model:
     _new_ml = track_current_official_recommendations(candidates, games, slate_date)
     _new_totals = track_current_total_recommendations(
         candidates, games, model_df, totals_payload, slate_date)
+    try:
+        update_closing_prices(
+            candidates, games,
+            totals_payload if st.session_state.get("totals_loaded") else None)
+    except Exception:
+        pass   # CLV capture must never break the board
 else:
     _new_ml = _new_totals = 0
 _graded_now = grade_tracker(force=False)
@@ -7380,7 +6151,7 @@ else:
             if tp is None:
                 st.warning("A totals market was returned, but its price pair was incomplete/invalid. Refresh the total or try again later.")
             else:
-                st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park/weather are context only.</div></div>''',unsafe_allow_html=True)
+                st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park and weather applied (weather skipped under a roof).</div></div>''',unsafe_allow_html=True)
         else:
             temp_txt = f'{float(tctx["Temp"]):.0f}°F' if tctx.get("Temp") is not None and pd.notna(tctx.get("Temp")) else "—"
             st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS MODEL VIEW</div><div class="best-pick">Projected total {raw_total:.2f}</div><div class="best-game">Load this game's total only when you want an official market grade.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Projected total</span><b>{raw_total:.2f}</b></div><div class="metric"><span>Park context</span><b>{float(tctx.get("Park_Factor",1.0)):.3f}</b></div><div class="metric"><span>Temperature</span><b>{temp_txt}</b></div><div class="metric"><span>Lineups</span><b>{"CONFIRMED" if x["lineup_confirmed"] else "MODEL"}</b></div></div></div>''',unsafe_allow_html=True)
