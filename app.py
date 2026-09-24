@@ -3136,7 +3136,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.8.3-UI-PASS"
+APP_VERSION = "3.8.4-TRACKER-CSS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -5939,7 +5939,7 @@ def _pregame_tracked_card(rec, game):
     return (
         f'<div class="pregame-track-card">'
         f'<div class="pregame-track-top"><div>'
-        f'<div class="pregame-track-time">{start_text} • OFFICIAL TRACKED BET</div>'
+        f'<div class="pregame-track-time">{start_text} • TRACKED</div>'
         f'<div class="pregame-track-game">{away} @ {home}</div>'
         f'</div><div class="pregame-track-grade">{grade}</div></div>'
         f'<div class="pregame-track-line"><span>{market_label}</span><b>{pick}</b></div>'
@@ -6686,6 +6686,90 @@ div[class*="st-key-main_navigation"] label{cursor:pointer;}
 .px-b{color:var(--ink);}
 .px-need{color:var(--ink);font-weight:600;}
 .px-need.hit,.px-m.hit{color:var(--pos);font-weight:700;}
+
+/* --- nav: hide every piece of the radio except the label text ---------- */
+div[class*="st-key-main_navigation"] label *:not([data-testid="stMarkdownContainer"]):not([data-testid="stMarkdownContainer"] *):not(:has([data-testid="stMarkdownContainer"])){display:none!important;}
+div[class*="st-key-main_navigation"] label p{white-space:nowrap!important;font-size:.66rem!important;}
+div[class*="st-key-main_navigation"] label{padding:6px 0 5px!important;min-width:0!important;}
+
+/* --- Tracker cards: the old sheet styled some of these classes as bar
+   fills (e.g. the win-probability text row) and never styled the rest,
+   which is why labels and numbers ran together. Full definitions here. */
+.visual-bet-card,.pregame-track-card{border:1px solid var(--rule)!important;
+  background:var(--panel)!important;border-radius:var(--r)!important;
+  padding:12px 14px!important;margin:0 0 12px!important;}
+.visual-score-head{display:flex!important;align-items:center!important;gap:12px!important;}
+.score-teams{flex:1 1 auto!important;min-width:0!important;}
+.team-row{display:flex!important;justify-content:space-between!important;gap:10px!important;
+  font-family:var(--sans)!important;font-size:.92rem!important;line-height:1.7!important;color:var(--ink)!important;}
+.team-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.team-row b{font-family:var(--mono)!important;font-weight:700!important;min-width:1.4em;text-align:right;}
+.live-meta{text-align:right!important;font-size:.74rem!important;color:var(--dim)!important;white-space:nowrap!important;}
+.live-dot-wrap{display:flex!important;align-items:center!important;justify-content:flex-end!important;
+  gap:6px!important;font-weight:600!important;color:var(--ink)!important;font-size:.8rem!important;}
+.mini-dot{display:inline-block!important;width:7px!important;height:7px!important;border-radius:50%!important;background:var(--live)!important;}
+.inning-meta{margin-top:2px!important;}
+.diamond-mini{position:relative!important;width:30px!important;height:30px!important;flex:none!important;}
+.diamond-mini i{position:absolute!important;width:9px!important;height:9px!important;
+  border:1.5px solid var(--dimmer)!important;transform:rotate(45deg)!important;background:none;}
+.diamond-mini .base-second{top:3px!important;left:10px!important;}
+.diamond-mini .base-third{top:12px!important;left:1px!important;}
+.diamond-mini .base-first{top:12px!important;left:19px!important;}
+.diamond-mini .base-home{display:none!important;}
+.diamond-mini i.occupied{background:var(--flag)!important;border-color:var(--flag)!important;}
+.wp-wrap{margin:10px 0 0!important;padding:10px 12px!important;border:1px solid var(--rule)!important;border-radius:var(--r)!important;}
+.wp-title{font-size:.7rem!important;color:var(--dimmer)!important;letter-spacing:.04em!important;margin-bottom:6px!important;}
+.wp-labels{display:flex!important;justify-content:space-between!important;gap:8px!important;
+  font-size:.78rem!important;color:var(--dim)!important;margin-bottom:6px!important;}
+.wp-labels b{color:var(--ink)!important;margin-left:5px!important;}
+.wp-track{height:5px!important;background:var(--panel2)!important;border-radius:3px!important;position:relative!important;overflow:hidden!important;}
+.wp-away{height:100%!important;background:var(--live)!important;}
+.visual-divider{height:1px!important;background:var(--rule)!important;margin:12px 0!important;}
+.bet-section-head{display:flex!important;justify-content:space-between!important;align-items:center!important;gap:10px!important;}
+.bet-section-head .market-chip{font-family:var(--mono)!important;font-size:.68rem!important;color:var(--dimmer)!important;letter-spacing:.06em!important;}
+.bet-pick{font-family:var(--mono)!important;font-size:1rem!important;color:var(--ink)!important;font-weight:600!important;margin-top:2px!important;}
+.track-pill{font-family:var(--mono)!important;font-size:.66rem!important;font-weight:700!important;
+  padding:4px 9px!important;border-radius:999px!important;border:1px solid currentColor!important;
+  white-space:nowrap!important;background:none!important;}
+.track-pill.track-good{color:var(--pos)!important;}
+.track-pill.track-risk{color:var(--neg)!important;}
+.track-pill.track-neutral{color:var(--dim)!important;}
+.ml-live-wp{height:auto!important;background:none!important;display:flex!important;
+  justify-content:space-between!important;align-items:baseline!important;
+  margin:12px 0 4px!important;font-size:.7rem!important;color:var(--dimmer)!important;letter-spacing:.04em!important;}
+.ml-live-wp b{font-family:var(--mono)!important;font-size:.95rem!important;color:var(--ink)!important;letter-spacing:0!important;}
+.ml-meter-wrap{position:relative!important;height:14px!important;overflow:visible!important;background:none!important;}
+.ml-meter-line{position:absolute!important;left:0!important;right:0!important;top:6px!important;height:2px!important;background:var(--panel2)!important;}
+.ml-meter-mid{position:absolute!important;left:50%!important;top:2px!important;bottom:2px!important;width:1px!important;background:var(--rule)!important;}
+.ml-meter-dot{position:absolute!important;top:1px!important;width:12px!important;height:12px!important;
+  margin-left:-6px!important;border-radius:50%!important;background:var(--dim)!important;}
+.ml-meter-dot.track-good{background:var(--pos)!important;}
+.ml-meter-dot.track-risk{background:var(--neg)!important;}
+.ml-meter-labels{display:flex!important;justify-content:space-between!important;
+  font-size:.66rem!important;color:var(--dimmer)!important;margin-top:2px!important;}
+.ml-meter-labels b{font-weight:400!important;}
+.run-summary{display:flex!important;gap:22px!important;margin:10px 0 8px!important;}
+.run-stat{display:flex!important;flex-direction:column!important;font-size:.66rem!important;
+  color:var(--dimmer)!important;letter-spacing:.04em!important;font-family:var(--sans)!important;}
+.run-stat b{font-family:var(--mono)!important;font-size:1.05rem!important;color:var(--ink)!important;margin-top:2px!important;letter-spacing:0!important;}
+.run-track{height:6px!important;background:var(--panel2)!important;border-radius:3px!important;position:relative!important;overflow:visible!important;}
+.run-fill{height:100%!important;border-radius:3px!important;background:var(--live)!important;}
+.run-fill.track-good{background:var(--pos)!important;}
+.run-fill.track-risk{background:var(--neg)!important;}
+.run-track .line-marker{position:absolute!important;top:-4px!important;bottom:-4px!important;width:2px!important;margin-left:-1px!important;background:var(--flag)!important;}
+.run-axis{position:relative!important;height:16px!important;font-size:.66rem!important;color:var(--dimmer)!important;margin-top:4px!important;}
+.run-axis .line-axis-label{position:absolute!important;transform:translateX(-50%)!important;white-space:nowrap!important;}
+.pregame-track-top{display:flex!important;justify-content:space-between!important;gap:10px!important;align-items:flex-start!important;}
+.pregame-track-time{font-size:.7rem!important;color:var(--dimmer)!important;letter-spacing:.03em!important;}
+.pregame-track-game{font-family:var(--sans)!important;font-size:.95rem!important;color:var(--ink)!important;font-weight:600!important;margin-top:2px!important;}
+.pregame-track-grade{font-family:var(--mono)!important;font-size:.64rem!important;font-weight:700!important;
+  border:1px solid var(--rule)!important;border-radius:4px!important;padding:3px 7px!important;color:var(--dim)!important;white-space:nowrap!important;}
+.pregame-track-line{display:flex!important;gap:8px!important;align-items:baseline!important;margin-top:8px!important;
+  font-size:.7rem!important;color:var(--dimmer)!important;}
+.pregame-track-line b{font-family:var(--mono)!important;font-size:.92rem!important;color:var(--ink)!important;}
+.pregame-track-meta{display:flex!important;gap:14px!important;flex-wrap:wrap!important;margin-top:6px!important;
+  font-size:.66rem!important;color:var(--dimmer)!important;}
+.pregame-track-meta b{color:var(--dim)!important;font-family:var(--mono)!important;}
 </style>""", unsafe_allow_html=True)
 
 try:
