@@ -2405,9 +2405,12 @@ def slate_rows(candidates, totals_payload):
         if tm and row["proj_total"] is not None:
             row["line"] = float(tm.get("total"))
             # Compare means to means; the line is a median.
-            row["tot_gap"] = row["proj_total"] - float(tm.get("market_mean", row["line"]))
+            _cal = st.session_state.get("_totals_cal")
+            _adj = (_cal["mu_mkt"] + (row["proj_total"] - _cal["mu_model"]) * _cal["scale"]
+                    if _cal else row["proj_total"])
+            row["tot_gap"] = _adj - float(tm.get("market_mean", row["line"]))
             try:
-                tp = build_total_pick(row["proj_total"], tm)
+                tp = build_total_pick(_adj, tm)
                 row["tot_side"] = tp["side"]
                 row["tot_odds"] = tp["over_odds"] if tp["side"] == "OVER" else tp["under_odds"]
                 row["tot_grade"] = tp["grade"]
@@ -3136,7 +3139,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.8.6-CURRENT-ONLY"
+APP_VERSION = "3.10.1-THRESHOLD-BETS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -4515,7 +4518,8 @@ def smart_score(side, confidence):
     return float(side["edge"])*100 + float(side["ev"])*35 + max(0, confidence-70)*0.03
 
 def cls(v):
-    return {"BEST BET":"badge-best","BET":"badge-bet","LEAN":"badge-lean","PASS":"badge-pass","MODEL ONLY":"badge-lean"}.get(v,"badge-pass")
+    return {"BEST BET":"badge-best","BET":"badge-bet","LEAN":"badge-lean","PASS":"badge-pass","MODEL ONLY":"badge-lean",
+            "LINEUPS NOT FINAL":"badge-lean","DON'T BET":"badge-pass","RUN FULL SLATE":"badge-lean"}.get(v,"badge-pass")
 
 
 def build_candidates(model_df, games, events):
@@ -4953,7 +4957,16 @@ def tracker_results_for_date(date_text):
             }
     return out
 
-TOP_PICKS_TRACKED = 3
+TOP_PICKS_TRACKED = 3          # legacy name; BETs are now threshold-based
+TOTALS_CENTER_MIN_GAMES = 4
+BET_MIN_EV_DEFAULT = 3.0       # percent
+
+
+def bet_min_ev():
+    try:
+        return float(st.session_state.get("bet_min_ev", BET_MIN_EV_DEFAULT)) / 100.0
+    except Exception:
+        return BET_MIN_EV_DEFAULT / 100.0
 
 
 def _data_status_line(cx):
@@ -4982,8 +4995,28 @@ def _data_status_line(cx):
             f'• hitter splits {cx["away"]} {sp[0]} · {cx["home"]} {sp[1]}{tired_txt}')
 
 
+VERDICT_BET = "BET"
+VERDICT_NO = "DON'T BET"
+VERDICT_WAIT = "LINEUPS NOT FINAL"
+
+
+def _lineups_final(cx):
+    return bool(cx.get("lineup_confirmed") or cx.get("feed_lineup_confirmed")
+                or int(cx.get("lineup_teams_ready") or 0) >= 2)
+
+
+def pick_verdict(p):
+    """Three answers only. BET = EV at your price clears the threshold and
+    both lineups are posted (exactly what the tracker logs). LINEUPS NOT
+    FINAL = clears the threshold, lineups still pending. Everything else:
+    DON'T BET. No cap on how many games can be a BET."""
+    if p["edge"] <= 0 or p["ev"] < bet_min_ev():
+        return VERDICT_NO
+    return VERDICT_BET if _lineups_final(p["cx"]) else VERDICT_WAIT
+
+
 def _rank_tag(p):
-    return f'TOP #{p["rank"]}' if p["rank"] <= TOP_PICKS_TRACKED else f'#{p["rank"]}'
+    return pick_verdict(p)
 
 
 def _pick_sub(p):
@@ -4992,14 +5025,11 @@ def _pick_sub(p):
 
 
 def relative_picks(candidates, games, model_df, totals_payload):
-    """Every priced game's best moneyline side and best total side, ranked by
-    how far the model sits from the fair (no-vig) market probability.
-
-    Relative, not absolute: the slate always has a #1, even on a day with no
-    real edge anywhere. Both markets use the same yardstick (probability
-    points), so ML and totals compete for the same slots.
+    """Every priced game's preferred moneyline side and total side, sorted
+    by EV at the price. pick_verdict() decides BET / DON'T BET from there.
     """
     out = []
+    totals_raw = []
     game_map = {g.get("GamePk"): g for g in games or []}
     for cx in candidates or []:
         if not cx.get("pregame"):
@@ -5027,7 +5057,41 @@ def relative_picks(candidates, games, model_df, totals_payload):
             if not tm:
                 continue
             ctx = totals_projection(mr.iloc[0].to_dict())
-            tp = build_total_pick(float(ctx["Projected_Total"]), tm)
+            totals_raw.append((cx, float(ctx["Projected_Total"]), tm))
+
+    # Put the model on the market's scale for tonight's slate: same average
+    # AND same spread. The backtest showed the model adds nothing on the level
+    # of scoring, and its projections are much flatter than the market's (its
+    # pitcher ratings are pulled hard toward average). Left raw, that meant
+    # every low total (aces, cold nights) read as an OVER and only the very
+    # highest totals could ever be UNDERs -- the lean came from the line, not
+    # from the game. After matching, a side comes only from the model ranking
+    # a game higher or lower than the market does.
+    cal = None
+    if len(totals_raw) >= TOTALS_CENTER_MIN_GAMES:
+        mk = np.array([t[2]["market_mean"] for t in totals_raw], dtype=float)
+        md = np.array([t[1] for t in totals_raw], dtype=float)
+        scale = float(mk.std() / md.std()) if md.std() > 0.05 else 1.0
+        cal = {"mu_model": float(md.mean()), "mu_mkt": float(mk.mean()),
+               "scale": float(clamp(scale, 0.5, 3.0))}
+        try:
+            st.session_state["_totals_cal"] = cal
+        except Exception:
+            pass
+    else:
+        try:
+            cal = st.session_state.get("_totals_cal")
+        except Exception:
+            cal = None
+
+    def _on_market_scale(mt):
+        if not cal:
+            return mt
+        return cal["mu_mkt"] + (mt - cal["mu_model"]) * cal["scale"]
+
+    offset = (cal["mu_model"] - cal["mu_mkt"]) if cal else 0.0
+    for cx, mt, tm in totals_raw:
+            tp = build_total_pick(_on_market_scale(mt), tm)
             if not tp:
                 continue
             over = tp["side"] == "OVER"
@@ -5041,9 +5105,10 @@ def relative_picks(candidates, games, model_df, totals_payload):
                 "prob": float(pw / (pw + pl)) if (pw + pl) > 0 else 0.5,
                 "fair": float(tm["over_market_prob"] if over else tm["under_market_prob"]),
                 "edge": float(tp["edge"]), "ev": float(tp["ev"]),
-                "weight": TOTALS_MODEL_WEIGHT,
+                "weight": TOTALS_MODEL_WEIGHT, "offset": offset,
+                "scale": (cal or {}).get("scale", 1.0),
             })
-    out.sort(key=lambda p: -p["edge"])
+    out.sort(key=lambda p: -p["ev"])
     for i, p in enumerate(out, start=1):
         p["rank"] = i
     return out
@@ -5053,9 +5118,9 @@ def track_top_picks(picks, games, slate_date):
     """Freeze each top-N pick at its price once its game's lineups are in."""
     game_map = _game_lookup(games)
     added = 0
-    for p in picks[:TOP_PICKS_TRACKED]:
+    for p in picks:
         cx = p["cx"]
-        if p["edge"] <= 0:
+        if pick_verdict(p) != VERDICT_BET:
             continue
         qualified, _ = tracker_qualification(cx, p["market"])
         if not qualified:
@@ -5339,7 +5404,7 @@ def tracker_split_table(df):
     _grade = df["Grade"].fillna("").astype(str) if "Grade" in df.columns else pd.Series("", index=df.index)
     _prefix = np.where(_grade.eq("PRICE EDGE"), "734 PRICE • ",
               np.where(_grade.eq("OWN PICK"), "OWN PICK • ",
-              np.where(_grade.eq("TOP PICK"), "TOP PICK • ", "OLD MODEL • ")))
+              np.where(_grade.eq("TOP PICK"), "MODEL BET • ", "OLD MODEL • ")))
     df = df.assign(_group=pd.Series(_prefix, index=df.index) + df["Market"].fillna("").astype(str))
     for market, g in df.groupby("_group", dropna=False):
         s = tracker_performance_summary(g)
@@ -5818,6 +5883,7 @@ def _pregame_tracked_card(rec, game):
     """Compact card for an official tracked bet that has not started yet."""
     market = str(rec.get("Market") or "").upper()
     grade = str(rec.get("Grade") or "BET").upper()
+    grade = {"TOP PICK": "BET", "PRICE EDGE": "734 PRICE"}.get(grade, grade)
     pick = str(rec.get("Pick") or "").strip()
     odds = _odds_text(rec.get("Odds"))
     if odds and odds not in pick:
@@ -6445,7 +6511,7 @@ def render_performance_page():
     record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
     clv_txt = f'{perf["clv"]*100:+.1f}%' if perf.get("clv") is not None else "—"
 
-    st.markdown('<div class="kicker">Top picks</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Model bets</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="metrics">'
         f'<div class="metric"><span>Record</span><b>{record_display}</b></div>'
@@ -6455,8 +6521,8 @@ def render_performance_page():
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.caption(f"The model's top {TOP_PICKS_TRACKED} picks per slate, frozen when lineups "
-               f"post. {perf['pending']} pending. CLV is the early read: positive "
+    st.caption(f"Every BET the board gave (EV bar cleared, lineups in), frozen at "
+               f"that moment's price. {perf['pending']} pending. CLV is the early read: positive "
                f"means the picks beat the closing number.")
 
     if not tracker_df.empty:
@@ -6567,6 +6633,7 @@ st.markdown("""<style>
    the header to the bottom of the screen, covering every page with a 96%
    opaque panel. Every one of those properties is reset here. */
 div[class*="st-key-main_navigation"]{
+  width:100%!important;max-width:none!important;flex:1 1 100%!important;
   position:sticky!important;top:3.75rem!important;bottom:auto!important;
   left:auto!important;right:auto!important;z-index:60!important;
   height:auto!important;background:var(--ground)!important;
@@ -7044,11 +7111,18 @@ else:
         _sgp = {p["market"]: p for p in relative_picks(
             [x], games, model_df,
             totals_payload if st.session_state.get("totals_loaded") else None)}
+        _ranks = st.session_state.get("_last_ranks") or {}
+
+        def _sg_verdict(market):
+            p = _sgp.get(market)
+            return pick_verdict(p) if p else VERDICT_NO
+
         if "MONEYLINE" in _sgp:
             b = dict(next(z for z in x["all"] if z["team"] == _sgp["MONEYLINE"]["side"]))
-            b["selection"] = "MODEL SIDE"
-        st.caption("Single game shows the model's side. Run Full Slate to rank "
-                   "picks against each other and track the top 3.")
+            b["selection"] = _sg_verdict("MONEYLINE")
+        if "_totals_cal" not in st.session_state:
+            st.caption("Totals here aren't put on the market's scale until Full "
+                       "Slate has been run once today.")
         away_side = next(z for z in x["all"] if z["team"] == x["away"])
         home_side = next(z for z in x["all"] if z["team"] == x["home"])
         lineup_text = "Lineups confirmed" if x["lineup_confirmed"] else f'Awaiting lineups • {x.get("lineup_teams_ready",0)}/2 teams posted'
@@ -7077,7 +7151,7 @@ else:
         if tm:
             tp=build_total_pick(raw_total,tm)
             if tp:
-                tp["grade"] = "MODEL SIDE"
+                tp["grade"] = _sg_verdict("TOTAL")
             if tp is None:
                 st.warning("A totals market was returned, but its price pair was incomplete/invalid. Refresh the total or try again later.")
             else:
@@ -7192,21 +7266,34 @@ else:
                 upcoming, games, model_df,
                 totals_payload if st.session_state.get("totals_loaded") else None)
             _pick_map = {(p["cx"]["GamePk"], p["market"]): p for p in _picks}
+            # Remembered so Single Game mode can give the same answer.
+            st.session_state["_last_ranks"] = {
+                (str(p["cx"]["GamePk"]), p["market"]): p["rank"] for p in _picks}
 
-            st.markdown('<div class="kicker">Top Plays</div>', unsafe_allow_html=True)
+            st.markdown('<div class="kicker">Tonight\'s bets</div>', unsafe_allow_html=True)
+            st.slider("Bet when EV at the price is at least (%)", 1.0, 8.0,
+                      BET_MIN_EV_DEFAULT, 0.5, key="bet_min_ev")
             st.caption(
-                f"Ranked by how far the model sits from the fair market price, "
-                f"moneylines and totals together. The top {TOP_PICKS_TRACKED} are "
-                f"tracked automatically once lineups post. These are the model's "
-                f"strongest opinions, not proven edges; check 734's price on the "
-                f"Prices page before betting.")
-            if _picks:
-                for p in _picks[:5]:
+                "BET = clears that bar and both lineups are in; it's logged to the "
+                "tracker. LINEUPS NOT FINAL = clears the bar, check back after "
+                "lineups post. Everything else is DON'T BET. Confirm 734's price "
+                "on the Prices page first.")
+            _tot = [p for p in _picks if p["market"] == "TOTAL"]
+            if _tot:
+                _ov = sum(1 for p in _tot if p["side"] == "OVER")
+                st.caption(
+                    f"Totals: model put on tonight's market scale (level "
+                    f"{-_tot[0].get('offset', 0):+.2f} runs, spread "
+                    f"×{_tot[0].get('scale', 1.0):.2f}). Leans {_ov} over / "
+                    f"{len(_tot) - _ov} under across {len(_tot)} games.")
+            _top = [p for p in _picks if pick_verdict(p) != VERDICT_NO]
+            if _top:
+                for p in _top:
                     gx = p["cx"]
-                    tag = "TOP PICK" if p["rank"] <= TOP_PICKS_TRACKED else "NEXT"
+                    tag = pick_verdict(p)
                     st.markdown(
                         f'<div class="top-play-card">'
-                        f'<div class="top-play-rank">#{p["rank"]} • {tag} • {p["label"]} • {gx["time"]}</div>'
+                        f'<div class="top-play-rank">{tag} • {p["label"]} • {gx["time"]}</div>'
                         f'<div class="top-play-main">{p["main"]}</div>'
                         f'<div class="top-play-sub">{gx["away"]} @ {gx["home"]} • {p["book"]} • '
                         f'Model {p["prob"]*100:.1f}% vs fair {p["fair"]*100:.1f}% • '
@@ -7214,10 +7301,12 @@ else:
                         f'</div>',
                         unsafe_allow_html=True,
                     )
+            elif _picks:
+                st.caption("No bets right now.")
             elif st.session_state.get("odds_loaded") or st.session_state.get("totals_loaded"):
                 st.caption("No priced games to rank yet.")
             else:
-                st.caption("Load Full Slate Lines to rank today's picks.")
+                st.caption("Load lines to rank today's picks.")
 
             st.markdown('<div class="kicker">Full slate — model vs market</div>', unsafe_allow_html=True)
             render_slate_table(upcoming, totals_payload)
@@ -7262,9 +7351,9 @@ else:
                 def grade_class(g):
                     return {
                         "BEST BET":"grade-best","BET":"grade-bet","LEAN":"grade-lean",
-                        "PASS":"grade-pass","MODEL":"grade-wait","MODEL ONLY":"grade-wait"
-                    }.get(g, "grade-best" if str(g).startswith("TOP")
-                           else "grade-pass" if str(g).startswith("#") else "grade-wait")
+                        "PASS":"grade-pass","MODEL":"grade-wait","MODEL ONLY":"grade-wait",
+                        "DON'T BET":"grade-pass","LINEUPS NOT FINAL":"grade-wait",
+                    }.get(g, "grade-wait")
 
                 lineup_label = cx.get("lineup_display") or ("LINEUPS CONFIRMED" if cx.get("lineup_confirmed") else "AWAITING LINEUPS • 0/2")
                 away_lc = int(cx.get("away_lineup_count", 0) or 0)
