@@ -2497,9 +2497,11 @@ def render_slate_table(candidates, totals_payload):
     st.markdown("".join(html), unsafe_allow_html=True)
 
     st.markdown(
-        '<div class="tbl-key">Gaps are model minus market, in runs. '
-        'Confidence is data completeness, not accuracy — dimmed means lineups '
-        'are not posted.</div>', unsafe_allow_html=True)
+        '<div class="tbl-key"><b>T</b> total: market line → model total, gap in '
+        'runs, then the side and price. <b>M</b> moneyline: market price → model '
+        'fair price, then the model\'s lean in runs (r). The number on the right '
+        'is data completeness (0–100), not accuracy; dimmed means lineups are '
+        'not posted.</div>', unsafe_allow_html=True)
 
     # Inputs drawer. Previously there was no way to interrogate a projection
     # from the interface -- when the model claimed a road team wins 51% at
@@ -2521,14 +2523,16 @@ def render_slate_table(candidates, totals_payload):
             f'<div><i>starter</i>{r["away_sp"]}</div>'
             f'<div><i>SP RA9</i>{_n("Away_SP_RA9",2)}</div>'
             f'<div><i>exp IP</i>{_n("Away_SP_ExpIP")}</div>'
-            f'<div><i>bullpen</i>{_n("Away_Bullpen_RA9",2)}</div>'
+            f'<div><i>pen tonight</i>{_n("Away_Bullpen_RA9",2)}</div>'
+            f'<div><i>pen season</i>{_n("Away_Bullpen_Season_RA9",2)}</div>'
             f'<div><i>offense</i>{_n("Away_Offense",3)}</div>'
             f'<div><i>proj runs</i>{_n("Away_Proj_Runs",2)}</div></div>'
             f'<div class="ic"><b>{r["home"]}</b>'
             f'<div><i>starter</i>{r["home_sp"]}</div>'
             f'<div><i>SP RA9</i>{_n("Home_SP_RA9",2)}</div>'
             f'<div><i>exp IP</i>{_n("Home_SP_ExpIP")}</div>'
-            f'<div><i>bullpen</i>{_n("Home_Bullpen_RA9",2)}</div>'
+            f'<div><i>pen tonight</i>{_n("Home_Bullpen_RA9",2)}</div>'
+            f'<div><i>pen season</i>{_n("Home_Bullpen_Season_RA9",2)}</div>'
             f'<div><i>offense</i>{_n("Home_Offense",3)}</div>'
             f'<div><i>proj runs</i>{_n("Home_Proj_Runs",2)}</div></div>'
             f'</div>'
@@ -3132,7 +3136,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.7.1-DATA-STATUS"
+APP_VERSION = "3.8.0-UI-PASS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -3241,7 +3245,8 @@ a{color:var(--live);}
 .status.ninth-status,.slate-pulse,.auto-fresh{display:none;}
 
 /* --- widgets ------------------------------------------------------------- */
-[data-testid="stWidgetLabel"]{display:none!important;}
+/* Labels are visible app-wide; only the nav bar hides its own. */
+div[class*="st-key-main_navigation"] [data-testid="stWidgetLabel"]{display:none!important;}
 [data-baseweb="select"]>div,[data-baseweb="input"],
 [data-testid="stDateInput"] input,[data-testid="stTextInput"] input,
 [data-testid="stNumberInput"] input{
@@ -3377,7 +3382,7 @@ div[class*="st-key-main_navigation"]{
   border-top:1px solid var(--rule)!important;box-shadow:none!important;
 }
 div[class*="st-key-main_navigation"] [role="radiogroup"]{
-  display:grid!important;grid-template-columns:repeat(5,1fr)!important;
+  display:grid!important;grid-template-columns:repeat(6,1fr)!important;
   gap:0!important;max-width:840px!important;margin:0 auto!important;
 }
 div[class*="st-key-main_navigation"] label{
@@ -5055,11 +5060,25 @@ def _data_status_line(cx):
             return "—"
         return f"{got}/{need}" + ("" if got == need else " ✗" if got == 0 else "")
     tired = [t for t in (r.get("Away_Bullpen_Tired"), r.get("Home_Bullpen_Tired")) if t]
-    line = (f'Data: pen fatigue {cx["away"]} {pen("Away")} · {cx["home"]} {pen("Home")} '
-            f'• hitter splits {cx["away"]} {splits("Away")} · {cx["home"]} {splits("Home")}')
-    if tired:
-        line += f' • tired: {"; ".join(tired)}'
-    return line
+    tired_txt = f' • tired: {"; ".join(tired)}' if tired else ""
+    sp = [splits("Away"), splits("Home")]
+    all_ok = (r.get("Away_Pen_Fatigue_OK") and r.get("Home_Pen_Fatigue_OK")
+              and not any("✗" in x for x in sp)
+              and not any("/" in x and x.split("/")[0] != x.split("/")[1].split()[0] for x in sp))
+    if all_ok:
+        wait = " • lineups pending" if any(x == "waiting on lineup" for x in sp) else ""
+        return f"Data ✓{wait}{tired_txt}"
+    return (f'Data: pen fatigue {cx["away"]} {pen("Away")} · {cx["home"]} {pen("Home")} '
+            f'• hitter splits {cx["away"]} {sp[0]} · {cx["home"]} {sp[1]}{tired_txt}')
+
+
+def _rank_tag(p):
+    return f'TOP #{p["rank"]}' if p["rank"] <= TOP_PICKS_TRACKED else f'#{p["rank"]}'
+
+
+def _pick_sub(p):
+    return (f'{p["book"]} • Model {p["prob"]*100:.1f}% vs fair {p["fair"]*100:.1f}% '
+            f'• EV {p["ev"]*100:+.1f}%')
 
 
 def relative_picks(candidates, games, model_df, totals_payload):
@@ -5409,7 +5428,8 @@ def tracker_split_table(df):
     rows = []
     _grade = df["Grade"].fillna("").astype(str) if "Grade" in df.columns else pd.Series("", index=df.index)
     _prefix = np.where(_grade.eq("PRICE EDGE"), "734 PRICE • ",
-                       np.where(_grade.eq("OWN PICK"), "OWN PICK • ", ""))
+              np.where(_grade.eq("OWN PICK"), "OWN PICK • ",
+              np.where(_grade.eq("TOP PICK"), "TOP PICK • ", "OLD MODEL • ")))
     df = df.assign(_group=pd.Series(_prefix, index=df.index) + df["Market"].fillna("").astype(str))
     for market, g in df.groupby("_group", dropna=False):
         s = tracker_performance_summary(g)
@@ -6190,6 +6210,27 @@ def render_auto_live_page(games, slate_date):
     )
 
 @_auto_fragment(20)
+def _clv_prompt(tracker_df):
+    """Nudge to reload odds while tracked games are inside the CLV window."""
+    try:
+        if tracker_df is None or tracker_df.empty:
+            return
+        pend = tracker_df[tracker_df["Result"].fillna("PENDING").astype(str).eq("PENDING")]
+        if pend.empty:
+            return
+        starts = pd.to_datetime(pend["Start_Time_UTC"], utc=True, errors="coerce")
+        hrs = (starts - pd.Timestamp.now(tz="UTC")).dt.total_seconds() / 3600.0
+        soon = pend[(hrs > 0) & (hrs <= CLV_WINDOW_HOURS)]
+        if soon.empty:
+            return
+        first = starts[soon.index].min().tz_convert("America/New_York").strftime("%-I:%M %p")
+        st.info(f"{len(soon)} tracked bet(s) start within {CLV_WINDOW_HOURS:.0f} hours "
+                f"(first at {first} ET). Reload lines on the Board or Prices page "
+                f"shortly before first pitch to capture the closing price.")
+    except Exception:
+        pass
+
+
 def render_auto_tracker_page(games, slate_date):
     """Refresh Tracker across midnight without using paid odds calls.
 
@@ -6200,6 +6241,7 @@ def render_auto_tracker_page(games, slate_date):
     # grade_tracker is internally throttled to once per minute.
     grade_tracker(force=False)
     tracker_df = load_tracker()
+    _clv_prompt(tracker_df)
     active_dates = _active_tracker_dates(tracker_df, slate_date)
 
     combined_games = {}
@@ -6343,45 +6385,53 @@ def render_price_check_page(games, slate_date):
         st.caption("734 Games is not in the feed, so compare the targets below "
                    "against the 734 app by eye.")
 
-    # ---- slate targets
+    # ---- slate targets: one compact grid per game
+    def _cell(label, fair, need, mine_txt, hit):
+        cls = " hit" if hit else ""
+        return (f'<span class="px-b">{label}</span><span>{fair}</span>'
+                f'<span class="px-need{cls}">{need}</span>'
+                f'<span class="px-m{cls}">{mine_txt}</span>')
+
+    html = []
     for g, ml, tot in rows:
         a, h = _abbr(g.get("Away")), _abbr(g.get("Home"))
-        lines = [f"**{g.get('TimeLabel', '')} • {a} @ {h}**"]
+        cells = []
         if ml:
-            parts = []
             for side, abbr in (("away", a), ("home", h)):
                 p = ml[side]
                 need = min_price_for_ev(p, 1 - p, min_ev)
-                txt = f"{abbr} fair {fair_ml(p):+d} → bet **{_fmt_am(need)}** or better"
                 mine = (ml.get("mine") or {}).get(side)
-                if mine is not None:
-                    evv = expected_value(p, mine)
-                    txt += f" · 734 {mine:+d} {'✅' if evv >= min_ev else '✗'}"
-                parts.append(txt)
-            lines.append("ML: " + " | ".join(parts))
+                hit = mine is not None and expected_value(p, mine) >= min_ev
+                cells.append(_cell(f"{abbr} ML", f"{fair_ml(p):+d}", _fmt_am(need),
+                                   f"{mine:+d}{' ✓' if hit else ''}" if mine is not None else "—",
+                                   hit))
         if tot and tot.get("line") is not None:
             L = tot["line"]
             o, u, _ = _total_side_probs(tot["mean"], L)
-            parts = []
+            mine = tot.get("mine")
             for side, pw, pl in (("Over", o, u), ("Under", u, o)):
                 need = min_price_for_ev(pw, pl, min_ev)
-                parts.append(f"{side} {L:g} fair {fair_ml(pw / (pw + pl)):+d} → bet "
-                             f"**{_fmt_am(need)}** or better")
-            mine = tot.get("mine")
-            if mine:
-                o2, u2, _ = _total_side_probs(tot["mean"], mine["point"])
-                ev_o = totals_ev(o2, u2, mine["over"])
-                ev_u = totals_ev(u2, o2, mine["under"])
-                parts.append(f"734 {mine['point']:g}: O {mine['over']:+d} "
-                             f"{'✅' if ev_o >= min_ev else '✗'} / U {mine['under']:+d} "
-                             f"{'✅' if ev_u >= min_ev else '✗'}")
-            lines.append("Total: " + " | ".join(parts))
+                mtxt, hit = "—", False
+                if mine:
+                    if abs(mine["point"] - L) < 1e-9:
+                        mp = mine["over" if side == "Over" else "under"]
+                        hit = totals_ev(pw, pl, mp) >= min_ev
+                        mtxt = f"{mp:+d}{' ✓' if hit else ''}"
+                    else:
+                        mtxt = f"at {mine['point']:g}"
+                cells.append(_cell(f"{side[0]} {L:g}", f"{fair_ml(pw / (pw + pl)):+d}",
+                                   _fmt_am(need), mtxt, hit))
         src = (ml or tot or {}).get("source", "")
-        lines.append(f"<span style='opacity:.6;font-size:.85em'>fair from {src}</span>")
-        st.markdown("  \n".join(lines), unsafe_allow_html=True)
-        st.markdown("---")
+        html.append(
+            f'<div class="px-game"><div class="px-h"><b>{a} @ {h}</b> '
+            f'{g.get("TimeLabel", "")}<span>{src}</span></div>'
+            f'<div class="px-grid"><span class="px-th">Bet</span><span class="px-th">Fair</span>'
+            f'<span class="px-th">Need</span><span class="px-th">734</span>{"".join(cells)}</div></div>')
+    st.markdown("".join(html), unsafe_allow_html=True)
+    st.caption("Need = the worst 734 price that still clears your minimum edge. "
+               "If 734 shows that number or better, it's a bet. A total at a "
+               "different number than consensus: use the checker below.")
 
-    # ---- check & log one price
     st.markdown("#### Check & log a 734 price")
     opts = {f"{g.get('TimeLabel', '')} • {g.get('Away')} @ {g.get('Home')}": i
             for i, (g, _, _) in enumerate(rows)}
@@ -6477,24 +6527,32 @@ def render_account_page():
 
 def render_performance_page():
     tracker_df = load_tracker()
-    perf = tracker_performance_summary(tracker_df)
+    # Headline = the current system only (top picks). Older model bets, 734
+    # price bets and your own picks are broken out below, not blended in.
+    _top = (tracker_df[tracker_df["Grade"].fillna("").astype(str).eq("TOP PICK")]
+            if not tracker_df.empty and "Grade" in tracker_df.columns else tracker_df)
+    perf = tracker_performance_summary(_top)
     record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
+    clv_txt = f'{perf["clv"]*100:+.1f}%' if perf.get("clv") is not None else "—"
 
-    st.markdown('<div class="kicker">Model Performance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kicker">Top picks</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="metrics">'
         f'<div class="metric"><span>Record</span><b>{record_display}</b></div>'
         f'<div class="metric"><span>Units</span><b>{perf["units"]:+.2f}</b></div>'
         f'<div class="metric"><span>ROI</span><b>{perf["roi"]*100:+.1f}%</b></div>'
-        f'<div class="metric"><span>Pending</span><b>{perf["pending"]}</b></div>'
+        f'<div class="metric"><span>Avg CLV</span><b>{clv_txt}</b></div>'
         f'</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Headline tracker includes qualified pregame BET/BEST BET signals only: confirmed lineups, confidence ≥80 and valid odds.")
+    st.caption(f"The model's top {TOP_PICKS_TRACKED} picks per slate, frozen when lineups "
+               f"post. {perf['pending']} pending. CLV is the early read: positive "
+               f"means the picks beat the closing number.")
 
     if not tracker_df.empty:
         split = tracker_split_table(tracker_df)
         if not split.empty:
+            st.markdown('<div class="kicker">Everything tracked, by type</div>', unsafe_allow_html=True)
             st.dataframe(split, use_container_width=True, hide_index=True)
 
         recent_cols = ["Slate_Date","Game","Market","Pick","Odds","Grade","Result","Units"]
@@ -6555,6 +6613,58 @@ st.markdown("""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+st.markdown("""<style>
+/* --- readability pass: nothing important below ~12px, brighter secondary text */
+:root{ --dim:#a3b2c2; --dimmer:#8595a6; }
+.stCaption,[data-testid="stCaptionContainer"] p{font-size:.78rem!important;}
+.market-sub,.market-name,.combo-time,.combo-sp,.lineup-feed-diag,.tracker-gate-diag,
+.top-play-sub,.top-play-rank,.best-game,.metric span,.detail span,.wp-title,.wp-labels,
+.sl-stat i,.slate-bar .sl-age,.tbl-head,.tbl-key,.pregame-track-line{font-size:.76rem!important;}
+.market-main,.top-play-main{font-size:.9rem!important;}
+[data-testid="stExpander"] summary{font-size:.86rem!important;}
+[data-testid="stWidgetLabel"] p{color:var(--dim)!important;font-size:.8rem!important;}
+[data-testid="stMetricLabel"] p{font-size:.76rem!important;}
+
+/* --- nav: pinned icon bar */
+div[class*="st-key-main_navigation"]{position:sticky;top:3.75rem;z-index:60;
+  background:var(--ground);border-bottom:1px solid var(--rule);}
+div[class*="st-key-main_navigation"] label p{font-size:.68rem!important;}
+div[class*="st-key-main_navigation"] label:nth-child(1)::before{
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E")!important;}
+div[class*="st-key-main_navigation"] label:nth-child(2)::before{
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12V4h8l10 10-8 8z'/%3E%3Ccircle cx='7.5' cy='7.5' r='1.5'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12V4h8l10 10-8 8z'/%3E%3Ccircle cx='7.5' cy='7.5' r='1.5'/%3E%3C/svg%3E")!important;}
+div[class*="st-key-main_navigation"] label:nth-child(3)::before{
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E")!important;}
+div[class*="st-key-main_navigation"] label:nth-child(4)::before{
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3C/svg%3E")!important;}
+div[class*="st-key-main_navigation"] label:nth-child(5)::before{
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E")!important;}
+div[class*="st-key-main_navigation"] label:nth-child(6)::before{
+  content:""!important;display:block!important;width:25px!important;height:25px!important;
+  -webkit-mask-size:contain!important;-webkit-mask-repeat:no-repeat!important;-webkit-mask-position:center!important;
+  mask-size:contain!important;mask-repeat:no-repeat!important;mask-position:center!important;
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3'/%3E%3Cpath d='M7 15h10'/%3E%3C/svg%3E")!important;
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3'/%3E%3Cpath d='M7 15h10'/%3E%3C/svg%3E")!important;}
+
+/* --- Prices page grid */
+.px-game{border:1px solid var(--rule);border-radius:var(--r);background:var(--panel);
+  padding:10px 12px;margin:0 0 10px;}
+.px-h{font-size:.84rem;color:var(--dim);margin-bottom:6px;display:flex;gap:8px;align-items:baseline;}
+.px-h b{color:var(--ink);font-weight:600;}
+.px-h span{margin-left:auto;font-size:.7rem;color:var(--dimmer);}
+.px-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;row-gap:5px;
+  font-family:var(--mono);font-size:.84rem;color:var(--dim);font-variant-numeric:tabular-nums;}
+.px-th{font-family:var(--sans);font-size:.7rem;color:var(--dimmer);}
+.px-b{color:var(--ink);}
+.px-need{color:var(--ink);font-weight:600;}
+.px-need.hit,.px-m.hit{color:var(--pos);font-weight:700;}
+</style>""", unsafe_allow_html=True)
 
 try:
     api_key=st.secrets.get("ODDS_API_KEY","")
@@ -6641,9 +6751,12 @@ fresh_scoreboard = fetch_fresh_scoreboard(slate_date)
 # that triggered it. Requires candidates, so it only runs on the Board. Grading
 # of already-tracked bets is independent and always runs.
 if _needs_model:
+    # Only a full slate can be ranked. In Single Game mode the one projected
+    # game would always be "#1" and get tracked.
     _slate_picks = relative_picks(
         candidates, games, model_df,
-        totals_payload if st.session_state.get("totals_loaded") else None)
+        totals_payload if st.session_state.get("totals_loaded") else None
+    ) if st.session_state.get("production_view_mode", "Full Slate") == "Full Slate" else []
     _new_ml = track_top_picks(_slate_picks, games, slate_date)
     _new_totals = 0
     try:
@@ -6690,21 +6803,21 @@ else:
     if "ninth_page" not in st.session_state:
         st.session_state["ninth_page"] = "Board"
 
-    main_view = st.session_state.get("ninth_page", "Board")
+    # Compact icon bar, pinned to the top of the screen. Replaces six
+    # full-width stacked buttons that filled the first screen on a phone.
+    _NAV = ["Board", "Prices", "Live", "Tracker", "Bets", "Lab"]
+    if st.session_state.get("ninth_page") == "More":
+        st.session_state["ninth_page"] = "Lab"
+    if st.session_state.get("ninth_page") not in _NAV:
+        st.session_state["ninth_page"] = "Board"
 
-    def _ninth_nav_button(label, slug):
-        active = main_view == label
-        key = f"ninth_nav_{slug}_{'active' if active else 'idle'}"
-        if st.button(label, key=key, use_container_width=True):
-            st.session_state["ninth_page"] = label
-            st.rerun()
+    def _nav_changed():
+        st.session_state["ninth_page"] = st.session_state["main_navigation"]
 
-    _ninth_nav_button("Board", "board")
-    _ninth_nav_button("Prices", "prices")
-    _ninth_nav_button("Live", "live")
-    _ninth_nav_button("Tracker", "tracker")
-    _ninth_nav_button("Bets", "bets")
-    _ninth_nav_button("More", "more")
+    st.session_state["main_navigation"] = st.session_state["ninth_page"]
+    main_view = st.radio("Navigation", _NAV, horizontal=True,
+                         key="main_navigation", label_visibility="collapsed",
+                         on_change=_nav_changed)
 
     if main_view == "Prices":
         render_price_check_page(games, slate_date)
@@ -6721,13 +6834,13 @@ else:
 
     if main_view == "Bets":
         render_performance_page()
-        # Diagnostics also lives here: the "More" nav button is the last item in
-        # the bar and can sit underneath the preview overlay on mobile, making
-        # it untappable. Only one route renders per run, so no key collisions.
-        render_diagnostics()
         st.stop()
 
-    if main_view == "More":
+    # Lab: account, storage, backtests and data checks -- everything that is
+    # not daily use. The nav bar now sits at the top, so the old reason for
+    # duplicating Diagnostics on Bets (a bottom button hidden by the overlay)
+    # is gone.
+    if main_view == "Lab":
         render_account_page()
         render_diagnostics()
         st.stop()
@@ -6742,7 +6855,7 @@ else:
         # keys with the post-load controls; only one set renders per run
         # (this branch stops), so the selection carries straight through.
         _pre_mode = st.radio(
-            "View mode", ["Single Game", "Full Slate"], horizontal=True,
+            "View mode", ["Full Slate", "Single Game"], horizontal=True,
             label_visibility="collapsed", key="production_view_mode")
 
         _pre_games = sorted(
@@ -6769,9 +6882,31 @@ else:
             f"splits, bullpen numbers and lineups, so this is the slow step — "
             f"single game is much faster."
         )
-        if st.button("Run model", key="board_run", type="primary",
+        _lbl = "Run model + load lines (2 credits)" if api_key else "Run model"
+        if st.button(_lbl, key="board_run", type="primary",
                      use_container_width=True):
             st.session_state["board_loaded_for"] = _board_key(slate_date)
+            # Lines load in the same tap: a projection without a market can't
+            # rank anything, and the separate button was an easy step to miss.
+            if api_key:
+                _now = pd.Timestamp.now(tz="America/New_York")
+                with st.spinner("Loading lines…"):
+                    if _pre_mode == "Single Game":
+                        _sg = next((g for g in games if str(g.get("GamePk"))
+                                    == str(st.session_state.get("board_single_pk"))), None)
+                        if _sg:
+                            st.session_state.odds_payload = fetch_single_game_odds(api_key, _sg)
+                            st.session_state.totals_payload = fetch_single_game_totals(api_key, _sg)
+                            st.session_state.odds_scope = "single game"
+                    else:
+                        fetch_odds.clear()
+                        fetch_full_slate_totals.clear()
+                        st.session_state.odds_payload = fetch_odds(api_key)
+                        st.session_state.totals_payload = fetch_full_slate_totals(api_key)
+                        st.session_state.odds_scope = "full slate"
+                st.session_state.odds_loaded = True
+                st.session_state.totals_loaded = True
+                st.session_state.odds_loaded_at = _now
             st.rerun()
         st.caption("Live, Tracker and Bets work without it.")
         st.stop()
@@ -6790,7 +6925,7 @@ else:
 
     mode = st.radio(
         "View mode",
-        ["Single Game", "Full Slate"],
+        ["Full Slate", "Single Game"],
         horizontal=True,
         label_visibility="collapsed",
         key="production_view_mode",
@@ -6844,7 +6979,7 @@ else:
         if selected_state != "PREGAME":
             st.warning(game_state_label(selected_game) + ". Historical/pregame prices are not shown as actionable live bets.")
         pull_single = st.button(
-            "Update This Game Odds",
+            "Reload this game's lines (2 credits)",
             use_container_width=True,
             type="primary",
             disabled=(selected_state != "PREGAME"),
@@ -6861,6 +6996,14 @@ else:
             st.rerun()
 
         b = x["best"]
+        _sgp = {p["market"]: p for p in relative_picks(
+            [x], games, model_df,
+            totals_payload if st.session_state.get("totals_loaded") else None)}
+        if "MONEYLINE" in _sgp:
+            b = dict(next(z for z in x["all"] if z["team"] == _sgp["MONEYLINE"]["side"]))
+            b["selection"] = "MODEL SIDE"
+        st.caption("Single game shows the model's side. Run Full Slate to rank "
+                   "picks against each other and track the top 3.")
         away_side = next(z for z in x["all"] if z["team"] == x["away"])
         home_side = next(z for z in x["all"] if z["team"] == x["home"])
         lineup_text = "Lineups confirmed" if x["lineup_confirmed"] else f'Awaiting lineups • {x.get("lineup_teams_ready",0)}/2 teams posted'
@@ -6888,6 +7031,8 @@ else:
 
         if tm:
             tp=build_total_pick(raw_total,tm)
+            if tp:
+                tp["grade"] = "MODEL SIDE"
             if tp is None:
                 st.warning("A totals market was returned, but its price pair was incomplete/invalid. Refresh the total or try again later.")
             else:
@@ -6921,7 +7066,7 @@ else:
             st.caption("Use these files when you want a deeper breakdown in ChatGPT.")
 
     else:
-        update_full_slate = st.button("Load Full Slate Lines", use_container_width=True, type="primary", key="update_full_slate_odds")
+        update_full_slate = st.button("Reload lines (2 credits)", use_container_width=True, type="secondary", key="update_full_slate_odds")
         if update_full_slate:
             fetch_odds.clear()
             fetch_full_slate_totals.clear()
@@ -6971,14 +7116,12 @@ else:
                     "the morning of the slate; if it is early, try again later."
                 )
 
-        render_slate_table([x for x in candidates if x.get("pregame")], totals_payload)
-
         upcoming = sorted([x for x in candidates if x.get("pregame")], key=start_sort)
         live_now = sorted([x for x in candidates if x.get("game_state") == "LIVE"], key=start_sort)
         final_now = sorted([x for x in candidates if x.get("game_state") == "FINAL"], key=start_sort)
 
         if not st.session_state.get("odds_loaded") or not st.session_state.get("totals_loaded"):
-            st.caption("Load current lines to activate Best Bet / Bet / Lean grades.")
+            st.caption("Load lines to rank today's picks.")
         if not upcoming:
             st.info("No upcoming games remain on this slate.")
         else:
@@ -7003,6 +7146,7 @@ else:
             _picks = relative_picks(
                 upcoming, games, model_df,
                 totals_payload if st.session_state.get("totals_loaded") else None)
+            _pick_map = {(p["cx"]["GamePk"], p["market"]): p for p in _picks}
 
             st.markdown('<div class="kicker">Top Plays</div>', unsafe_allow_html=True)
             st.caption(
@@ -7030,6 +7174,9 @@ else:
             else:
                 st.caption("Load Full Slate Lines to rank today's picks.")
 
+            st.markdown('<div class="kicker">Full slate — model vs market</div>', unsafe_allow_html=True)
+            render_slate_table(upcoming, totals_payload)
+
             st.markdown('<div class="kicker">Upcoming Games — Chronological</div>', unsafe_allow_html=True)
 
             for cx in sorted(upcoming, key=start_sort):
@@ -7042,6 +7189,12 @@ else:
                     ml_grade = "MODEL"
                     ml_main = "Model only"
                     ml_sub = f'Model fair: {cx["away"]} {fair_ml(next(z["prob"] for z in cx["all"] if z["team"]==cx["away"])):+d} / {cx["home"]} {fair_ml(next(z["prob"] for z in cx["all"] if z["team"]==cx["home"])):+d}'
+
+                # Rank, not a fixed-threshold grade: the cards and Top Plays
+                # now tell the same story.
+                _pm = _pick_map.get((cx["GamePk"], "MONEYLINE"))
+                if _pm:
+                    ml_grade, ml_main, ml_sub = _rank_tag(_pm), _pm["main"], _pick_sub(_pm)
 
                 tp, tctx = total_map.get(cx["GamePk"], (None, None))
                 if tp:
@@ -7057,12 +7210,16 @@ else:
                         raw_total = float(ctx0["Projected_Total"])
                     total_main = "Model only"
                     total_sub = f'Model total {raw_total:.2f}' if raw_total is not None else "Model total unavailable"
+                _pt = _pick_map.get((cx["GamePk"], "TOTAL"))
+                if _pt:
+                    total_grade, total_main, total_sub = _rank_tag(_pt), _pt["main"], _pick_sub(_pt)
 
                 def grade_class(g):
                     return {
                         "BEST BET":"grade-best","BET":"grade-bet","LEAN":"grade-lean",
                         "PASS":"grade-pass","MODEL":"grade-wait","MODEL ONLY":"grade-wait"
-                    }.get(g,"grade-wait")
+                    }.get(g, "grade-best" if str(g).startswith("TOP")
+                           else "grade-pass" if str(g).startswith("#") else "grade-wait")
 
                 lineup_label = cx.get("lineup_display") or ("LINEUPS CONFIRMED" if cx.get("lineup_confirmed") else "AWAITING LINEUPS • 0/2")
                 away_lc = int(cx.get("away_lineup_count", 0) or 0)
