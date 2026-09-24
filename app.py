@@ -3136,7 +3136,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.8.0-UI-PASS"
+APP_VERSION = "3.8.1-UI-PASS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -6630,27 +6630,37 @@ st.markdown("""<style>
 div[class*="st-key-main_navigation"]{position:sticky;top:3.75rem;z-index:60;
   background:var(--ground);border-bottom:1px solid var(--rule);}
 div[class*="st-key-main_navigation"] label p{font-size:.68rem!important;}
-div[class*="st-key-main_navigation"] label:nth-child(1)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(1)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(1) label::before{
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 10.5 12 3l9 7.5'/%3E%3Cpath d='M5 9.5V21h5v-6h4v6h5V9.5'/%3E%3C/svg%3E")!important;}
-div[class*="st-key-main_navigation"] label:nth-child(2)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(2)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(2) label::before{
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12V4h8l10 10-8 8z'/%3E%3Ccircle cx='7.5' cy='7.5' r='1.5'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12V4h8l10 10-8 8z'/%3E%3Ccircle cx='7.5' cy='7.5' r='1.5'/%3E%3C/svg%3E")!important;}
-div[class*="st-key-main_navigation"] label:nth-child(3)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(3)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(3) label::before{
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.2'/%3E%3Cpath d='M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.7 4.7a10.4 10.4 0 0 0 0 14.6M19.3 4.7a10.4 10.4 0 0 1 0 14.6'/%3E%3C/svg%3E")!important;}
-div[class*="st-key-main_navigation"] label:nth-child(4)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(4)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(4) label::before{
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20V10h4v10M10 20V6h4v14M16 20V12h4v8'/%3E%3C/svg%3E")!important;}
-div[class*="st-key-main_navigation"] label:nth-child(5)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(5)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(5) label::before{
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='3' width='14' height='18' rx='2'/%3E%3Cpath d='M8 7h8M8 11h8M8 15h5'/%3E%3C/svg%3E")!important;}
-div[class*="st-key-main_navigation"] label:nth-child(6)::before{
+div[class*="st-key-main_navigation"] [role="radiogroup"] > label:nth-child(6)::before,
+div[class*="st-key-main_navigation"] [role="radiogroup"] > *:nth-child(6) label::before{
   content:""!important;display:block!important;width:25px!important;height:25px!important;
   -webkit-mask-size:contain!important;-webkit-mask-repeat:no-repeat!important;-webkit-mask-position:center!important;
   mask-size:contain!important;mask-repeat:no-repeat!important;mask-position:center!important;
   -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3'/%3E%3Cpath d='M7 15h10'/%3E%3C/svg%3E")!important;
   mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2h12.4a1.5 1.5 0 0 0 1.3-2L14 9V3'/%3E%3Cpath d='M7 15h10'/%3E%3C/svg%3E")!important;}
+
+/* hide the radio circles; the icon + label is the button */
+div[class*="st-key-main_navigation"] label > div:first-child{display:none!important;}
+div[class*="st-key-main_navigation"] label{cursor:pointer;}
 
 /* --- Prices page grid */
 .px-game{border:1px solid var(--rule);border-radius:var(--r);background:var(--panel);
