@@ -1775,6 +1775,7 @@ def _pit_project(g, as_of, use_recent=True):
 
     return {
         "projected": total,
+        "away_runs": away_runs * pf, "home_runs": home_runs * pf,
         "inputs_ok": all([asp["Available"], hsp["Available"],
                           aoff["Available"], hoff["Available"]]),
         "bullpen_ok": abp["Available"] and hbp["Available"],
@@ -1936,6 +1937,225 @@ def _edge_significance(edge, dev):
     except Exception:
         se = float("nan")
     return {"edge_t": float(t), "edge_slope_se": se}
+
+
+# --- moneyline edge test -----------------------------------------------------
+
+def _final_sides_for_date(d):
+    """{gamePk: (away_runs, home_runs)} for completed games."""
+    data = get_json(f"{MLB_API}/v1/schedule",
+                    {"sportId": 1, "date": str(d), "hydrate": "linescore"},
+                    cache_key=("final", str(d)),
+                    ttl=600 if d >= today_et() - timedelta(days=1) else None)
+    out = {}
+    for block in data.get("dates", []):
+        for g in block.get("games", []):
+            if g.get("status", {}).get("abstractGameState") != "Final":
+                continue
+            t = g.get("teams", {})
+            a = safe_float(t.get("away", {}).get("score"), np.nan)
+            h = safe_float(t.get("home", {}).get("score"), np.nan)
+            if math.isfinite(a) and math.isfinite(h) and a != h:
+                out[g.get("gamePk")] = (a, h)
+    return out
+
+
+def _closing_ml_for_date(api_key, d):
+    """Closing moneyline per game, 5 minutes before that game's first pitch.
+
+    Fair away probability = median across books of each book's own no-vig
+    price. Also returns the median American price on each side, for the
+    betting simulation. One historical call per distinct start time.
+    """
+    if not api_key:
+        return [], "no ODDS_API_KEY configured"
+    events, note = _hist_events_for_date(api_key, d)
+    if not events:
+        return [], note
+    groups = {}
+    for ev in events:
+        snap = _iso_z(ev["commence"] - pd.Timedelta(minutes=CLOSE_SNAPSHOT_MINUTES))
+        groups.setdefault(snap, []).append(ev)
+    out, note = [], None
+    for snap, evs in sorted(groups.items()):
+        try:
+            r = requests.get(
+                f"{ODDS_API_BASE}/historical/sports/{ODDS_SPORT_KEY}/odds",
+                params={"apiKey": api_key, "regions": "us", "markets": "h2h",
+                        "oddsFormat": "american", "date": snap}, timeout=25)
+            if r.status_code in (401, 403):
+                return out, "historical odds not included in this API plan"
+            if r.status_code == 422:
+                note = note or f"historical endpoint rejected {snap}"
+                continue
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            note = note or f"historical odds request failed: {e}"
+            continue
+        data = payload.get("data", payload) if isinstance(payload, dict) else payload
+        by_id = {ev.get("id"): ev for ev in data or []}
+        for e in evs:
+            ev = by_id.get(e["id"])
+            if not ev:
+                continue
+            an, hn = _norm_team(ev.get("away_team")), _norm_team(ev.get("home_team"))
+            fair, pa_list, ph_list = [], [], []
+            for bk in ev.get("bookmakers", []) or []:
+                px = {}
+                for mk in bk.get("markets", []) or []:
+                    if mk.get("key") != "h2h":
+                        continue
+                    for oc in mk.get("outcomes", []) or []:
+                        p = valid_odds(oc.get("price"))
+                        if p is not None:
+                            px[_norm_team(oc.get("name"))] = p
+                if an in px and hn in px:
+                    ia, ih = implied_prob(px[an]), implied_prob(px[hn])
+                    if ia and ih:
+                        fair.append(ia / (ia + ih))
+                        pa_list.append(px[an])
+                        ph_list.append(px[hn])
+            if fair:
+                out.append({**e, "p_away": float(statistics.median(fair)),
+                            "px_away": int(round(statistics.median(pa_list))),
+                            "px_home": int(round(statistics.median(ph_list))),
+                            "books": len(fair)})
+    if not out:
+        return [], note or "no closing moneylines found for this date"
+    return out, None
+
+
+def _match_record(records, g):
+    a, h = _norm_team(g.get("Away")), _norm_team(g.get("Home"))
+    cands = [r for r in records or [] if r["away"] == a and r["home"] == h]
+    if not cands:
+        return None
+    try:
+        gt = pd.to_datetime(g.get("GameDate"), utc=True)
+    except Exception:
+        gt = None
+    if gt is None:
+        return cands[0] if len(cands) == 1 else None
+    best = min(cands, key=lambda r: abs((r["commence"] - gt).total_seconds()))
+    return best if abs((best["commence"] - gt).total_seconds()) <= 4 * 3600 else None
+
+
+def _ll(p, y):
+    p = np.clip(np.asarray(p, float), 1e-4, 1 - 1e-4)
+    y = np.asarray(y, float)
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+
+def _best_blend_weight(model, market, y, grid=None):
+    """Weight w that best predicts results with p = market + w*(model - market),
+    the same blend the live board uses."""
+    grid = np.arange(0.0, 1.51, 0.01) if grid is None else grid
+    lls = [_ll(np.clip(market + w * (model - market), 0.01, 0.99), y) for w in grid]
+    return float(grid[int(np.argmin(lls))])
+
+
+def _simulate_bets(model, market, y, px_a, px_h, w, min_ev):
+    """Flat 1-unit bets under the live rule, at the closing consensus price."""
+    n = wins = 0
+    units = 0.0
+    for pm, pk, yy, pa, ph in zip(model, market, y, px_a, px_h):
+        cal = pk + w * (pm - pk)
+        # the side where the blended number beats the fair price by more
+        if cal - pk >= (1 - cal) - (1 - pk):
+            p, price, won = cal, pa, yy == 1
+        else:
+            p, price, won = 1 - cal, ph, yy == 0
+        if expected_value(p, price) < min_ev:
+            continue
+        n += 1
+        prof = price / 100.0 if price > 0 else 100.0 / abs(price)
+        if won:
+            wins += 1
+            units += prof
+        else:
+            units -= 1.0
+    return {"bets": n, "wins": wins, "units": units,
+            "roi": units / n if n else 0.0}
+
+
+def ml_backtest(days_back=21, use_recent=True, api_key=None, progress=None,
+                min_ev=0.03, seed=7):
+    """Does the moneyline model know anything the closing line doesn't?
+
+    Each game is projected with that morning's inputs (no lineups, platoon,
+    weather or bullpen fatigue: none are available point-in-time), turned
+    into a win probability, and compared with the closing no-vig price.
+    The key output is the blend weight that best predicts actual winners,
+    with a bootstrap range -- the number the live ML weight should be.
+    """
+    end = today_et() - timedelta(days=1)
+    rows, skipped, note_out = [], 0, None
+    for i in range(days_back):
+        d = end - timedelta(days=i)
+        if progress:
+            progress(i + 1, days_back, str(d))
+        try:
+            games = fetch_games_for_date(d)
+            finals = _final_sides_for_date(d)
+        except Exception:
+            continue
+        if not games or not finals:
+            continue
+        recs, note = _closing_ml_for_date(api_key, d)
+        if note and not note_out:
+            note_out = note
+        if not recs:
+            continue
+        for g in games:
+            gp = g.get("GamePk")
+            if gp not in finals or not g.get("Away_SP_ID") or not g.get("Home_SP_ID"):
+                continue
+            rec = _match_record(recs, g)
+            if not rec:
+                continue
+            try:
+                res = _pit_project(g, d, use_recent)
+            except Exception:
+                skipped += 1
+                continue
+            if not res["inputs_ok"]:
+                skipped += 1
+                continue
+            a, h = finals[gp]
+            rows.append({"model": win_prob(res["away_runs"], res["home_runs"]),
+                         "market": rec["p_away"], "y": 1.0 if a > h else 0.0,
+                         "px_a": rec["px_away"], "px_h": rec["px_home"]})
+
+    out = {"n": len(rows), "skipped": skipped, "note": note_out}
+    if len(rows) < 40:
+        return out
+    m = np.array([r["model"] for r in rows])
+    k = np.array([r["market"] for r in rows])
+    y = np.array([r["y"] for r in rows])
+    pa = [r["px_a"] for r in rows]
+    ph = [r["px_h"] for r in rows]
+
+    out["ll_market"] = _ll(k, y)
+    out["ll_model"] = _ll(m, y)
+    out["ll_current"] = _ll(np.clip(k + ML_MODEL_WEIGHT * (m - k), 0.01, 0.99), y)
+    out["mean_gap"] = float(np.mean(np.abs(m - k)))
+    w = _best_blend_weight(m, k, y)
+    out["best_weight"] = w
+    out["ll_best"] = _ll(np.clip(k + w * (m - k), 0.01, 0.99), y)
+
+    rng = np.random.default_rng(seed)
+    grid = np.arange(0.0, 1.51, 0.02)
+    boots = []
+    for _ in range(300):
+        idx = rng.integers(0, len(rows), len(rows))
+        boots.append(_best_blend_weight(m[idx], k[idx], y[idx], grid))
+    out["weight_lo"] = float(np.percentile(boots, 5))
+    out["weight_hi"] = float(np.percentile(boots, 95))
+
+    out["sim_current"] = _simulate_bets(m, k, y, pa, ph, ML_MODEL_WEIGHT, min_ev)
+    out["sim_best"] = _simulate_bets(m, k, y, pa, ph, w, min_ev)
+    return out
 
 
 def pit_backtest(days_back=14, use_recent=True, use_lines=True,
@@ -3014,6 +3234,77 @@ def render_diagnostics():
                         f"enough to beat vig. Break-even needs edge slope ~0.26."
                     )
 
+    with st.expander("Moneyline edge test", expanded=False):
+        st.caption(
+            "Rebuilds each past game's win probability from that morning's "
+            "inputs and checks it against the closing moneyline and the final "
+            "score. The answer is the model weight the results actually "
+            "support, versus the 0.70 the board uses now.")
+        st.caption(
+            "Left out because they can't be rebuilt for past dates: lineups, "
+            "platoon splits, weather and bullpen fatigue. So this tests the "
+            "core model; the live board has a little more information.")
+        _ml_days = st.slider("Days", 7, 45, 21, key="mlbt_days")
+        st.caption(f"Cost: roughly {_ml_days * 80:,}–{_ml_days * 100:,} Odds API "
+                   f"credits (one historical call per start time). Keep the tab "
+                   f"open; it takes several minutes.")
+        if st.button("Run moneyline edge test", key="mlbt_run", use_container_width=True):
+            _mb = st.progress(0.0, text="starting...")
+
+            def _mprog(i, n, label):
+                _mb.progress(i / n, text=f"{label} ({i}/{n})")
+
+            st.session_state["_mlbt"] = ml_backtest(
+                days_back=_ml_days, api_key=st.secrets.get("ODDS_API_KEY", ""),
+                progress=_mprog)
+            _mb.empty()
+        _mr = st.session_state.get("_mlbt")
+        if _mr:
+            if _mr["n"] < 40:
+                st.warning(f"Only {_mr['n']} games matched to closing lines, too "
+                           f"few to judge. {_mr.get('note') or ''}")
+            else:
+                c1, c2 = st.columns(2)
+                c1.metric("Games", _mr["n"])
+                c2.metric("Avg model vs market gap", f"{_mr['mean_gap']*100:.1f} pts")
+                c1.metric("Market log loss", f"{_mr['ll_market']:.4f}")
+                c2.metric("Model-alone log loss", f"{_mr['ll_model']:.4f}")
+                c1.metric("Best weight", f"{_mr['best_weight']:.2f}")
+                c2.metric("90% range", f"{_mr['weight_lo']:.2f} – {_mr['weight_hi']:.2f}")
+                st.caption("Log loss: lower is better. The market's number is the "
+                           "bar to beat.")
+                lo, hi, bw = _mr["weight_lo"], _mr["weight_hi"], _mr["best_weight"]
+                if lo > 0.05:
+                    st.success(
+                        f"The model adds real information the closing line "
+                        f"doesn't have. Results support a moneyline weight "
+                        f"around {bw:.2f}.")
+                elif bw < 0.15:
+                    st.error(
+                        f"No measurable edge: the closing line alone predicts "
+                        f"winners as well as any blend. The weight the results "
+                        f"support is about {bw:.2f}.")
+                else:
+                    st.warning(
+                        f"Inconclusive. The best weight is {bw:.2f}, but "
+                        f"anything from {lo:.2f} to {hi:.2f} fits the results. "
+                        f"More days would narrow it.")
+                inside = lo <= ML_MODEL_WEIGHT <= hi
+                st.caption(f"The board's current {ML_MODEL_WEIGHT:.2f} is "
+                           f"{'inside' if inside else 'outside'} that range.")
+                sc, sb = _mr["sim_current"], _mr["sim_best"]
+                st.markdown(
+                    f"**Betting the board's rule (EV ≥ 3%) at closing prices:**  \n"
+                    f"At {ML_MODEL_WEIGHT:.2f}: {sc['bets']} bets, "
+                    f"{sc['wins']}-{sc['bets'] - sc['wins']}, "
+                    f"{sc['units']:+.1f} units ({sc['roi']*100:+.1f}% ROI)  \n"
+                    f"At {bw:.2f}: {sb['bets']} bets, "
+                    f"{sb['wins']}-{sb['bets'] - sb['wins']}, "
+                    f"{sb['units']:+.1f} units ({sb['roi']*100:+.1f}% ROI)")
+                st.caption("Closing prices are the hardest prices to beat, and "
+                           "betting ROI over a few weeks is mostly luck. Trust "
+                           "the weight range more than the units.")
+
     with st.expander("Point-in-time backtest (advanced)", expanded=False):
         st.caption(
             "Rebuilds each game's inputs as they stood that morning -- season "
@@ -3144,7 +3435,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.14.2-DOUBLEHEADERS"
+APP_VERSION = "3.15.0-ML-EDGE-TEST"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
