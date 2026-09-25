@@ -219,6 +219,7 @@ _hitter_cache = {}
 _hand_cache = {}
 _totals_weather_cache = {}
 _json_cache_time = {}
+_GAME_NUMBER = {}   # gamePk -> 1 or 2 (doubleheaders)
 _PIT_BP_DATES_OK = {}
 _cache_day = [None]
 
@@ -457,7 +458,10 @@ def fetch_games_for_date(selected_date=None):
                 "Home_SP": home.get("probablePitcher", {}).get("fullName"),
                 "Away_SP_ID": away.get("probablePitcher", {}).get("id"),
                 "Home_SP_ID": home.get("probablePitcher", {}).get("id"),
+                "GameNumber": int(g.get("gameNumber") or 1),
+                "DoubleHeader": g.get("doubleHeader", "N"),
             })
+            _GAME_NUMBER[g.get("gamePk")] = int(g.get("gameNumber") or 1)
     return games
 
 
@@ -2398,6 +2402,7 @@ def slate_rows(candidates, totals_payload):
             # falls through to "LIVE", and every totals event failed to match.
             ev = match_event(totals_payload.get("events", []) or [],
                              {"Away": c.get("away"), "Home": c.get("home"),
+                              "GamePk": c.get("GamePk"),
                               "GameDate": (c.get("model_row") or {}).get("GameDate")})
             tm = totals_market(ev) if ev else None
         except Exception:
@@ -3139,7 +3144,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.14.1-PRIDE-SASS"
+APP_VERSION = "3.14.2-DOUBLEHEADERS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -4302,11 +4307,25 @@ def event_match(event, game):
 
 
 def match_event(events, game):
+    """The sportsbook event for one MLB game.
+
+    Doubleheaders: MLB lists game 2 a few minutes after game 1 as a
+    placeholder, so "nearest start time" gave BOTH games game 1's odds.
+    Same-day events for the pair are now matched in start order: game 1
+    takes the earliest, game 2 the next. Books usually don't post game 2
+    until game 1 is under way; until then game 2 has no line.
+    """
     c=[]
     for e in events:
         s=event_match(e,game)
         if s is not None: c.append((s,e))
     if not c: return None
+    gnum = int(game.get("GameNumber") or _GAME_NUMBER.get(game.get("GamePk")) or 1)
+    same_day = sorted((e for s, e in c if s < 16 * 3600),
+                      key=lambda e: str(e.get("commence_time") or ""))
+    if gnum >= 2 or len(same_day) >= 2:
+        idx = gnum - 1
+        return same_day[idx] if idx < len(same_day) else None
     c.sort(key=lambda z:z[0]); return c[0][1]
 
 
