@@ -3139,7 +3139,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.14.0-PRIDE-SASS"
+APP_VERSION = "3.14.1-PRIDE-SASS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -4573,7 +4573,7 @@ def build_candidates(model_df, games, events):
         best=side_rows[0]
         out.append({
             "GamePk":r["GamePk"],"game":r["Game"],"away":r["Away"],"home":r["Home"],"time":r.get("TimeLabel",g.get("TimeLabel","")),
-            "away_sp":r.get("Away_SP") or "TBD","home_sp":r.get("Home_SP") or "TBD","lineup_confirmed":confirmed,
+            "away_sp":_sp_name(r.get("Away_SP")),"home_sp":_sp_name(r.get("Home_SP")),"lineup_confirmed":confirmed,
             "lineup_display": ("LINEUPS CONFIRMED" if confirmed else lineup_label),
             "engine_lineup_confirmed": engine_confirmed,
             "feed_lineup_confirmed": feed_confirmed,
@@ -4996,6 +4996,17 @@ def sass(plain, sassy):
     return sassy if _sassy() else plain
 
 
+def _sp_name(v):
+    """Probable starter for display; anything missing reads TBD, never 'nan'."""
+    try:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return "TBD"
+    except Exception:
+        pass
+    v = str(v).strip()
+    return "TBD" if v.lower() in ("", "nan", "none", "tbd") else v
+
+
 def _card_grade_class(g):
     return {"BEST BET": "grade-best", "BET": "grade-bet", "LEAN": "grade-lean",
             "PASS": "grade-pass", "MODEL": "grade-wait", "MODEL ONLY": "grade-wait",
@@ -5046,7 +5057,7 @@ def _render_game_card(cx, pick_map, model_df):
         f'<div class="lineup-feed-diag">{_data_status_line(cx)}</div></div></div>'
         f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
         f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {_card_grade_class(ml_grade)}">{say(ml_grade)}</div></div>'
-        f'<div class="market-row"><div class="market-name">TOTAL</div><div><div class="market-main">{total_main}</div>'
+        f'<div class="market-row"><div class="market-name">O/U</div><div><div class="market-main">{total_main}</div>'
         f'<div class="market-sub">{total_sub}</div></div><div class="market-grade {_card_grade_class(total_grade)}">{say(total_grade)}</div></div>'
         f'</div>'
     )
@@ -5086,6 +5097,8 @@ VERDICT_WAIT = "LINEUPS NOT FINAL"
 
 
 def _lineups_final(cx):
+    if "TBD" in (_sp_name(cx.get("away_sp")), _sp_name(cx.get("home_sp"))):
+        return False
     return bool(cx.get("lineup_confirmed") or cx.get("feed_lineup_confirmed")
                 or int(cx.get("lineup_teams_ready") or 0) >= 2)
 
@@ -6777,6 +6790,11 @@ st.markdown("""<style>
 [data-testid="stExpander"] summary{font-size:.86rem!important;}
 [data-testid="stWidgetLabel"] p{color:var(--dim)!important;font-size:.8rem!important;}
 [data-testid="stMetricLabel"] p{font-size:.76rem!important;}
+
+/* --- re-run fade: nav stays solid, content only lightly dimmed */
+div[class*="st-key-main_navigation"],div[class*="st-key-main_navigation"] *{opacity:1!important;}
+[data-stale="true"]{opacity:.8!important;transition:opacity .2s;}
+.market-name{width:30px!important;flex:0 0 30px!important;white-space:nowrap!important;}
 
 /* --- buttons, whatever wraps them */
 .stButton button,.stDownloadButton button{background:var(--panel)!important;color:var(--ink)!important;
