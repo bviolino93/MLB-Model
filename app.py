@@ -3139,7 +3139,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.10.1-THRESHOLD-BETS"
+APP_VERSION = "3.14.0-PRIDE-SASS"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -4969,6 +4969,90 @@ def bet_min_ev():
         return BET_MIN_EV_DEFAULT / 100.0
 
 
+# --- Sassy copy ---------------------------------------------------------------
+# Display text only. Every decision, comparison and tracker value still uses
+# the plain labels; say()/sass() are applied at the moment text is drawn.
+SASS = {
+    "BET": "BET IT 💅", "DON'T BET": "HARD PASS", "LINEUPS NOT FINAL": "WAIT FOR LINEUPS",
+    "NO LINE": "NO LINE YET", "734 PRICE": "734 PRICE ✨", "OWN PICK": "YOUR PICK",
+    "WIN": "SLAYED", "LOSS": "FLOPPED", "PUSH": "PUSH. MEH.", "VOID": "VOIDED",
+    "ON TRACK": "SERVING", "NEEDS SCORING": "NEEDS RUNS, STAT", "NEEDS HELP": "IN ITS FLOP ERA",
+    "LIVE": "LIVE, HONEY",
+}
+
+
+def _sassy():
+    try:
+        return bool(st.session_state.get("sassy_mode", True))
+    except Exception:
+        return False
+
+
+def say(label):
+    return SASS.get(label, label) if _sassy() else label
+
+
+def sass(plain, sassy):
+    return sassy if _sassy() else plain
+
+
+def _card_grade_class(g):
+    return {"BEST BET": "grade-best", "BET": "grade-bet", "LEAN": "grade-lean",
+            "PASS": "grade-pass", "MODEL": "grade-wait", "MODEL ONLY": "grade-wait",
+            "DON'T BET": "grade-pass", "LINEUPS NOT FINAL": "grade-wait",
+            "NO LINE": "grade-wait"}.get(g, "grade-wait")
+
+
+def _render_game_card(cx, pick_map, model_df):
+    """One game: header, then the moneyline and total, each with its
+    BET / DON'T BET / LINEUPS NOT FINAL answer. Used by Full Slate and
+    Single Game so both read the same way."""
+    fair_away = fair_ml(next(z["prob"] for z in cx["all"] if z["team"] == cx["away"]))
+    fair_home = fair_ml(next(z["prob"] for z in cx["all"] if z["team"] == cx["home"]))
+
+    pm = pick_map.get((cx["GamePk"], "MONEYLINE"))
+    if pm:
+        ml_grade, ml_main, ml_sub = pick_verdict(pm), pm["main"], _pick_sub(pm)
+    else:
+        ml_grade = "NO LINE"
+        ml_main = f'Model fair: {_abbr(cx["away"])} {fair_away:+d} / {_abbr(cx["home"])} {fair_home:+d}'
+        ml_sub = "No moneyline loaded for this game yet"
+
+    pt = pick_map.get((cx["GamePk"], "TOTAL"))
+    if pt:
+        total_grade, total_main, total_sub = pick_verdict(pt), pt["main"], _pick_sub(pt)
+    else:
+        raw_total = None
+        mr = model_df.loc[model_df["GamePk"] == cx["GamePk"]] if model_df is not None else pd.DataFrame()
+        if not mr.empty:
+            raw_total = float(totals_projection(mr.iloc[0].to_dict())["Projected_Total"])
+        total_grade = "NO LINE"
+        total_main = f"Model total {raw_total:.1f}" if raw_total is not None else "Model total unavailable"
+        total_sub = "No total loaded for this game yet"
+
+    lineup_label = cx.get("lineup_display") or (
+        "LINEUPS CONFIRMED" if cx.get("lineup_confirmed") else "AWAITING LINEUPS • 0/2")
+    away_lc = int(cx.get("away_lineup_count", 0) or 0)
+    home_lc = int(cx.get("home_lineup_count", 0) or 0)
+    lineup_diag = (f'Lineup feed: {cx["away"]} {away_lc}/9 • {cx["home"]} {home_lc}/9'
+                   if not cx.get("lineup_confirmed")
+                   else "Both starting lineups loaded")
+    html = (
+        f'<div class="combo-card"><div class="combo-head"><div>'
+        f'<div class="combo-time">{cx["time"]} • {lineup_label}</div>'
+        f'<div class="combo-match">{cx["away"]} @ {cx["home"]}</div>'
+        f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
+        f'<div class="lineup-feed-diag">{lineup_diag}</div>'
+        f'<div class="lineup-feed-diag">{_data_status_line(cx)}</div></div></div>'
+        f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
+        f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {_card_grade_class(ml_grade)}">{say(ml_grade)}</div></div>'
+        f'<div class="market-row"><div class="market-name">TOTAL</div><div><div class="market-main">{total_main}</div>'
+        f'<div class="market-sub">{total_sub}</div></div><div class="market-grade {_card_grade_class(total_grade)}">{say(total_grade)}</div></div>'
+        f'</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def _data_status_line(cx):
     """One-line health check per game: did the new data actually load?"""
     r = cx.get("model_row") or {}
@@ -4983,14 +5067,15 @@ def _data_status_line(cx):
             return "—"
         return f"{got}/{need}" + ("" if got == need else " ✗" if got == 0 else "")
     tired = [t for t in (r.get("Away_Bullpen_Tired"), r.get("Home_Bullpen_Tired")) if t]
-    tired_txt = f' • tired: {"; ".join(tired)}' if tired else ""
+    tired_txt = (f' • {sass("tired", "too tired to function")}: {"; ".join(tired)}'
+                 if tired else "")
     sp = [splits("Away"), splits("Home")]
     all_ok = (r.get("Away_Pen_Fatigue_OK") and r.get("Home_Pen_Fatigue_OK")
               and not any("✗" in x for x in sp)
               and not any("/" in x and x.split("/")[0] != x.split("/")[1].split()[0] for x in sp))
     if all_ok:
         wait = " • lineups pending" if any(x == "waiting on lineup" for x in sp) else ""
-        return f"Data ✓{wait}{tired_txt}"
+        return f"{sass('Data ✓', 'Data ✓ flawless')}{wait}{tired_txt}"
     return (f'Data: pen fatigue {cx["away"]} {pen("Away")} · {cx["home"]} {pen("Home")} '
             f'• hitter splits {cx["away"]} {sp[0]} · {cx["home"]} {sp[1]}{tired_txt}')
 
@@ -5786,7 +5871,7 @@ def _total_visual(rec, game):
         f'<div class="bet-section-head"><div>'
         f'<div class="market-chip">TOTAL</div>'
         f'<div class="bet-pick">{pick}</div></div>'
-        f'<div class="track-pill {status_cls}">{status}</div></div>'
+        f'<div class="track-pill {status_cls}">{say(status)}</div></div>'
         f'<div class="run-summary">'
         f'<div class="run-stat"><span>CURRENT RUNS</span><b>{runs:g}</b></div>'
         f'<div class="run-stat line-stat"><span>BET LINE</span><b>{line:g}</b></div>'
@@ -5848,7 +5933,7 @@ def _moneyline_visual(rec, game, win_prob=None):
         f'<div class="bet-section-head"><div>'
         f'<div class="market-chip">MONEYLINE</div>'
         f'<div class="bet-pick">{pick} {odds}</div></div>'
-        f'<div class="track-pill {status_cls}">{status}</div></div>'
+        f'<div class="track-pill {status_cls}">{say(status)}</div></div>'
         f'<div class="ml-live-wp">'
         f'<span>{wp_label}</span><b>{wp_main}</b></div>'
         f'<div class="ml-meter-wrap live-wp-meter">'
@@ -5917,7 +6002,7 @@ def _pregame_tracked_card(rec, game):
         f'<div class="pregame-track-top"><div>'
         f'<div class="pregame-track-time">{start_text} • TRACKED</div>'
         f'<div class="pregame-track-game">{away} @ {home}</div>'
-        f'</div><div class="pregame-track-grade">{grade}</div></div>'
+        f'</div><div class="pregame-track-grade">{say(grade)}</div></div>'
         f'<div class="pregame-track-line"><span>{market_label}</span><b>{pick}</b></div>'
         f'<div class="pregame-track-meta">'
         f'<span>EDGE <b>{edge_text}</b></span>'
@@ -6473,6 +6558,22 @@ def render_price_check_page(games, slate_date):
             st.info("Already logged.")
 
 
+def _set_theme():
+    """Both switches live in the URL (?theme=classic, ?tone=plain) so a
+    reload keeps them."""
+    try:
+        if st.session_state.get("pride_theme", True):
+            st.query_params.pop("theme", None)
+        else:
+            st.query_params["theme"] = "classic"
+        if st.session_state.get("sassy_mode", True):
+            st.query_params.pop("tone", None)
+        else:
+            st.query_params["tone"] = "plain"
+    except Exception:
+        pass
+
+
 def render_account_page():
     # Decorative 477 KB base64 logo removed -- it was 56% of the entire file
     # and rendered only on this settings page, directly above the text header
@@ -6485,6 +6586,9 @@ def render_account_page():
         f'</div>',
         unsafe_allow_html=True,
     )
+    st.markdown('<div class="kicker">Appearance</div>', unsafe_allow_html=True)
+    st.toggle("Pride theme 🏳️‍🌈", key="pride_theme", on_change=_set_theme)
+    st.toggle("Sassy mode 💅", key="sassy_mode", on_change=_set_theme)
     st.markdown(
         f'<div class="account-card">'
         f'<div><span>APP</span><b>{APP_VERSION}</b></div>'
@@ -6511,7 +6615,7 @@ def render_performance_page():
     record_display = f'{perf["wins"]}-{perf["losses"]}' + (f'-{perf["pushes"]}P' if perf["pushes"] else "")
     clv_txt = f'{perf["clv"]*100:+.1f}%' if perf.get("clv") is not None else "—"
 
-    st.markdown('<div class="kicker">Model bets</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="kicker">{sass("Model bets", "The receipts")}</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="metrics">'
         f'<div class="metric"><span>Record</span><b>{record_display}</b></div>'
@@ -6615,6 +6719,53 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# --- Pride theme -------------------------------------------------------------
+# On by default; switch it off under Lab -> Appearance. Kept in the URL
+# (?theme=classic) so the choice survives a reload.
+PRIDE = ["#e40303", "#ff8c00", "#ffed00", "#008026", "#24408e", "#732982"]
+_RAINBOW = "linear-gradient(90deg," + ",".join(PRIDE) + ")"
+try:
+    _qp_theme = st.query_params.get("theme")
+except Exception:
+    _qp_theme = None
+if "pride_theme" not in st.session_state:
+    st.session_state["pride_theme"] = (_qp_theme != "classic")
+try:
+    _qp_tone = st.query_params.get("tone")
+except Exception:
+    _qp_tone = None
+if "sassy_mode" not in st.session_state:
+    st.session_state["sassy_mode"] = (_qp_tone != "plain")
+
+if st.session_state.get("pride_theme", True):
+    st.markdown(f"""<style>
+/* wordmark + pill */
+.ninth-hero .title span,.ninth-hero .title .signal{{background:{_RAINBOW};
+  -webkit-background-clip:text;background-clip:text;color:transparent!important;}}
+.ninth-hero .pill{{border:0!important;background:{_RAINBOW}!important;color:#fff!important;
+  text-shadow:0 1px 2px rgba(0,0,0,.55);}}
+/* a rainbow edge on every card */
+.combo-card,.top-play-card,.px-game,.visual-bet-card,.pregame-track-card,.account-card,
+.slate-tbl,.metric{{position:relative;overflow:hidden;}}
+.combo-card::before,.top-play-card::before,.px-game::before,.visual-bet-card::before,
+.pregame-track-card::before,.account-card::before{{content:"";position:absolute;left:0;right:0;top:0;
+  height:3px;background:{_RAINBOW};}}
+/* nav: rainbow underline, rainbow icon + label on the active page */
+div[class*="st-key-main_navigation"]{{border-bottom:3px solid transparent!important;
+  border-image:{_RAINBOW} 1!important;}}
+div[class*="st-key-main_navigation"] label:has(input:checked)::before{{background-color:transparent!important;
+  background-image:{_RAINBOW}!important;}}
+div[class*="st-key-main_navigation"] label:has(input:checked) p{{background:{_RAINBOW};
+  -webkit-background-clip:text;background-clip:text;color:transparent!important;}}
+/* BET badges and primary buttons */
+.market-grade.grade-bet,.market-grade.grade-best,.badge-bet,.badge-best{{background:{_RAINBOW}!important;
+  color:#fff!important;border:0!important;text-shadow:0 1px 2px rgba(0,0,0,.6);}}
+.stButton button[kind="primary"],.stButton button[data-testid="stBaseButton-primary"]{{
+  background:{_RAINBOW}!important;color:#fff!important;text-shadow:0 1px 2px rgba(0,0,0,.6);}}
+/* section headings */
+.kicker{{border-image:{_RAINBOW} 1!important;}}
+</style>""", unsafe_allow_html=True)
+
 st.markdown("""<style>
 /* --- readability pass: nothing important below ~12px, brighter secondary text */
 :root{ --dim:#a3b2c2; --dimmer:#8595a6; }
@@ -6626,6 +6777,14 @@ st.markdown("""<style>
 [data-testid="stExpander"] summary{font-size:.86rem!important;}
 [data-testid="stWidgetLabel"] p{color:var(--dim)!important;font-size:.8rem!important;}
 [data-testid="stMetricLabel"] p{font-size:.76rem!important;}
+
+/* --- buttons, whatever wraps them */
+.stButton button,.stDownloadButton button{background:var(--panel)!important;color:var(--ink)!important;
+  border:1px solid var(--rule)!important;border-radius:var(--r)!important;}
+.stButton button p,.stDownloadButton button p{color:inherit!important;}
+.stButton button[kind="primary"],.stButton button[data-testid="stBaseButton-primary"]{
+  background:var(--pos)!important;color:#061109!important;border:0!important;}
+.stButton button:disabled{background:var(--panel)!important;color:var(--dimmer)!important;}
 
 /* --- nav: pinned icon bar */
 /* The old stylesheet pins this bar to the BOTTOM with position:fixed!important
@@ -6868,7 +7027,7 @@ if _needs_model:
     _slate_picks = relative_picks(
         candidates, games, model_df,
         totals_payload if st.session_state.get("totals_loaded") else None
-    ) if st.session_state.get("production_view_mode", "Full Slate") == "Full Slate" else []
+    )
     _new_ml = track_top_picks(_slate_picks, games, slate_date)
     _new_totals = 0
     try:
@@ -6960,7 +7119,7 @@ else:
     if not _board_ready:
         st.markdown(
             '<div class="board-head"><span>BETTING BOARD</span>'
-            '<b>Choose a workflow</b></div>', unsafe_allow_html=True)
+            '<b>Today\'s slate</b></div>', unsafe_allow_html=True)
 
         # The workflow choice happens BEFORE the model runs, so Single Game
         # only ever projects the one game you asked for. These widgets share
@@ -6984,16 +7143,13 @@ else:
             _pick = st.selectbox("Matchup", list(_opts.keys()), index=0,
                                  key="board_pre_matchup")
             st.session_state["board_single_pk"] = _opts[_pick]
-            _cost = "one game"
+            _cost = "this game"
         else:
             st.session_state["board_single_pk"] = None
             _cost = f"all {len(games)} games"
-
         st.caption(
-            f"Projecting {_cost}. The model fetches starter game logs, team "
-            f"splits, bullpen numbers and lineups, so this is the slow step — "
-            f"single game is much faster."
-        )
+            f"Projects {_cost} and loads the lines, then marks each pick BET, "
+            f"DON'T BET or LINEUPS NOT FINAL.")
         _lbl = "Run model + load lines (2 credits)" if api_key else "Run model"
         if st.button(_lbl, key="board_run", type="primary",
                      use_container_width=True):
@@ -7002,7 +7158,7 @@ else:
             # rank anything, and the separate button was an easy step to miss.
             if api_key:
                 _now = pd.Timestamp.now(tz="America/New_York")
-                with st.spinner("Loading lines…"):
+                with st.spinner(sass("Loading lines…", "Spilling the tea (loading lines)…")):
                     if _pre_mode == "Single Game":
                         _sg = next((g for g in games if str(g.get("GamePk"))
                                     == str(st.session_state.get("board_single_pk"))), None)
@@ -7025,9 +7181,8 @@ else:
 
     _bh1, _bh2 = st.columns([3, 1])
     _bh1.markdown('<div class="board-head"><span>BETTING BOARD</span>'
-                  '<b>Choose a workflow</b></div>', unsafe_allow_html=True)
-    if _bh2.button("Refresh", key="board_refresh", use_container_width=True,
-                   help="Re-run the model with the latest lineups and stats"):
+                  '<b>Today\'s slate</b></div>', unsafe_allow_html=True)
+    if _bh2.button("Re-run", key="board_refresh", use_container_width=True):
         try:
             reset_dynamic_caches()
         except Exception:
@@ -7036,12 +7191,8 @@ else:
         st.rerun()
 
     mode = st.radio(
-        "View mode",
-        ["Full Slate", "Single Game"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="production_view_mode",
-    )
+        "View mode", ["Full Slate", "Single Game"], horizontal=True,
+        label_visibility="collapsed", key="production_view_mode")
 
     def start_sort(x):
         try:
@@ -7107,82 +7258,16 @@ else:
             st.session_state.totals_scope = f"single game total: {x['away']} @ {x['home']}"
             st.rerun()
 
-        b = x["best"]
-        _sgp = {p["market"]: p for p in relative_picks(
+        _sgp = {(x["GamePk"], p["market"]): p for p in relative_picks(
             [x], games, model_df,
             totals_payload if st.session_state.get("totals_loaded") else None)}
-        _ranks = st.session_state.get("_last_ranks") or {}
-
-        def _sg_verdict(market):
-            p = _sgp.get(market)
-            return pick_verdict(p) if p else VERDICT_NO
-
-        if "MONEYLINE" in _sgp:
-            b = dict(next(z for z in x["all"] if z["team"] == _sgp["MONEYLINE"]["side"]))
-            b["selection"] = _sg_verdict("MONEYLINE")
-        if "_totals_cal" not in st.session_state:
-            st.caption("Totals here aren't put on the market's scale until Full "
-                       "Slate has been run once today.")
-        away_side = next(z for z in x["all"] if z["team"] == x["away"])
-        home_side = next(z for z in x["all"] if z["team"] == x["home"])
-        lineup_text = "Lineups confirmed" if x["lineup_confirmed"] else f'Awaiting lineups • {x.get("lineup_teams_ready",0)}/2 teams posted'
-        _trk_ok, _trk_reason = tracker_qualification(x, "MONEYLINE")
-
-        st.markdown('<div class="kicker">Moneyline</div>', unsafe_allow_html=True)
-        if x.get("market_available") and (x.get("best") or {}).get("selection") in ("BET","BEST BET"):
-            if _trk_ok:
-                st.caption("Tracker status: **QUALIFIED** — this recommendation is eligible to be frozen in forward performance.")
-            else:
-                st.caption(f"Tracker status: **EARLY SIGNAL** — not yet counted in headline performance ({_trk_reason}).")
-        if x["market_available"]:
-            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">{b['selection']}</div><div class="best-pick">{b['team']} ML {b['odds']:+d}</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Best price: {b['book']}</div></div><div class="badge {cls(b['selection'])}">{b['selection']}</div></div><div class="metrics"><div class="metric"><span>Win chance</span><b>{b['prob']*100:.1f}%</b></div><div class="metric"><span>Edge vs price</span><b>{b['edge']*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{b['ev']*100:+.1f}%</b></div><div class="metric"><span>Fair line</span><b>{b['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model weight {x['alpha']*100:.0f}% / market {(1-x['alpha'])*100:.0f}% • {x['books']} books in consensus</div></div>''', unsafe_allow_html=True)
-        else:
-            fav = away_side if away_side['prob'] >= home_side['prob'] else home_side
-            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">MODEL VIEW</div><div class="best-pick">{fav['team']} {fav['prob']*100:.1f}%</div><div class="best-game">{x['away']} @ {x['home']} • {x['time']} • Live moneyline not available</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>{x['away']} win</span><b>{away_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['home']} win</span><b>{home_side['prob']*100:.1f}%</b></div><div class="metric"><span>{x['away']} fair</span><b>{away_side['fair']:+d}</b></div><div class="metric"><span>{x['home']} fair</span><b>{home_side['fair']:+d}</b></div></div><div class="best-game" style="margin-top:10px">{lineup_text} • Model confidence {x['confidence']}/100 • No BET/LEAN verdict without a live price</div></div>''', unsafe_allow_html=True)
-            st.info("This game is modeled and selectable. A betting verdict appears automatically when a valid two-way moneyline is available.")
-
-        st.markdown('<div class="kicker">Totals</div>', unsafe_allow_html=True)
-        row_for_total=model_df.loc[model_df["GamePk"]==x["GamePk"]].iloc[0].to_dict()
-        tctx=engine.totals_projection(row_for_total) if hasattr(engine,"totals_projection") else {"Projected_Total":x['away_proj']+x['home_proj'],"Base_Total":x['away_proj']+x['home_proj'],"Park_Factor":1.,"Weather_Factor":1.,"Weather_Available":False}
-        tev=match_event(totals_payload.get("events",[]),selected_game) if st.session_state.get("totals_loaded") else None
-        tm=totals_market(tev)
-        raw_total=float(tctx["Projected_Total"])
-
-        if tm:
-            tp=build_total_pick(raw_total,tm)
-            if tp:
-                tp["grade"] = _sg_verdict("TOTAL")
-            if tp is None:
-                st.warning("A totals market was returned, but its price pair was incomplete/invalid. Refresh the total or try again later.")
-            else:
-                st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS • {tp["grade"]}</div><div class="best-pick">{tp["side"]} {tp["market_total"]:.1f} {tp["odds"]:+d}</div><div class="best-game">{tp["book"]} • Model {raw_total:.2f} • Calibrated {tp["calibrated_total"]:.2f} • {tp["books"]} books</div></div><div class="badge {cls(tp["grade"])}">{tp["grade"]}</div></div><div class="metrics"><div class="metric"><span>Bet probability</span><b>{tp["prob"]*100:.1f}%</b></div><div class="metric"><span>Edge</span><b>{tp["edge"]*100:+.1f}%</b></div><div class="metric"><span>EV</span><b>{tp["ev"]*100:+.1f}%</b></div><div class="metric"><span>Model weight</span><b>{TOTALS_MODEL_WEIGHT*100:.0f}%</b></div></div><div class="best-game" style="margin-top:10px">Over {tp["over_odds"]:+d} • {tp["over_prob"]*100:.1f}% | Under {tp["under_odds"]:+d} • {tp["under_prob"]*100:.1f}% • Park and weather applied (weather skipped under a roof).</div></div>''',unsafe_allow_html=True)
-        else:
-            temp_txt = f'{float(tctx["Temp"]):.0f}°F' if tctx.get("Temp") is not None and pd.notna(tctx.get("Temp")) else "—"
-            st.markdown(f'''<div class="best-card"><div class="best-top"><div><div class="best-tag">TOTALS MODEL VIEW</div><div class="best-pick">Projected total {raw_total:.2f}</div><div class="best-game">Load this game's total only when you want an official market grade.</div></div><div class="badge badge-lean">MODEL ONLY</div></div><div class="metrics"><div class="metric"><span>Projected total</span><b>{raw_total:.2f}</b></div><div class="metric"><span>Park context</span><b>{float(tctx.get("Park_Factor",1.0)):.3f}</b></div><div class="metric"><span>Temperature</span><b>{temp_txt}</b></div><div class="metric"><span>Lineups</span><b>{"CONFIRMED" if x["lineup_confirmed"] else "MODEL"}</b></div></div></div>''',unsafe_allow_html=True)
-
-
-        st.markdown('<div class="kicker">More</div>', unsafe_allow_html=True)
-        with st.expander("Download detailed game analysis", expanded=False):
-            total_download_row = totals_download_row(row_for_total, tctx, tp if tm and 'tp' in locals() else None)
-            total_download_df = pd.DataFrame([total_download_row])
-            st.download_button(
-                "Download Totals Detail",
-                data=total_download_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"mlb_game_totals_{x['GamePk']}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"download_total_{x['GamePk']}",
-            )
-            diag = game_diagnostics_df(x, slate_date)
-            st.download_button(
-                "Download Full Game Analysis",
-                diag.to_csv(index=False).encode("utf-8"),
-                file_name=f"mlb_game_diagnostics_{x['GamePk']}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"download_diag_{x['GamePk']}",
-            )
-            st.caption("Use these files when you want a deeper breakdown in ChatGPT.")
+        _render_game_card(x, _sgp, model_df)
+        if not _sgp:
+            st.caption("No lines loaded for this game yet. Tap **Reload this "
+                       "game's lines** above.")
+        elif "_totals_cal" not in st.session_state:
+            st.caption("Tip: run Full Slate once a day so totals here are "
+                       "judged on the same scale as the rest of the slate.")
 
     else:
         update_full_slate = st.button("Reload lines (2 credits)", use_container_width=True, type="secondary", key="update_full_slate_odds")
@@ -7270,14 +7355,18 @@ else:
             st.session_state["_last_ranks"] = {
                 (str(p["cx"]["GamePk"]), p["market"]): p["rank"] for p in _picks}
 
-            st.markdown('<div class="kicker">Tonight\'s bets</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kicker">{sass("Tonight&#39;s bets", "Tonight&#39;s bets, darling")}</div>',
+                        unsafe_allow_html=True)
             st.slider("Bet when EV at the price is at least (%)", 1.0, 8.0,
                       BET_MIN_EV_DEFAULT, 0.5, key="bet_min_ev")
-            st.caption(
+            st.caption(sass(
                 "BET = clears that bar and both lineups are in; it's logged to the "
                 "tracker. LINEUPS NOT FINAL = clears the bar, check back after "
                 "lineups post. Everything else is DON'T BET. Confirm 734's price "
-                "on the Prices page first.")
+                "on the Prices page first.",
+                "BET IT = clears the bar and the lineups are in, so it's on the "
+                "record. WAIT FOR LINEUPS = patience, babe. Everything else is a "
+                "HARD PASS. And check 734's price first; we don't pay retail."))
             _tot = [p for p in _picks if p["market"] == "TOTAL"]
             if _tot:
                 _ov = sum(1 for p in _tot if p["side"] == "OVER")
@@ -7293,7 +7382,7 @@ else:
                     tag = pick_verdict(p)
                     st.markdown(
                         f'<div class="top-play-card">'
-                        f'<div class="top-play-rank">{tag} • {p["label"]} • {gx["time"]}</div>'
+                        f'<div class="top-play-rank">{say(tag)} • {p["label"]} • {gx["time"]}</div>'
                         f'<div class="top-play-main">{p["main"]}</div>'
                         f'<div class="top-play-sub">{gx["away"]} @ {gx["home"]} • {p["book"]} • '
                         f'Model {p["prob"]*100:.1f}% vs fair {p["fair"]*100:.1f}% • '
@@ -7302,7 +7391,8 @@ else:
                         unsafe_allow_html=True,
                     )
             elif _picks:
-                st.caption("No bets right now.")
+                st.caption(sass("No bets right now.",
+                                "Nothing worth your money right now. Save it for brunch."))
             elif st.session_state.get("odds_loaded") or st.session_state.get("totals_loaded"):
                 st.caption("No priced games to rank yet.")
             else:
@@ -7314,76 +7404,7 @@ else:
             st.markdown('<div class="kicker">Upcoming Games — Chronological</div>', unsafe_allow_html=True)
 
             for cx in sorted(upcoming, key=start_sort):
-                b = cx.get("best") or {}
-                if cx.get("market_available"):
-                    ml_grade = b.get("selection","PASS")
-                    ml_main = f'{b.get("team")} ML {b.get("odds"):+d}' if b.get("odds") is not None else "Moneyline unavailable"
-                    ml_sub = f'{b.get("book")} • Edge {b.get("edge",0)*100:+.1f}% • EV {b.get("ev",0)*100:+.1f}%'
-                else:
-                    ml_grade = "MODEL"
-                    ml_main = "Model only"
-                    ml_sub = f'Model fair: {cx["away"]} {fair_ml(next(z["prob"] for z in cx["all"] if z["team"]==cx["away"])):+d} / {cx["home"]} {fair_ml(next(z["prob"] for z in cx["all"] if z["team"]==cx["home"])):+d}'
-
-                # Rank, not a fixed-threshold grade: the cards and Top Plays
-                # now tell the same story.
-                _pm = _pick_map.get((cx["GamePk"], "MONEYLINE"))
-                if _pm:
-                    ml_grade, ml_main, ml_sub = _rank_tag(_pm), _pm["main"], _pick_sub(_pm)
-
-                tp, tctx = total_map.get(cx["GamePk"], (None, None))
-                if tp:
-                    total_grade = tp.get("grade","PASS")
-                    total_main = f'{tp.get("side")} {tp.get("market_total"):.1f} {tp.get("odds"):+d}'
-                    total_sub = f'{tp.get("book")} • Edge {tp.get("edge",0)*100:+.1f}% • EV {tp.get("ev",0)*100:+.1f}%'
-                else:
-                    total_grade = "MODEL"
-                    raw_total = None
-                    mr = model_df.loc[model_df["GamePk"] == cx["GamePk"]]
-                    if not mr.empty:
-                        ctx0 = engine.totals_projection(mr.iloc[0].to_dict()) if hasattr(engine,"totals_projection") else {"Projected_Total":cx["away_proj"]+cx["home_proj"]}
-                        raw_total = float(ctx0["Projected_Total"])
-                    total_main = "Model only"
-                    total_sub = f'Model total {raw_total:.2f}' if raw_total is not None else "Model total unavailable"
-                _pt = _pick_map.get((cx["GamePk"], "TOTAL"))
-                if _pt:
-                    total_grade, total_main, total_sub = _rank_tag(_pt), _pt["main"], _pick_sub(_pt)
-
-                def grade_class(g):
-                    return {
-                        "BEST BET":"grade-best","BET":"grade-bet","LEAN":"grade-lean",
-                        "PASS":"grade-pass","MODEL":"grade-wait","MODEL ONLY":"grade-wait",
-                        "DON'T BET":"grade-pass","LINEUPS NOT FINAL":"grade-wait",
-                    }.get(g, "grade-wait")
-
-                lineup_label = cx.get("lineup_display") or ("LINEUPS CONFIRMED" if cx.get("lineup_confirmed") else "AWAITING LINEUPS • 0/2")
-                away_lc = int(cx.get("away_lineup_count", 0) or 0)
-                home_lc = int(cx.get("home_lineup_count", 0) or 0)
-                lineup_diag = (
-                    f'Lineup feed: {cx["away"]} {away_lc}/9 • {cx["home"]} {home_lc}/9'
-                    if not cx.get("lineup_confirmed")
-                    else 'Both starting lineups loaded • lineup adjustment active'
-                )
-                tracker_diag = tracker_candidate_status(cx, "MONEYLINE")
-                tracker_text = (
-                    "Tracker ready"
-                    if tracker_diag["qualified"]
-                    else f'Tracker waiting: {tracker_diag["reason"]}'
-                )
-                html = (
-                    f'<div class="combo-card"><div class="combo-head"><div>'
-                    f'<div class="combo-time">{cx["time"]} • {lineup_label}</div>'
-                    f'<div class="combo-match">{cx["away"]} @ {cx["home"]}</div>'
-                    f'<div class="combo-sp">{cx["away_sp"]} vs {cx["home_sp"]}</div>'
-                    f'<div class="lineup-feed-diag">{lineup_diag}</div>'
-                    f'<div class="lineup-feed-diag">{_data_status_line(cx)}</div>'
-                    f'<div class="tracker-gate-diag">{tracker_text}</div></div></div>'
-                    f'<div class="market-row"><div class="market-name">ML</div><div><div class="market-main">{ml_main}</div>'
-                    f'<div class="market-sub">{ml_sub}</div></div><div class="market-grade {grade_class(ml_grade)}">{ml_grade}</div></div>'
-                    f'<div class="market-row"><div class="market-name">TOTAL</div><div><div class="market-main">{total_main}</div>'
-                    f'<div class="market-sub">{total_sub}</div></div><div class="market-grade {grade_class(total_grade)}">{total_grade}</div></div>'
-                    f'</div>'
-                )
-                st.markdown(html, unsafe_allow_html=True)
+                _render_game_card(cx, _pick_map, model_df)
 
         st.markdown('<div class="kicker">Downloads</div>', unsafe_allow_html=True)
         with st.expander("Download detailed analysis", expanded=False):
