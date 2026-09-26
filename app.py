@@ -3435,7 +3435,7 @@ def fetch_games_for_date(selected_date=None):
         "Date selection requires the v1.0.3 model.py. Replace model.py in GitHub with the v1.0.3 file, then reboot the app."
     )
 
-APP_VERSION = "3.15.0-ML-EDGE-TEST"
+APP_VERSION = "3.17.0-EXTRA"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "baseball_mlb"
 
@@ -6615,6 +6615,153 @@ def _clv_prompt(tracker_df):
         pass
 
 
+# --- win celebration ----------------------------------------------------------
+PARTY_WINDOW_HOURS = 12
+_PARTY_COLORS = ["#e40303", "#ff8c00", "#ffed00", "#008026", "#24408e", "#732982",
+                 "#5bcefa", "#f5a9b8", "#ffffff"]
+
+
+PARTY_TITLES = ["SLAYED", "ATE.", "MOTHER.", "PERIODT.", "ICONIC.", "SERVED."]
+PARTY_LINES = [
+    "Ate and left no crumbs.",
+    "The sportsbook is SHOOK.",
+    "Serving odds realness.",
+    "Mother is mothering.",
+    "Cash out, darling. You earned it.",
+    "It's giving… profit.",
+    "Book it. Literally.",
+    "The model? Humbled. You? Iconic.",
+    "Somebody call 734, they're not okay.",
+]
+LOSS_LINES = [
+    "Flopped. We don't talk about it.",
+    "{pick} owes you an apology. And a refund.",
+    "Not the vibe. Next.",
+    "That one's in its villain era.",
+    "A donation to the sportsbook. How generous.",
+]
+
+
+def _party_html(title, lines):
+    """Full-screen, tap-through overlay. Disco ball, crowns, a dance line,
+    a shimmering rainbow headline, a sassy one-liner, paper confetti and
+    rising emoji. Fades itself out after ~6.5 seconds."""
+    rng = np.random.default_rng()
+    confetti = "".join(
+        f'<i style="left:{rng.uniform(0, 100):.1f}%;'
+        f'background:{_PARTY_COLORS[k % len(_PARTY_COLORS)]};'
+        f'animation-delay:{rng.uniform(0, 1.6):.2f}s;'
+        f'animation-duration:{rng.uniform(2.4, 4.4):.2f}s"></i>'
+        for k in range(80))
+    floaters = "".join(
+        f'<b style="left:{rng.uniform(2, 95):.1f}%;'
+        f'animation-delay:{rng.uniform(0, 2.2):.2f}s;'
+        f'animation-duration:{rng.uniform(3.0, 4.8):.2f}s">{e}</b>'
+        for e in rng.choice(["💖", "✨", "💅", "🌈", "💋", "🦄", "👑", "🔥"], 18))
+    zinger = str(rng.choice(PARTY_LINES))
+    sub = "".join(f'<div class="ns-party-sub">{l}</div>' for l in lines)
+    return f"""<style>
+.ns-party{{position:fixed;inset:0;z-index:99999;pointer-events:none;overflow:hidden;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+  animation:nsFade 6.5s ease forwards;}}
+.ns-party::before{{content:"";position:absolute;inset:0;z-index:-1;opacity:.35;
+  background:linear-gradient(135deg,#e40303,#ff8c00,#ffed00,#008026,#24408e,#732982,#f5a9b8,#5bcefa);
+  background-size:400% 400%;animation:nsSweep 2.2s ease-in-out infinite alternate;}}
+.ns-party::after{{content:"";position:absolute;inset:0;z-index:-2;background:rgba(10,12,16,.72);}}
+@keyframes nsSweep{{from{{background-position:0% 50%}}to{{background-position:100% 50%}}}}
+@keyframes nsFade{{0%{{opacity:0}}6%{{opacity:1}}85%{{opacity:1}}100%{{opacity:0;visibility:hidden}}}}
+.ns-party-top{{font-size:2.4rem;letter-spacing:.2em;}}
+.ns-party-top span{{display:inline-block;animation:nsTwinkle .8s ease-in-out infinite alternate;}}
+.ns-party-top span:nth-child(3){{animation:nsSpin 1.1s linear infinite;font-size:3.2rem;}}
+@keyframes nsTwinkle{{from{{transform:scale(.8) rotate(-10deg);opacity:.7}}to{{transform:scale(1.15) rotate(10deg);opacity:1}}}}
+@keyframes nsSpin{{from{{transform:rotate(0)}}to{{transform:rotate(360deg)}}}}
+.ns-party-dancers span{{display:inline-block;font-size:2.05rem;margin:0 .04em;
+  animation:nsDance .42s ease-in-out infinite alternate;}}
+.ns-party-dancers span:nth-child(even){{animation-delay:.21s;}}
+.ns-party-dancers span:first-child,.ns-party-dancers span:last-child{{animation-name:nsHop;}}
+@keyframes nsDance{{0%{{transform:translateY(0) rotate(-16deg)}}100%{{transform:translateY(-26px) rotate(16deg) scale(1.14)}}}}
+@keyframes nsHop{{0%{{transform:translateY(0) scaleX(1)}}100%{{transform:translateY(-34px) scaleX(-1)}}}}
+.ns-party-title{{font-size:3rem;font-weight:900;letter-spacing:.03em;
+  background:linear-gradient(90deg,#e40303,#ff8c00,#ffed00,#008026,#24408e,#732982,#e40303);
+  background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;
+  -webkit-text-stroke:1px rgba(255,255,255,.45);filter:drop-shadow(0 0 12px rgba(255,255,255,.45));
+  animation:nsShimmer 1.1s linear infinite,nsWiggle .5s ease-in-out infinite alternate;}}
+@keyframes nsShimmer{{to{{background-position:200% center}}}}
+@keyframes nsWiggle{{from{{transform:scale(1) rotate(-3deg)}}to{{transform:scale(1.1) rotate(3deg)}}}}
+.ns-party-zinger{{font-size:1.1rem;font-style:italic;font-weight:600;color:#f5a9b8;
+  text-shadow:0 1px 4px rgba(0,0,0,.9);padding:0 18px;text-align:center;}}
+.ns-party-sub{{font-family:var(--mono,monospace);font-size:.92rem;color:#fff;
+  text-shadow:0 1px 3px rgba(0,0,0,.9);}}
+.ns-party i{{position:absolute;top:-6vh;width:8px;height:14px;border-radius:2px;
+  animation-name:nsFall;animation-timing-function:linear;animation-fill-mode:forwards;}}
+@keyframes nsFall{{to{{transform:translateY(115vh) rotate(780deg)}}}}
+.ns-party b{{position:absolute;bottom:-8vh;font-size:1.8rem;font-weight:400;
+  animation-name:nsRise;animation-timing-function:ease-out;animation-fill-mode:forwards;}}
+@keyframes nsRise{{0%{{transform:translateY(0) scale(.7);opacity:0}}15%{{opacity:1}}
+  100%{{transform:translateY(-115vh) scale(1.3) rotate(25deg);opacity:0}}}}
+@media (prefers-reduced-motion: reduce){{
+  .ns-party *,.ns-party::before{{animation:none!important;}} .ns-party i,.ns-party b{{display:none;}}}}
+</style>
+<div class="ns-party">
+  <div class="ns-party-top"><span>👑</span><span>✨</span><span>🪩</span><span>✨</span><span>👑</span></div>
+  <div class="ns-party-dancers"><span>🦄</span><span>💃</span><span>🕺</span><span>🏳️‍🌈</span><span>🏳️‍⚧️</span><span>🕺</span><span>💃</span><span>🦄</span></div>
+  <div class="ns-party-title">{title}</div>
+  <div class="ns-party-zinger">{zinger}</div>
+  {sub}
+  {confetti}{floaters}
+</div>"""
+
+
+def maybe_celebrate(force_preview=False):
+    """Throw the party once for each tracked win graded in the last 12 hours.
+    Opening the app the morning after still shows last night's wins, once."""
+    if not st.session_state.get("win_party", True) and not force_preview:
+        return
+    if force_preview:
+        st.markdown(_party_html(sass("WINNER", str(np.random.choice(PARTY_TITLES))),
+                                ["New York Yankees ML -110 • +0.91u"]), unsafe_allow_html=True)
+        return
+    try:
+        df = load_tracker()
+        if df.empty:
+            return
+        seen = st.session_state.setdefault("_celebrated", set())
+        if _sassy():
+            losses = df[df["Result"].fillna("").astype(str).str.upper().eq("LOSS")]
+            if not losses.empty:
+                lg = pd.to_datetime(losses["Graded_At_ET"], errors="coerce", utc=True)
+                lrec = losses[(pd.Timestamp.now(tz="UTC") - lg).dt.total_seconds()
+                              <= PARTY_WINDOW_HOURS * 3600]
+                lnew = lrec[~lrec["Record_Key"].astype(str).isin(seen)]
+                for _, r in lnew.head(2).iterrows():
+                    line = str(np.random.choice(LOSS_LINES)).format(pick=r.get("Pick"))
+                    st.toast(f"💔 {line}")
+                seen.update(lnew["Record_Key"].astype(str))
+        wins = df[df["Result"].fillna("").astype(str).str.upper().eq("WIN")]
+        if wins.empty:
+            return
+        graded = pd.to_datetime(wins["Graded_At_ET"], errors="coerce", utc=True)
+        recent = wins[(pd.Timestamp.now(tz="UTC") - graded).dt.total_seconds()
+                      <= PARTY_WINDOW_HOURS * 3600]
+        new = recent[~recent["Record_Key"].astype(str).isin(seen)]
+        if new.empty:
+            return
+        lines = []
+        for _, r in new.head(3).iterrows():
+            odds = valid_odds(r.get("Odds"))
+            units = _american_profit(odds) if odds is not None else 0.0
+            lines.append(f'{r.get("Pick")} {odds:+d} • +{units:.2f}u' if odds is not None
+                         else str(r.get("Pick")))
+        if len(new) > 3:
+            lines.append(f"+ {len(new) - 3} more")
+        title = sass("WINNER", str(np.random.choice(PARTY_TITLES))) + (
+            f" ×{len(new)}" if len(new) > 1 else "")
+        st.markdown(_party_html(title, lines), unsafe_allow_html=True)
+        seen.update(new["Record_Key"].astype(str))
+    except Exception:
+        pass   # a party must never break the app
+
+
 def render_auto_tracker_page(games, slate_date):
     """Refresh Tracker across midnight without using paid odds calls.
 
@@ -6624,6 +6771,7 @@ def render_auto_tracker_page(games, slate_date):
     """
     # grade_tracker is internally throttled to once per minute.
     grade_tracker(force=False)
+    maybe_celebrate()
     tracker_df = load_tracker()
     _clv_prompt(tracker_df)
     active_dates = _active_tracker_dates(tracker_df, slate_date)
@@ -6893,6 +7041,10 @@ def _set_theme():
             st.query_params.pop("tone", None)
         else:
             st.query_params["tone"] = "plain"
+        if st.session_state.get("win_party", True):
+            st.query_params.pop("party", None)
+        else:
+            st.query_params["party"] = "off"
     except Exception:
         pass
 
@@ -6912,6 +7064,9 @@ def render_account_page():
     st.markdown('<div class="kicker">Appearance</div>', unsafe_allow_html=True)
     st.toggle("Pride theme 🏳️‍🌈", key="pride_theme", on_change=_set_theme)
     st.toggle("Sassy mode 💅", key="sassy_mode", on_change=_set_theme)
+    st.toggle("Win dance party 🪩", key="win_party", on_change=_set_theme)
+    if st.button("Preview the party", key="party_preview"):
+        maybe_celebrate(force_preview=True)
     st.markdown(
         f'<div class="account-card">'
         f'<div><span>APP</span><b>{APP_VERSION}</b></div>'
@@ -7059,6 +7214,12 @@ except Exception:
     _qp_tone = None
 if "sassy_mode" not in st.session_state:
     st.session_state["sassy_mode"] = (_qp_tone != "plain")
+try:
+    _qp_party = st.query_params.get("party")
+except Exception:
+    _qp_party = None
+if "win_party" not in st.session_state:
+    st.session_state["win_party"] = (_qp_party != "off")
 
 if st.session_state.get("pride_theme", True):
     st.markdown(f"""<style>
@@ -7368,6 +7529,7 @@ if _needs_model:
 else:
     _new_ml = _new_totals = 0
 _graded_now = grade_tracker(force=False)
+maybe_celebrate()
 if _new_ml or _new_totals:
     st.toast(f"Tracked {_new_ml + _new_totals} new top pick(s).")
 if _graded_now:
